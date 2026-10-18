@@ -1,10 +1,12 @@
 import type { EvidenceItem } from "./studio";
 
 export type ReferenceRecord = Record<string, unknown>;
-export type ReferenceSection = "plot" | "characters" | "settings" | "style" | "rhythm" | "opening" | "setting_features" | "raw_entries" | "metadata";
+export type ReferenceSection = "plot" | "characters" | "settings" | "style" | "rhythm" | "opening" | "setting_features" | "raw_entries" | "metadata" | "era_background";
 export type ReferenceChunkRange = { key: string; title: string; startChapter: number; endChapter: number };
 export type ReferenceState = {
   document_id: string;
+  schema_version?: number;
+  as_of_chapter?: number | null;
   revision: number;
   structure_type: "narrative" | "setting_collection";
   sections: Record<ReferenceSection, unknown>;
@@ -40,6 +42,7 @@ export function characterExperiences(character: ReferenceRecord, plot: unknown):
 }
 export function sectionCount(state: ReferenceState | null, section: ReferenceSection) {
   const data = state?.sections[section];
+  if (section === "plot" && Array.isArray(record(data).events)) return records(record(data).events).length;
   if (section === "plot") return records(record(data).epochs).reduce((n, e) => n + records(e.periods).reduce((sum, p) => sum + records(p.events).length, 0), 0);
   return Array.isArray(data) ? data.length : Object.keys(record(data)).length;
 }
@@ -60,3 +63,12 @@ export function referenceChunkLabel(chapter: unknown, ranges: ReferenceChunkRang
   if (number === null) return "未标章节";
   return ranges.find(c => number >= c.startChapter && number <= c.endChapter)?.title || `第 ${number} 章 · 未分段`;
 }
+
+export const eventRecords = (plot: unknown): ReferenceRecord[] => {
+  const p = record(plot);
+  return Array.isArray(p.events) ? records(p.events) : records(p.epochs).flatMap(e => records(e.periods).flatMap(p => records(p.events)));
+};
+export const revealChapter = (value: unknown) => Number(record(record(value).revealed_at).chapter || record(value).first_chapter || 0);
+export const stableId = (prefix: string) => `${prefix}_${crypto.randomUUID()}`;
+export const changeTypes = [["addition", "补充"], ["change", "变化"], ["revelation", "揭露"], ["correction", "修正"]];
+export const lineStatuses = [["open", "开启"], ["progressing", "推进"], ["resolved", "解决"], ["abandoned", "放弃"]];

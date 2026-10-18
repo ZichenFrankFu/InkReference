@@ -18,6 +18,7 @@ import posixpath
 import re
 import sqlite3
 import stat
+import threading
 import uuid
 import zipfile
 from datetime import datetime, timezone
@@ -28,6 +29,7 @@ from urllib.parse import unquote, urlsplit
 from xml.etree import ElementTree as ET
 
 from .database import DataError
+from . import chapter_storage
 from .chapter_layout import (chapter_label, chapter_body_span, chapter_sequence, duplicate_heading_repairs,
                              expand_missing_chapters, normalize_chapter_body, normalize_document_chapter_bodies,
                              renumber_after_deletion)
@@ -51,7 +53,13 @@ _CURRENT_CHARACTERS_SQL = ("COALESCE((SELECT characters FROM doc_version_views W
                            "FROM doc_versions WHERE id=doc_documents.latest_version_id),length(source_text))")
 _META_COLUMNS = ("id,filename,title,work_id,format,encoding,original_sha256,latest_version_id,created_at,"
                  "length(original) AS original_bytes,length(source_text) AS source_characters,"
-                 + _CURRENT_CHARACTERS_SQL + " AS current_characters")
+                 + _CURRENT_CHARACTERS_SQL + " AS current_characters,"
+                 "(SELECT author FROM doc_book_metadata WHERE document_id=doc_documents.id) AS author,"
+                 "(SELECT earliest_update_at FROM doc_book_metadata WHERE document_id=doc_documents.id) AS earliest_update_at,"
+                 "(SELECT book_type FROM doc_book_metadata WHERE document_id=doc_documents.id) AS book_type,"
+                 "(SELECT revision FROM doc_book_metadata WHERE document_id=doc_documents.id) AS metadata_revision,"
+                 "(SELECT folder_name FROM doc_book_metadata WHERE document_id=doc_documents.id) AS storage_folder,"
+                 "(SELECT state FROM doc_book_metadata WHERE document_id=doc_documents.id) AS storage_state")
 
 
 def _sha(raw: bytes) -> str:
@@ -442,6 +450,10 @@ class DocumentStore:
         self.data_dir = Path(data_dir)
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.db_path = self.data_dir / "workbench.sqlite3"
+        self.books_dir = self.data_dir / "books"
+        self._storage_ready = False
+        self._storage_syncing = False
+        self._storage_lock = threading.RLock()
         with self._connection() as connection:
             connection.execute("PRAGMA journal_mode=WAL")
             connection.executescript("""
@@ -492,6 +504,28 @@ class DocumentStore:
                     version_id TEXT PRIMARY KEY REFERENCES doc_versions(id) ON DELETE CASCADE,
                     has_source_provenance INTEGER NOT NULL, active_source_ids_json TEXT
                 );
+                CREATE TABLE IF NOT EXISTS doc_book_metadata (
+                    document_id TEXT PRIMARY KEY REFERENCES doc_documents(id) ON DELETE CASCADE,
+                    author TEXT NOT NULL DEFAULT '', earliest_update_at TEXT,
+                    book_type TEXT NOT NULL DEFAULT '', revision INTEGER NOT NULL DEFAULT 1,
+                    folder_name TEXT, state TEXT NOT NULL DEFAULT 'pending',
+                    materialized_version_id TEXT, error TEXT
+                );
+                CREATE TABLE IF NOT EXISTS doc_storage_pending (
+                    document_id TEXT PRIMARY KEY REFERENCES doc_documents(id) ON DELETE CASCADE,
+                    version_id TEXT NOT NULL, parent_version_id TEXT, changed_ids_json TEXT
+                );
+                CREATE TRIGGER IF NOT EXISTS doc_chapter_files_pending
+                AFTER UPDATE OF latest_version_id ON doc_documents
+                WHEN NEW.latest_version_id IS NOT NULL
+                BEGIN
+                    INSERT INTO doc_storage_pending(document_id,version_id) VALUES (NEW.id,NEW.latest_version_id)
+                    ON CONFLICT(document_id) DO UPDATE SET
+                    parent_version_id=CASE WHEN version_id=NEW.latest_version_id THEN parent_version_id ELSE NULL END,
+                    changed_ids_json=CASE WHEN version_id=NEW.latest_version_id THEN changed_ids_json ELSE NULL END,
+                    version_id=NEW.latest_version_id;
+                    UPDATE doc_book_metadata SET state='pending',error=NULL WHERE document_id=NEW.id;
+                END;
                 CREATE TRIGGER IF NOT EXISTS doc_original_immutable
                 BEFORE UPDATE OF original,original_sha256,source_text,filename,encoding,format ON doc_documents
                 BEGIN SELECT RAISE(ABORT, 'document original is immutable'); END;
@@ -530,24 +564,34 @@ class DocumentStore:
                     connection.execute(f"ALTER TABLE doc_ingestions ADD COLUMN {column} TEXT")
             if "active_source_ids_json" not in {row["name"] for row in connection.execute("PRAGMA table_info(doc_version_meta)")}:
                 connection.execute("ALTER TABLE doc_version_meta ADD COLUMN active_source_ids_json TEXT")
+            # Old projects remain cheap to open: only queue missing projections.
+            # Explicit materialization/export or the next mutation rebuilds them.
+            connection.execute("INSERT OR IGNORE INTO doc_book_metadata(document_id) SELECT id FROM doc_documents")
+            connection.execute("INSERT OR IGNORE INTO doc_storage_pending(document_id,version_id) "
+                               "SELECT id,latest_version_id FROM doc_documents WHERE latest_version_id IS NOT NULL "
+                               "AND id IN (SELECT document_id FROM doc_book_metadata WHERE state='pending')")
+        self._storage_ready = True
 
     @contextlib.contextmanager
-    def _connection(self) -> Iterator[sqlite3.Connection]:
+    def _connection(self, *, storage_document_id: str | None = None) -> Iterator[sqlite3.Connection]:
         connection = sqlite3.connect(self.db_path, timeout=30)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
         try:
             yield connection
+            changed = connection.total_changes > 0
             connection.commit()
         except Exception:
             connection.rollback()
             raise
         finally:
             connection.close()
+        if changed and storage_document_id and self._storage_ready and not self._storage_syncing:
+            self._sync_chapter_files(storage_document_id)
 
     @staticmethod
     def _document(connection: sqlite3.Connection, identifier: str) -> sqlite3.Row:
-        row = connection.execute(f"SELECT *, {_CURRENT_CHARACTERS_SQL} AS current_characters FROM doc_documents WHERE id=?", (identifier,)).fetchone()
+        row = connection.execute(f"SELECT *, {_META_COLUMNS} FROM doc_documents WHERE id=?", (identifier,)).fetchone()
         if row is None:
             raise DataError(404, "全文文档不存在")
         return row
@@ -558,7 +602,165 @@ class DocumentStore:
                                           "original_sha256", "latest_version_id", "created_at")} | {
             "original_bytes": row["original_bytes"] if "original_bytes" in row.keys() else len(row["original"]),
             "source_characters": row["source_characters"] if "source_characters" in row.keys() else len(row["source_text"]),
-            "current_characters": row["current_characters"]}
+            "current_characters": row["current_characters"], "book_title": row["title"],
+            "author": (row["author"] or "") if "author" in row.keys() else "",
+            "earliest_update_at": row["earliest_update_at"] if "earliest_update_at" in row.keys() else None,
+            "book_type": (row["book_type"] or "") if "book_type" in row.keys() else "",
+            "metadata_revision": row["metadata_revision"] if "metadata_revision" in row.keys() else 1,
+            "storage_folder": row["storage_folder"] if "storage_folder" in row.keys() else None,
+            "storage_state": row["storage_state"] if "storage_state" in row.keys() else "pending"}
+
+    def get_book_metadata(self, document_id: str) -> dict[str, Any]:
+        with self._connection() as connection:
+            row = connection.execute("SELECT d.id,d.title,d.latest_version_id,m.* FROM doc_documents d "
+                                     "JOIN doc_book_metadata m ON m.document_id=d.id WHERE d.id=?", (document_id,)).fetchone()
+            if row is None:
+                raise DataError(404, "全文文档不存在")
+            return {"document_id": document_id, "book_title": row["title"], "title": row["title"],
+                    "author": row["author"], "earliest_update_at": row["earliest_update_at"],
+                    "book_type": row["book_type"], "metadata_revision": row["revision"],
+                    "version_id": row["latest_version_id"], "storage_folder": row["folder_name"],
+                    "storage_state": row["state"], "storage_error": row["error"]}
+
+    def update_book_metadata(self, document_id: str, values: dict[str, Any], *,
+                             expected_version_id: str, expected_revision: int | None = None) -> dict[str, Any]:
+        try:
+            selected = chapter_storage.validate_metadata(values)
+        except ValueError as error:
+            raise DataError(422, str(error)) from None
+        with self._connection(storage_document_id=document_id) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute("SELECT d.title,d.latest_version_id,m.* FROM doc_documents d "
+                                     "JOIN doc_book_metadata m ON m.document_id=d.id WHERE d.id=?", (document_id,)).fetchone()
+            if row is None:
+                raise DataError(404, "全文文档不存在")
+            if row["latest_version_id"] != expected_version_id or (expected_revision is not None and row["revision"] != expected_revision):
+                raise DataError(409, "作品信息或正文已有更新，请刷新后保存")
+            title = selected.get("title", row["title"])
+            connection.execute("UPDATE doc_documents SET title=? WHERE id=?", (title, document_id))
+            connection.execute("UPDATE doc_book_metadata SET author=?,earliest_update_at=?,book_type=?,revision=revision+1,state='pending',error=NULL WHERE document_id=?",
+                               (selected.get("author", row["author"]), selected.get("earliest_update_at", row["earliest_update_at"]),
+                                selected.get("book_type", row["book_type"]), document_id))
+            connection.execute("INSERT INTO doc_storage_pending(document_id,version_id) VALUES (?,?) "
+                               "ON CONFLICT(document_id) DO UPDATE SET version_id=excluded.version_id,parent_version_id=NULL,changed_ids_json=NULL",
+                               (document_id, expected_version_id))
+        return self.get_book_metadata(document_id)
+
+    def _sync_chapter_files(self, document_id: str | None = None, *, force: bool = False) -> None:
+        """Publish committed current views; failed disk writes stay recoverable."""
+        with self._storage_lock:
+            if self._storage_syncing:
+                return
+            self._storage_syncing = True
+            try:
+                with contextlib.closing(sqlite3.connect(self.db_path, timeout=30)) as source, source:
+                    source.row_factory = sqlite3.Row
+                    pending = source.execute("SELECT document_id FROM doc_storage_pending" +
+                                             (" WHERE document_id=?" if document_id else ""),
+                                             (document_id,) if document_id else ()).fetchall()
+                for item in pending:
+                    identity = item["document_id"]
+                    try:
+                        # Legacy backups can reconstruct missing derived views
+                        # from SQLite without altering originals or history.
+                        self.get_version_summary(identity)
+                        with contextlib.closing(sqlite3.connect(self.db_path, timeout=30)) as connection, connection:
+                            connection.row_factory = sqlite3.Row
+                            connection.execute("BEGIN IMMEDIATE")
+                            row = connection.execute("SELECT d.title,d.created_at,d.latest_version_id,d.original_sha256,m.*,p.parent_version_id,p.changed_ids_json "
+                                                     "FROM doc_documents d JOIN doc_book_metadata m ON m.document_id=d.id "
+                                                     "JOIN doc_storage_pending p ON p.document_id=d.id WHERE d.id=?", (identity,)).fetchone()
+                            if row is None:
+                                continue
+                            folder_name = row["folder_name"]
+                            title_name = chapter_storage.safe_name(row["title"])
+                            previous_folder = folder_name
+                            if not folder_name or not (folder_name == title_name or folder_name.startswith(title_name + "--")):
+                                folder_name = title_name
+                                occupied = connection.execute("SELECT document_id FROM doc_book_metadata WHERE folder_name=? COLLATE NOCASE AND document_id<>?", (folder_name, identity)).fetchone()
+                                if occupied or ((self.books_dir / folder_name).exists() and chapter_storage.manifest_owner(self.books_dir, folder_name) != identity):
+                                    folder_name = title_name + "--" + identity[:12]
+                            metadata = {"document_id": identity, "book_title": row["title"], "title": row["title"],
+                                        "author": row["author"], "earliest_update_at": row["earliest_update_at"],
+                                        "book_type": row["book_type"], "metadata_revision": row["revision"],
+                                        "version_id": row["latest_version_id"], "imported_at": row["created_at"],
+                                        "original_sha256": row["original_sha256"]}
+                            incremental = (not force and folder_name == previous_folder and row["changed_ids_json"] is not None
+                                           and row["materialized_version_id"] == row["parent_version_id"])
+                            if incremental:
+                                manifest = chapter_storage._owned_manifest(self.books_dir / folder_name, identity)
+                                incremental = bool(manifest and manifest.get("version_id") == row["parent_version_id"])
+                            changed_ids = set(json.loads(row["changed_ids_json"])) if incremental else None
+                            # Unchanged chapter bodies are not fetched from SQLite.
+                            views = connection.execute("SELECT chapter_id,metadata_json" +
+                                                       (",text" if changed_ids is None else "") +
+                                                       " FROM doc_chapter_views WHERE version_id=? ORDER BY chapter_order", (row["latest_version_id"],)).fetchall()
+                            def chapters():
+                                for view in views:
+                                    text = view["text"] if changed_ids is None else None
+                                    if changed_ids is not None and view["chapter_id"] in changed_ids:
+                                        text = connection.execute("SELECT text FROM doc_chapter_views WHERE version_id=? AND chapter_id=?",
+                                                                  (row["latest_version_id"], view["chapter_id"])).fetchone()["text"]
+                                    yield json.loads(view["metadata_json"]), text
+                            chapter_storage.publish(self.books_dir, folder_name, metadata, chapters(), trust_existing=not force)
+                            if previous_folder and previous_folder != folder_name:
+                                old_path, new_path = self.books_dir / previous_folder, self.books_dir / folder_name
+                                if old_path.resolve() != new_path.resolve():
+                                    chapter_storage.retire_folder(self.books_dir, previous_folder, identity)
+                            connection.execute("UPDATE doc_book_metadata SET folder_name=?,state='ready',materialized_version_id=?,error=NULL WHERE document_id=?",
+                                               (folder_name, row["latest_version_id"], identity))
+                            connection.execute("DELETE FROM doc_storage_pending WHERE document_id=?", (identity,))
+                    except OSError as error:
+                        with contextlib.closing(sqlite3.connect(self.db_path, timeout=30)) as connection, connection:
+                            connection.execute("UPDATE doc_book_metadata SET state='error',error=? WHERE document_id=?", (str(error), identity))
+            finally:
+                self._storage_syncing = False
+
+    def storage_status(self, document_id: str, *, verify: bool = False) -> dict[str, Any]:
+        metadata = self.get_book_metadata(document_id)
+        manifest = None
+        error = metadata["storage_error"]
+        state = metadata["storage_state"]
+        if metadata["storage_folder"]:
+            try:
+                manifest = (chapter_storage.verify(self.books_dir, metadata["storage_folder"], document_id, metadata["version_id"])
+                            if verify else chapter_storage._owned_manifest(self.books_dir / metadata["storage_folder"], document_id))
+                if not manifest or manifest.get("version_id") != metadata["version_id"]:
+                    state, error = "pending", "章节文件需要重建"
+            except OSError as failure:
+                state, error = "error", str(failure)
+        return {"document_id": document_id, "version_id": metadata["version_id"],
+                "storage_folder": metadata["storage_folder"], "state": state, "error": error,
+                "chapter_count": (manifest or {}).get("chapter_count", 0),
+                "manifest_sha256": (manifest or {}).get("manifest_sha256")}
+
+    def materialize_chapters(self, document_id: str) -> dict[str, Any]:
+        # An explicit rebuild also repairs manually removed/corrupted files.
+        with self._storage_lock:
+            self._storage_syncing = True
+            try:
+                with self._connection() as connection:
+                    document = connection.execute("SELECT latest_version_id FROM doc_documents WHERE id=?", (document_id,)).fetchone()
+                    if document is None:
+                        raise DataError(404, "全文文档不存在")
+                    connection.execute("INSERT INTO doc_storage_pending(document_id,version_id) VALUES (?,?) "
+                                       "ON CONFLICT(document_id) DO UPDATE SET version_id=excluded.version_id,changed_ids_json=NULL,parent_version_id=NULL",
+                                       (document_id, document["latest_version_id"]))
+            finally:
+                self._storage_syncing = False
+            self._sync_chapter_files(document_id, force=True)
+        return self.storage_status(document_id, verify=True)
+
+    def materialize_all_chapters(self) -> list[dict[str, Any]]:
+        return [self.materialize_chapters(item["id"]) for item in self.list_documents()]
+
+    def chapter_archive(self, document_id: str, version_id: str | None = None) -> bytes:
+        summary = self.get_version_summary(document_id, version_id)
+        metadata = self.get_book_metadata(document_id)
+        metadata["version_id"] = summary["id"]
+        with self._connection() as connection:
+            rows = connection.execute("SELECT metadata_json,text FROM doc_chapter_views WHERE version_id=? ORDER BY chapter_order", (summary["id"],)).fetchall()
+        return chapter_storage.archive(metadata, ((json.loads(row["metadata_json"]), row["text"]) for row in rows))
 
     def list_documents(self) -> list[dict[str, Any]]:
         with self._connection() as connection:
@@ -567,7 +769,12 @@ class DocumentStore:
     def upload(self, filename: str, raw: bytes, encoding: str = "auto", title: str = "",
                work_id: str | None = None, *, idempotency_key: str | None = None,
                converted_text: str | None = None, preserve_text: bool = False, normalize_layout: bool = False,
-               progress: Callable[[str, int, int], None] | None = None) -> dict[str, Any]:
+               progress: Callable[[str, int, int], None] | None = None,
+               book_metadata: dict[str, Any] | None = None) -> dict[str, Any]:
+        try:
+            initial_metadata = chapter_storage.validate_metadata({} if book_metadata is None else book_metadata)
+        except ValueError as error:
+            raise DataError(422, str(error)) from None
         if not isinstance(filename, str) or not filename or len(filename) > 255 or re.search(r"[\x00-\x1f]", filename):
             raise DataError(422, "文件名无效")
         # Retain only the display name; never use untrusted names as disk paths.
@@ -595,11 +802,13 @@ class DocumentStore:
             source, used_encoding = _epub_text(raw), "xml"
         else:
             source, used_encoding = _decode(raw, encoding)
+        inferred = chapter_storage.infer_frontmatter(source)
+        display_title = initial_metadata.get("title") or title.strip() or inferred.get("book_title") or Path(filename).stem
         identifier = uuid.uuid4().hex
         now = _now()
         payload = _prepare(source, source, _options({}), normalize=not preserve_text, normalize_layout=normalize_layout, progress=progress)
         payload["active_source_ids"] = ["original"]
-        with self._connection() as connection:
+        with self._connection(storage_document_id=identifier) as connection:
             connection.execute("BEGIN IMMEDIATE")
             if idempotency_key is not None:
                 existing = connection.execute(
@@ -610,8 +819,11 @@ class DocumentStore:
                         raise DataError(409, "同一导入幂等键对应了不同原件")
                     return self._meta(document)
             connection.execute("INSERT INTO doc_documents VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                               (identifier, filename, title or Path(filename).stem, work_id, suffix[1:],
+                               (identifier, filename, display_title, work_id, suffix[1:],
                                 used_encoding, raw, _sha(raw), source, None, now))
+            connection.execute("INSERT INTO doc_book_metadata(document_id,author,earliest_update_at,book_type) VALUES (?,?,?,?)",
+                               (identifier, initial_metadata.get("author", inferred.get("author", "")),
+                                initial_metadata.get("earliest_update_at", inferred.get("earliest_update_at")), initial_metadata.get("book_type", "")))
             version = self._insert_version(connection, identifier, None, 1, source, payload)
             connection.execute("UPDATE doc_documents SET latest_version_id=? WHERE id=?", (version["id"], identifier))
             if idempotency_key is not None:
@@ -626,10 +838,11 @@ class DocumentStore:
         identifier, now = uuid.uuid4().hex, _now()
         title = title.strip()
         prepared = _prepare("", "", _options({}), normalize=False)
-        with self._connection() as connection:
+        with self._connection(storage_document_id=identifier) as connection:
             connection.execute("BEGIN IMMEDIATE")
             connection.execute("INSERT INTO doc_documents VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                                (identifier, title, title, None, "collection", "utf-8", b"", _sha(b""), "", None, now))
+            connection.execute("INSERT INTO doc_book_metadata(document_id) VALUES (?)", (identifier,))
             version = self._insert_version(connection, identifier, None, 1, "", prepared)
             connection.execute("UPDATE doc_documents SET latest_version_id=? WHERE id=?", (version["id"], identifier))
             return self._meta(self._document(connection, identifier))
@@ -652,6 +865,10 @@ class DocumentStore:
         DocumentStore._record_version_metadata(connection, version)
         DocumentStore._write_views(connection, version, payload.get("_review_proposals"), payload.get("_review_diagnostics"))
         DocumentStore._prune_history(connection, document_id)
+        connection.execute("INSERT INTO doc_storage_pending(document_id,version_id,parent_version_id,changed_ids_json) VALUES (?,?,?,?) "
+                           "ON CONFLICT(document_id) DO UPDATE SET version_id=excluded.version_id,parent_version_id=excluded.parent_version_id,changed_ids_json=excluded.changed_ids_json",
+                           (document_id, identifier, parent_id,
+                            _json(payload["_storage_changed_ids"]) if "_storage_changed_ids" in payload else None))
         return version
 
     def get_document(self, document_id: str) -> dict[str, Any]:
@@ -947,7 +1164,7 @@ class DocumentStore:
                                            "output_characters": len(manual_text),
                                            "input_sha256": base["sha256"],
                                            "output_sha256": _sha(manual_text.encode("utf-8"))})
-        with self._connection() as connection:
+        with self._connection(storage_document_id=document_id) as connection:
             connection.execute("BEGIN IMMEDIATE")
             document = self._document(connection, document_id)
             if document["latest_version_id"] != base_version_id:
@@ -974,7 +1191,7 @@ class DocumentStore:
         if change:
             prepared["changes"].insert(0, change)
         prepared.setdefault("active_source_ids", base.get("active_source_ids", self._active_source_ids(document_id, base)))
-        with self._connection() as connection:
+        with self._connection(storage_document_id=document_id) as connection:
             connection.execute("BEGIN IMMEDIATE")
             document = connection.execute("SELECT latest_version_id FROM doc_documents WHERE id=?", (document_id,)).fetchone()
             if document is None:
@@ -1157,7 +1374,7 @@ class DocumentStore:
                 "pattern": base.get("pattern"), "fallback_used": base.get("fallback_used", False),
                 "heading_formats": base.get("heading_formats", []), "candidates": base.get("candidates", []),
                 "gaps": gaps, "options": options, "_review_proposals": proposals,
-                "_review_diagnostics": diagnostics}
+                "_review_diagnostics": diagnostics, "_storage_changed_ids": [chapter["id"]]}
 
     def _fill_missing(self, document_id: str, base: dict[str, Any], chapter_id: str,
                       body_text: str, title: str | None = None) -> dict[str, Any]:
@@ -1647,7 +1864,7 @@ class DocumentStore:
         prepared["changes"].insert(0, {"stage": f"{mode}_source", "source_id": source_id,
                                        "filename": filename, "count": 1, "appended_characters": len(new_text) if mode == "append" else 0,
                                        "original_sha256": _sha(raw), "ingestion_key": idempotency_key})
-        with self._connection() as connection:
+        with self._connection(storage_document_id=document_id) as connection:
             connection.execute("BEGIN IMMEDIATE")
             if idempotency_key:
                 previous = connection.execute("SELECT document_id FROM doc_ingestions WHERE key=?", (idempotency_key,)).fetchone()

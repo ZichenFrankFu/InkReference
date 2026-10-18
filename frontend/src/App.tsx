@@ -5,17 +5,18 @@ import {
   FolderArchive,
   GitBranch,
   Layers3,
-  Menu,
   PanelLeftClose,
+  PanelLeftOpen,
+  ListTodo,
+  FileSearch,
   PenLine,
-  Play,
   Monitor,
   Moon,
   Sun,
   Wrench,
   SlidersHorizontal,
 } from "lucide-react";
-import { Busy, Modal, Notice } from "./ui";
+import { Busy, Modal, Notice, PageActivityScope, PageNavigationScope, PageTitle } from "./ui";
 import { download } from "./api";
 import { studio } from "./studio";
 import { readScheme, setScheme, type Scheme } from "./theme";
@@ -24,12 +25,14 @@ import "./loading.css";
 const Library = memo(lazy(() => import("./Library")));
 const Documents = memo(lazy(() => import("./Documents")));
 const Jobs = memo(lazy(() => import("./Jobs")));
+const ReferencePage = memo(lazy(() => import("./Jobs").then(module => ({ default: module.ReferencePage }))));
 const Workflows = memo(lazy(() => import("./Workflows")));
 const Models = memo(lazy(() => import("./Models")));
 const QuickRepair = lazy(() => import("./QuickRepair"));
 type Section =
   | "library"
   | "documents"
+  | "reference"
   | "jobs"
   | "workflows"
   | "models"
@@ -45,10 +48,11 @@ const sections: {
     label: "文本清理",
     icon: FileText,
   },
-  { id: "jobs", label: "分析与审核", icon: Play },
+  { id: "reference", label: "参考作品分析", icon: FileSearch },
+  { id: "jobs", label: "任务管理", icon: ListTodo },
   {
     id: "workflows",
-    label: "工作流与 Skills",
+    label: "Agent 与 Skills",
     icon: GitBranch,
   },
   {
@@ -59,6 +63,12 @@ const sections: {
 ];
 const initial = (): Section => {
   const hash = window.location.hash.slice(1);
+  if (hash === "jobs") {
+    try {
+      const focus = JSON.parse(sessionStorage.getItem("inkreference.catalog-focus") || "null");
+      if (focus?.section === "jobs" && typeof focus.documentId === "string") return "reference";
+    } catch { /* An obsolete focus request does not block startup. */ }
+  }
   return [...sections.map((s) => s.id), "backup"].includes(hash)
     ? (hash as Section)
     : "library";
@@ -67,6 +77,14 @@ export default function App() {
   const [section, setSection] = useState<Section>(initial);
   const [visited, setVisited] = useState<Section[]>([initial()]);
   const [mobile, setMobile] = useState(false);
+  useEffect(() => {
+    if (!mobile) return;
+    const previous = document.activeElement as HTMLElement | null;
+    document.querySelector<HTMLButtonElement>('.sidebar .nav-item[aria-current="page"]')?.focus();
+    const close = (event: KeyboardEvent) => { if (event.key === "Escape") setMobile(false); };
+    document.addEventListener("keydown", close);
+    return () => { document.removeEventListener("keydown", close); previous?.focus(); };
+  }, [mobile]);
   const [collapsed, setCollapsed] = useState(() => window.matchMedia("(max-width: 1100px)").matches);
   useEffect(() => {
     const media = window.matchMedia("(max-width: 1100px)");
@@ -98,6 +116,9 @@ export default function App() {
   }, [appearanceOpen]);
   const [modelReturn, setModelReturn] = useState<Section | null>(null);
   const sectionRef = useRef(section);
+  useEffect(() => {
+    if (window.location.hash === "#jobs" && sectionRef.current === "reference") window.history.replaceState(null, "", "#reference");
+  }, []);
   const nav = useCallback((id: Section) => {
     setMobile(false);
     setAppearanceOpen(false);
@@ -113,10 +134,13 @@ export default function App() {
     setJobId(id);
     nav("jobs");
   }, [nav]);
+  const openMenu = useCallback(() => setMobile(true), []);
   useEffect(() => {
     const open = (event: Event) => {
-      const target = (event as CustomEvent).detail;
-      if (!target || !["library", "documents", "jobs"].includes(target.section)) return;
+      const incoming = (event as CustomEvent).detail;
+      if (!incoming || !["library", "documents", "reference", "jobs"].includes(incoming.section)) return;
+      const target = incoming.section === "jobs" && incoming.documentId ? { ...incoming, section: "reference" } : incoming;
+      if (target.section === "jobs" && typeof target.runId === "string") setJobId(target.runId);
       // Keep the focus target until a lazy page has mounted and consumed it.
       try { sessionStorage.setItem("inkreference.catalog-focus", JSON.stringify(target)); } catch { /* focus event still works */ }
       nav(target.section as Section);
@@ -141,15 +165,22 @@ export default function App() {
       </a>
       {mobile && <div className="nav-shade" onClick={() => setMobile(false)} />}
       <aside
+        id="app-navigation"
         className={`sidebar ${mobile ? "mobile-open" : ""}`}
         aria-label="工作区导航"
       >
-        <button className="brand" onClick={() => nav("library")}>
+        <div className="sidebar-brand-row">
+        <button className="brand" onClick={() => nav("library")} title={collapsed ? "InkReference" : undefined}>
           <span className="brand-mark">
             <PenLine size={21} />
           </span>
           <span>InkReference</span>
         </button>
+        <button className="icon-button sidebar-toggle desktop-collapse" onClick={() => setCollapsed(value => !value)} aria-label={collapsed ? "展开侧栏" : "收起侧栏"} aria-expanded={!collapsed} title={collapsed ? "展开侧栏" : "收起侧栏"}>
+          {collapsed ? <PanelLeftOpen size={17} /> : <PanelLeftClose size={17} />}
+        </button>
+        <button className="icon-button sidebar-mobile-close" onClick={() => setMobile(false)} aria-label="收起导航"><PanelLeftClose size={18} /></button>
+        </div>
         <nav>
           {sections.map((s) => (
             <button
@@ -195,32 +226,6 @@ export default function App() {
         </div>
       </aside>
       <div className="workspace">
-        <header className="topbar topbar-compact">
-          <div className="navigation-controls">
-            <button
-              className="icon-button mobile-menu"
-              onClick={() => setMobile(true)}
-              aria-label="打开导航"
-            >
-              <Menu size={20} />
-            </button>
-            <button
-              className="icon-button desktop-collapse"
-              onClick={() => setCollapsed((v) => !v)}
-              aria-label={collapsed ? "展开侧栏" : "收起侧栏"}
-              aria-expanded={!collapsed}
-            >
-              <PanelLeftClose size={17} />
-            </button>
-          </div>
-          <div className="topbar-actions">
-            {section === "models" && modelReturn && (
-              <button className="text-button model-return" onClick={() => nav(modelReturn)}>
-                返回{sections.find((s) => s.id === modelReturn)?.label || "备份与恢复"}
-              </button>
-            )}
-          </div>
-        </header>
         <div id="workspace-content" className="workspace-content" tabIndex={-1}>
           {visited.map((page) => (
             <div
@@ -228,8 +233,9 @@ export default function App() {
               hidden={section !== page}
               className="workspace-page"
             >
-              <Suspense fallback={page === "documents" ? <main className="studio-main documents-main"><header className="studio-heading"><h1>文本清理</h1></header><div className="documents-title-progress" role="progressbar" aria-label="正在打开文本清理"><i /></div></main> : <div className="workspace-loading"><Busy inline label="正在打开工作区" /></div>}>
-                {page === "models" && modelReturn && <div className="mobile-return-bar"><button className="text-button" onClick={() => nav(modelReturn)}>返回{sections.find((s) => s.id === modelReturn)?.label || "备份与恢复"}</button></div>}
+              <PageActivityScope active={section === page && !repairOpen}>
+              <PageNavigationScope openMenu={openMenu} menuOpen={mobile} returnAction={page === "models" && modelReturn ? <button className="text-button model-return" onClick={() => nav(modelReturn)}>返回{sections.find(s => s.id === modelReturn)?.label || "备份与恢复"}</button> : undefined}>
+              <Suspense fallback={<main className="studio-main workspace-loading"><PageTitle title={sections.find(s => s.id === page)?.label || "备份与恢复"} /><Busy label="正在打开工作区" delay={0} /></main>}>
                 {page === "library" ? (
                   <Library />
                 ) : page === "documents" ? (
@@ -237,6 +243,8 @@ export default function App() {
                     navigate={nav}
                     onJob={onDocumentJob}
                   />
+                ) : page === "reference" ? (
+                  <ReferencePage navigate={nav} />
                 ) : page === "jobs" ? (
                   <Jobs initialId={jobId} navigate={nav} />
                 ) : page === "workflows" ? (
@@ -247,11 +255,13 @@ export default function App() {
                   <Backup />
                 )}
               </Suspense>
+              </PageNavigationScope>
+              </PageActivityScope>
             </div>
           ))}
         </div>
       </div>
-      {repairOpen && <Suspense fallback={<Busy label="正在打开快捷修复" />}><QuickRepair onClose={() => setRepairOpen(false)} /></Suspense>}
+      {repairOpen && <Suspense fallback={<Modal title="快捷修复" onClose={() => setRepairOpen(false)} busy><Busy label="正在打开快捷修复" delay={0} /></Modal>}><QuickRepair onClose={() => setRepairOpen(false)} /></Suspense>}
     </div>
   );
 }
@@ -311,18 +321,13 @@ function Backup() {
   };
   return (
     <main className="studio-main">
-      <header className="studio-heading">
-        <div>
-          <h1>备份与恢复</h1>
-        </div>
-      </header>
+      <PageTitle title="备份与恢复" />
       <div className="backup-grid">
         <section className="surface backup-card">
           <span className="feature-icon">
             <FolderArchive size={28} />
           </span>
           <h2>完整项目备份</h2>
-          <p>生成 ZIP 归档，保存当前工作区数据和文件。</p>
           <button
             className="button primary"
             onClick={() => void exportProject()}
@@ -336,10 +341,6 @@ function Backup() {
             <Layers3 size={28} />
           </span>
           <h2>全部数据表 CSV</h2>
-          <p>
-            每张业务表生成一个
-            CSV，包含全文版本、工作流、Skills、分析与调用记录。
-          </p>
           <button
             className="button secondary"
             onClick={() => void exportTables()}
@@ -353,7 +354,6 @@ function Backup() {
             <BookOpen size={28} />
           </span>
           <h2>从备份恢复</h2>
-          <p>验证归档后恢复到独立目录，保留当前工作区。</p>
           <label className="button secondary file-button">
             选择备份 ZIP
             <input

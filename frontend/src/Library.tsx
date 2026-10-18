@@ -3,10 +3,8 @@ import {
   Suspense,
   useCallback,
   useEffect,
-  useId,
   useRef,
   useState,
-  type ReactNode,
 } from "react";
 import {
   ArrowDownToLine,
@@ -53,6 +51,7 @@ import {
   type TableMeta,
 } from "./api";
 import "./library.css";
+import { Busy, Modal, PageTitle } from "./ui";
 const WorkReference = lazy(() => import("./WorkReference"));
 
 const TABLES: {
@@ -158,104 +157,7 @@ function AssociationField({ column, value, table, onChange }: { column: string; 
 }
 
 function Spinner({ text = "正在加载…" }: { text?: string }) {
-  return (
-    <span className="loading-inline" role="status">
-      <LoaderCircle size={17} className="spin" />
-      {text}
-      <i className="inline-progress" role="progressbar" aria-label={text}>
-        <b />
-      </i>
-    </span>
-  );
-}
-
-function Modal({
-  title,
-  children,
-  onClose,
-  wide = false,
-  busy = false,
-}: {
-  title: string;
-  children: ReactNode;
-  onClose: () => void;
-  wide?: boolean;
-  busy?: boolean;
-}) {
-  const ref = useRef<HTMLDivElement>(null);
-  const closeRef = useRef(onClose);
-  closeRef.current = onClose;
-  const busyRef = useRef(busy);
-  busyRef.current = busy;
-  const titleId = useId();
-  useEffect(() => {
-    const previous = document.activeElement as HTMLElement | null;
-    const modal = ref.current;
-    modal?.focus();
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape" && !busyRef.current) closeRef.current();
-      if (event.key !== "Tab" || !modal) return;
-      const elements = [
-        ...modal.querySelectorAll<HTMLElement>(
-          'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), a[href], [tabindex="0"]',
-        ),
-      ];
-      const first = elements[0],
-        last = elements[elements.length - 1];
-      if (!first) {
-        event.preventDefault();
-        return;
-      }
-      if (
-        event.shiftKey &&
-        (document.activeElement === first || document.activeElement === modal)
-      ) {
-        event.preventDefault();
-        last.focus();
-      } else if (
-        !event.shiftKey &&
-        (document.activeElement === last || document.activeElement === modal)
-      ) {
-        event.preventDefault();
-        first.focus();
-      }
-    };
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("keydown", onKey);
-      previous?.focus();
-    };
-  }, []);
-  return (
-    <div
-      className="modal-backdrop"
-      onMouseDown={(e) => {
-        if (e.target === e.currentTarget && !busy) onClose();
-      }}
-    >
-      <div
-        ref={ref}
-        tabIndex={-1}
-        className={`modal ${wide ? "modal-wide" : ""}`}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={titleId}
-      >
-        <div className="modal-header">
-          <h2 id={titleId}>{title}</h2>
-          <button
-            className="icon-button"
-            disabled={busy}
-            onClick={onClose}
-            aria-label="关闭对话框"
-          >
-            <X size={20} />
-          </button>
-        </div>
-        {children}
-      </div>
-    </div>
-  );
+  return <><Busy label={text} /><span className="loading-inline" role="status">{text}</span></>;
 }
 
 const exchangeFormats = [
@@ -523,6 +425,7 @@ function DetailPanel({
   ];
   return (
     <aside className="detail-panel" aria-label={`${labelFor(table)}详情`}>
+      {(loading || saving) && <Busy label={saving ? "正在保存素材" : "正在读取素材"} />}
       <div className="detail-heading">
         <div>
           <span className="eyebrow">{id ? "素材详情" : "创建素材"}</span>
@@ -598,7 +501,7 @@ function DetailPanel({
                 })}
                 {!columns.length && <p className="muted">正在读取数据字段…</p>}
           </form>
-          {tab === "reference" && id && <Suspense fallback={<div className="panel-loading"><Spinner /></div>}><WorkReference workId={id} /></Suspense>}
+          {tab === "reference" && id && <Suspense fallback={<div className="panel-loading"><Busy label="正在读取作品分析" /></div>}><WorkReference workId={id} /></Suspense>}
           <div className="detail-scroll relations-list" hidden={tab !== "relations"}>
             <div className="relations-toolbar"><h3>关联</h3>{id && <button type="button" className="button secondary" aria-pressed={editingRelations} onClick={() => setEditingRelations(value => !value)}>{editingRelations ? <BookOpen size={14} /> : <Pencil size={14} />}{editingRelations ? "查看关联" : "编辑关联"}</button>}</div>
             {editingRelations ? <div className="relations-editor">{columns.filter(isRelationColumn).map(column => <AssociationField key={column} column={column} value={draft[column] || ""} table={table} onChange={value => setDraft(d => ({ ...d, [column]: value }))} />)}</div> : relationGroups.map((group) => (
@@ -750,7 +653,7 @@ function RecordTable({ table, items, selectedId, onSelect, onToggleSeen, seenBus
   const headings = table === "works" ? ["作品", "类别", "作者", "年份", "看过"] : table === "characters" ? ["角色", "角色定位", "开场身份", "关联作品"] : ["桥段内容", "程度", "关联作品"];
   return <div className="record-table-wrap"><table className={`record-table table-${table}`}><thead><tr>{headings.map((heading, i) => <th key={heading} className={table === "works" && (i === 2 || i === 3) ? "optional-column" : ""}>{heading}</th>)}<th className="row-action"><span className="visually-hidden">操作</span></th></tr></thead><tbody>{items.map(item => <tr key={item.id} className={item.id === selectedId ? "selected" : ""}>
     <td><button className={`record-title ${table === "cliches" ? "cliche-title" : ""}`} onClick={() => onSelect(item)}><span><strong>{titleOf(item, table)}</strong><small>{item.id}</small>{table === "cliches" && <ClicheTypeTags values={item.values} />}</span></button></td>
-    {table === "works" ? <><td><span className="tag">{item.values["类别"] || "—"}</span></td><td className="optional-column">{item.values["作者"] || "—"}</td><td className="optional-column date-cell">{item.values["发布日期"] || "—"}</td><td><button className={`seen-toggle ${item.values[seenKey] === "是" ? "seen" : ""} ${!["是", "否"].includes(item.values[seenKey]) ? "unknown" : ""}`} onClick={() => onToggleSeen(item)} disabled={seenBusy === item.id} aria-busy={seenBusy === item.id} aria-label={`${titleOf(item, table)} 看过：${["是", "否"].includes(item.values[seenKey]) ? item.values[seenKey] : "未记录"}`} aria-pressed={item.values[seenKey] === "是"}>{seenBusy === item.id ? <LoaderCircle size={13} className="spin" /> : item.values[seenKey] === "是" ? <Check size={13} /> : null}{["是", "否"].includes(item.values[seenKey]) ? item.values[seenKey] : "—"}{seenBusy === item.id && <i className="seen-progress" role="progressbar" aria-label="保存看过状态"><b /></i>}</button></td></> : table === "characters" ? <><td><span className="tag neutral">{item.values["角色定位"] || "—"}</span></td><td><span className="cell-truncate" title={item.values["开场身份"]}>{item.values["开场身份"] || "—"}</span></td><td><span className="link-count"><Link2 size={13} />{linkedCount(item.values["关联作品"] || "[]")}</span></td></> : <><td className="date-cell">{item.values["cliché程度（%）"] || item.values["cliché程度"] ? `${item.values["cliché程度（%）"] || item.values["cliché程度"]}%` : "—"}</td><td><span className="link-count"><Link2 size={13} />{item.values["命中作品数"] || linkedCount(item.values["关联作品"] || "[]")}</span></td></>}
+    {table === "works" ? <><td><span className="tag">{item.values["类别"] || "—"}</span></td><td className="optional-column">{item.values["作者"] || "—"}</td><td className="optional-column date-cell">{item.values["发布日期"] || "—"}</td><td><button className={`seen-toggle ${item.values[seenKey] === "是" ? "seen" : ""} ${!["是", "否"].includes(item.values[seenKey]) ? "unknown" : ""}`} onClick={() => onToggleSeen(item)} disabled={seenBusy === item.id} aria-busy={seenBusy === item.id} aria-label={`${titleOf(item, table)} 看过：${["是", "否"].includes(item.values[seenKey]) ? item.values[seenKey] : "未记录"}`} aria-pressed={item.values[seenKey] === "是"}>{seenBusy === item.id ? <LoaderCircle size={13} className="spin" /> : item.values[seenKey] === "是" ? <Check size={13} /> : null}{["是", "否"].includes(item.values[seenKey]) ? item.values[seenKey] : "—"}</button></td></> : table === "characters" ? <><td><span className="tag neutral">{item.values["角色定位"] || "—"}</span></td><td><span className="cell-truncate" title={item.values["开场身份"]}>{item.values["开场身份"] || "—"}</span></td><td><span className="link-count"><Link2 size={13} />{linkedCount(item.values["关联作品"] || "[]")}</span></td></> : <><td className="date-cell">{item.values["cliché程度（%）"] || item.values["cliché程度"] ? `${item.values["cliché程度（%）"] || item.values["cliché程度"]}%` : "—"}</td><td><span className="link-count"><Link2 size={13} />{item.values["命中作品数"] || linkedCount(item.values["关联作品"] || "[]")}</span></td></>}
     <td className="row-action"><button className="icon-button" aria-label={`查看${titleOf(item, table)}`} onClick={() => onSelect(item)}><ChevronRight size={17} /></button></td>
   </tr>)}</tbody></table></div>;
 }
@@ -967,12 +870,10 @@ export default function Library() {
   };
   return (
     <div ref={workspaceRef} className={`library-layout library-workspace ${selection ? "has-detail" : ""}`}>
+      {(loading || seenBusy) && <Busy label={seenBusy ? "正在保存看过状态" : "正在读取素材库"} />}
       <div className="library-main">
         <main id="main-content" className="main-content" tabIndex={-1}>
-          <div className="page-heading">
-            <div>
-              <h1>{config.label}</h1>
-            </div>
+          <PageTitle title={config.label} action={
             <button
               className="button primary heading-create"
               onClick={() => chooseRecord(table)}
@@ -980,7 +881,7 @@ export default function Library() {
               <Plus size={17} />
               新增{config.singular}
             </button>
-          </div>
+          } />
           <div className="stats-grid" aria-label="素材数量统计">
             {TABLES.map((t) => (
               <button

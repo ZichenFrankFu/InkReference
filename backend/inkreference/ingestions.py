@@ -94,7 +94,8 @@ class IngestionStore:
 
     def create(self, filename: str, raw: bytes, encoding: str = "auto", title: str = "",
                work_id: str | None = None, *, mode: str = "new", target_document_id: str | None = None,
-               base_version_id: str | None = None, conversion_options: dict[str, Any] | None = None) -> dict[str, Any]:
+               base_version_id: str | None = None, conversion_options: dict[str, Any] | None = None,
+               book_metadata: dict[str, Any] | None = None) -> dict[str, Any]:
         if self._closed:
             raise DataError(503, "上传处理服务正在关闭")
         if not isinstance(filename, str) or not filename or len(filename) > 255 or re.search(r"[\x00-\x1f]", filename):
@@ -123,6 +124,14 @@ class IngestionStore:
             self.documents.get_version(target_document_id, base_version_id)
             if target["latest_version_id"] != base_version_id:
                 raise DataError(409, "全文已有新版本，请刷新后重新选择更新或补充")
+        if book_metadata:
+            from .chapter_storage import validate_metadata
+            if mode != "new":
+                raise DataError(422, "更新或补充正文时，请在作品信息中修改元数据")
+            try:
+                book_metadata = validate_metadata(book_metadata)
+            except ValueError as exc:
+                raise DataError(422, str(exc)) from exc
         if conversion_options is None:
             conversion_options = {}
         if not isinstance(conversion_options, dict) or set(conversion_options) - {"tier", "ocr_mode"}:
@@ -131,7 +140,7 @@ class IngestionStore:
             raise DataError(422, "MinerU 设置仅适用于 PDF 文件")
         options = {"encoding": encoding, "title": title, "work_id": work_id, "mode": mode,
                    "target_document_id": target_document_id, "base_version_id": base_version_id,
-                   "conversion_options": conversion_options}
+                   "conversion_options": conversion_options, "book_metadata": book_metadata or {}}
         conversion_id = None
         if kind in {"pdf", "epub"}:
             conversion = self.conversions.create(filename, raw, {**conversion_options, "title": title, "work_id": work_id,
@@ -249,7 +258,8 @@ class IngestionStore:
                         raise DataError(422, conversion["error"] or "格式转换未完成，请重试")
                     self._cancellations[identifier].wait(0.1)
                 self._check_cancelled(identifier)
-                document = self.conversions.import_to_document(conversion_id, self.documents, progress=progress, normalize_layout=True)
+                document = self.conversions.import_to_document(conversion_id, self.documents, progress=progress,
+                    normalize_layout=True, book_metadata=options.get("book_metadata") or None)
                 committed = {"document_id": document["id"], "version_id": document["imported_version_id"]}
             elif committed is None:
                 with self._connection() as connection:
@@ -259,7 +269,8 @@ class IngestionStore:
                     raise DataError(422, "上传原件校验失败")
                 if options["mode"] == "new":
                     self.documents.upload(meta["filename"], raw, options["encoding"], options["title"], options["work_id"],
-                                          idempotency_key=key, preserve_text=True, progress=progress, normalize_layout=True)
+                                          idempotency_key=key, preserve_text=True, progress=progress, normalize_layout=True,
+                                          book_metadata=options.get("book_metadata") or None)
                     committed = self.documents.ingestion_result(key)
                 else:
                     writer = self.documents.replace if options["mode"] == "replace" else self.documents.append

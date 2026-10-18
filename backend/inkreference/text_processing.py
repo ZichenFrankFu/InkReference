@@ -242,6 +242,8 @@ def split_chapters(text: str, *, fallback_chars: int = 3000,
         if name in {n for n, _ in _PATTERNS}:
             matches = [match for match in matches
                        if not match.group(0).rstrip().endswith(tuple("。！？；，,.!?…：:"))
+                       and not re.match(r"^[ \t　]*第[ \t　]*" + _CN_NUMBER +
+                           r"[ \t　]*章[ \t　]*(?:首次)?(?:发布|更新)时间[ \t　]*[:：]", match.group(0))
                        and (name not in {"N、", "N."} or (match.group(2) or "").strip())]
         score = _score_pattern(matches, len(text))
         eligible = bool(matches) and (name not in {"N、", "N.", "缩进对比"} or len(matches) >= 3)

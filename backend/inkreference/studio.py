@@ -36,11 +36,12 @@ class NewRun(BaseModel):
     version_id: str = Field(min_length=1, max_length=200)
     profile_id: str | None = Field(default=None, min_length=1, max_length=100)
     workflow_id: str = "default"
-    workflow_version: str = "1.1.0"
+    workflow_version: str = "2.0.0"
     start: bool = True
     manual: bool = False
     remote_consent: bool = False
     expected_model_fingerprint: str | None = Field(default=None, min_length=64, max_length=64)
+    expected_stage_fingerprints: dict[str, str] | None = None
 
 
 class ConnectionConsent(BaseModel):
@@ -114,6 +115,13 @@ class ReferenceRevision(BaseModel):
 
 class ReferenceSection(ReferenceRevision):
     data: Any
+
+
+class BookMetadataUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    values: dict[str, Any]
+    expected_version_id: str = Field(min_length=1, max_length=200)
+    expected_revision: StrictInt | None = Field(default=None, ge=0)
 
 
 class ReferenceConfiguration(ReferenceRevision):
@@ -262,12 +270,26 @@ def _file_response(raw: bytes, filename: str, media_type: str) -> Response:
     return Response(raw, media_type=media_type, headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename, safe='')}"})
 
 
+def _catalog_document_metadata(runtime, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Attach catalog labels in one small query without hydrating text/analysis."""
+    identifiers = list(dict.fromkeys(item["work_id"] for item in items if item.get("work_id")))
+    if not identifiers:
+        return items
+    import json
+    with runtime.store.connect() as connection:
+        rows = connection.execute(
+            "SELECT id,json_extract(values_json,'$.类别') category,json_extract(values_json,'$.作者') author "
+            "FROM works WHERE id IN (SELECT value FROM json_each(?))", (json.dumps(identifiers),))
+        labels = {row["id"]: {"work_category": row["category"] or "", "catalog_author": row["author"] or ""} for row in rows}
+    return [{**item, **labels.get(item.get("work_id"), {})} for item in items]
+
+
 def install_studio_routes(application, runtime):
     router = APIRouter(prefix="/api/studio", tags=["studio"])
 
     @router.get("/documents")
     def documents():
-        return {"items": runtime.studio.documents.list_documents()}
+        return {"items": _catalog_document_metadata(runtime, runtime.studio.documents.list_documents())}
 
     @router.get("/ingestions")
     def ingestions():
@@ -277,7 +299,9 @@ def install_studio_routes(application, runtime):
     async def ingest_document(file: Annotated[UploadFile, File()], title: Annotated[str, Form()] = "",
                               encoding: Annotated[str, Form()] = "auto", work_id: Annotated[str | None, Form()] = None,
                               mode: Annotated[str, Form()] = "new", target_document_id: Annotated[str | None, Form()] = None,
-                              base_version_id: Annotated[str | None, Form()] = None, options: Annotated[str, Form()] = "{}"):
+                              base_version_id: Annotated[str | None, Form()] = None, options: Annotated[str, Form()] = "{}",
+                              author: Annotated[str, Form()] = "", earliest_update_at: Annotated[str, Form()] = "",
+                              book_type: Annotated[str, Form()] = ""):
         import json
         raw = await _upload(file, MAX_UPLOAD_BYTES)
         try:
@@ -292,7 +316,9 @@ def install_studio_routes(application, runtime):
                     runtime.store.get_record("works", work_id)
                 item = runtime.studio.ingestions.create(file.filename or "upload.txt", raw, title=title,
                     encoding=encoding, work_id=work_id or None, mode=mode, target_document_id=target_document_id or None,
-                    base_version_id=base_version_id or None, conversion_options=settings)
+                    base_version_id=base_version_id or None, conversion_options=settings,
+                    book_metadata={key: value for key, value in {"author": author, "earliest_update_at": earliest_update_at,
+                        "book_type": book_type}.items() if value.strip()} or None)
                 return runtime.studio.ingestions.start(item["id"])
         return await run_in_threadpool(create)
 
@@ -324,7 +350,32 @@ def install_studio_routes(application, runtime):
 
     @router.get("/documents/{document_id}")
     def document(document_id: str):
-        return runtime.studio.documents.get_document(document_id)
+        return _catalog_document_metadata(runtime, [runtime.studio.documents.get_document(document_id)])[0]
+
+    @router.get("/documents/{document_id}/book-metadata")
+    def book_metadata(document_id: str):
+        return runtime.studio.documents.get_book_metadata(document_id)
+
+    @router.put("/documents/{document_id}/book-metadata")
+    def update_book_metadata(document_id: str, body: BookMetadataUpdate):
+        with runtime.studio.lock:
+            return runtime.studio.documents.update_book_metadata(document_id, body.values,
+                expected_version_id=body.expected_version_id, expected_revision=body.expected_revision)
+
+    @router.get("/documents/{document_id}/chapter-files")
+    def chapter_files(document_id: str, verify: bool = False):
+        return runtime.studio.documents.storage_status(document_id, verify=verify)
+
+    @router.post("/documents/{document_id}/chapter-files")
+    def synchronize_chapter_files(document_id: str):
+        with runtime.studio.lock:
+            return runtime.studio.documents.materialize_chapters(document_id)
+
+    @router.get("/documents/{document_id}/export/chapters")
+    def export_chapter_files(document_id: str, version_id: str | None = None):
+        metadata = runtime.studio.documents.get_book_metadata(document_id)
+        raw = runtime.studio.documents.chapter_archive(document_id, version_id)
+        return _file_response(raw, f"{metadata['book_title']}-chapters.zip", "application/zip")
 
     @router.get("/documents/{document_id}/versions/{version_id}")
     def version(document_id: str, version_id: str, include_text: bool = True, summary: bool = False):
@@ -515,6 +566,22 @@ def install_studio_routes(application, runtime):
     def reference(document_id: str):
         return runtime.studio.reference.get(document_id)
 
+    @router.get("/documents/{document_id}/reference/projection")
+    def project_reference(document_id: str, chapter: Annotated[int | None, Query(ge=1)] = None):
+        from .analysis_projection import project_sections
+        state = runtime.studio.reference.get(document_id)
+        events = state["sections"].get("plot", {}).get("events", [])
+        sources = {item.get("source_version_id") for item in events if isinstance(item, dict) and item.get("source_version_id")}
+        # A saved volume plan belongs to its exact text version. Mixed-version
+        # analysis keeps each event's recorded volume rather than applying a
+        # new plan to older chapter numbers.
+        volumes = None
+        if len(sources) == 1:
+            version_id = next(iter(sources))
+            volumes = runtime.studio.volumes.get(document_id, version_id)["volumes"]
+        return {**state, "sections": project_sections(state["sections"], chapter, volumes=volumes),
+                "projection": {"chapter": chapter, "schema_version": 2}}
+
     @router.post("/reference-collections", status_code=201)
     def new_collection(body: NewCollection):
         with runtime.studio.lock:
@@ -572,7 +639,7 @@ def install_studio_routes(application, runtime):
     @router.post("/jobs", status_code=201)
     def create_job(body: NewRun):
         with runtime.studio.lock:
-            result = runtime.studio.runner.create_run(body.document_id, body.version_id, workflow_id=body.workflow_id, workflow_version=body.workflow_version, profile_id=body.profile_id, remote_consent=body.remote_consent, expected_model_fingerprint=body.expected_model_fingerprint, manual=body.manual)
+            result = runtime.studio.runner.create_run(body.document_id, body.version_id, workflow_id=body.workflow_id, workflow_version=body.workflow_version, profile_id=body.profile_id, remote_consent=body.remote_consent, expected_model_fingerprint=body.expected_model_fingerprint, expected_stage_fingerprints=body.expected_stage_fingerprints, manual=body.manual)
             return runtime.studio.runner.start(result["id"], remote_consent=body.remote_consent) if body.start and not body.manual else result
 
     @router.get("/jobs/{run_id}")
@@ -684,11 +751,11 @@ def install_studio_routes(application, runtime):
             return runtime.studio.skills.save(body)
 
     @router.post("/skills/upload", status_code=201)
-    async def upload_skill(file: Annotated[UploadFile, File()]):
+    async def upload_skill(file: Annotated[UploadFile, File()], contract_version: Annotated[int | None, Query(ge=2, le=2)] = None):
         raw = await _upload(file, 2 * 1024 * 1024)
         def save():
             with runtime.studio.lock:
-                return runtime.studio.skills.upload(file.filename or "skill.json", raw)
+                return runtime.studio.skills.upload(file.filename or "skill.json", raw, require_contract_version=contract_version)
         return await run_in_threadpool(save)
 
     @router.get("/skills/{identifier}/versions/{version}")

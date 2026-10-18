@@ -146,7 +146,7 @@ def test_remote_tests_are_direct_and_job_confirmation_is_reused_on_resume(client
     assert len(requests) == 1
     requests.clear()
     document = upload_document(client)
-    body = {"document_id": document["id"], "version_id": document["latest_version_id"], "profile_id": profile["id"], "start": False}
+    body = {"document_id": document["id"], "version_id": document["latest_version_id"], "profile_id": profile["id"], "workflow_version": "1.1.0", "start": False}
     assert client.post(PREFIX + "/jobs", json=body).status_code == 428
     assert not items(client.get(PREFIX + "/jobs"))
     assert client.post(PREFIX + "/jobs", json={**body, "remote_consent": True}).status_code == 428
@@ -232,11 +232,11 @@ def test_mocked_job_review_and_approve_integrates_with_csv_library(client):
 def test_project_backup_restores_document_custom_skill_workflow_layout_and_profiles(client, tmp_path):
     document = upload_document(client)
     profile = create_model(client, api_key="backup-must-not-persist-this-secret")
-    skill = copy.deepcopy(next(item for item in items(client.get(PREFIX + "/skills")) if item["id"] == "unified-reference"))
+    skill = copy.deepcopy(client.get(PREFIX + "/skills/unified-reference/versions/1.1.0").json())
     skill.pop("builtin", None)
     skill.update({"id": "backup-skill", "name": "备份 Skill"})
     assert client.post(PREFIX + "/skills", json=skill).status_code == 201
-    workflow = copy.deepcopy(next(item for item in items(client.get(PREFIX + "/workflows")) if item["id"] == "default"))
+    workflow = copy.deepcopy(client.get(PREFIX + "/workflows/default/versions/1.1.0").json())
     workflow.pop("builtin", None)
     workflow.update({"id": "backup-workflow", "name": "备份工作流", "skill_id": "backup-skill"})
     assert client.post(PREFIX + "/workflows", json=workflow).status_code == 201

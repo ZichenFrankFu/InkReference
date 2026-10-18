@@ -24,6 +24,9 @@ import {
 } from "./studio";
 import { isRemoteModel, modelEndpoint } from "./model-security";
 import ReferenceAnalysis from "./ReferenceAnalysis";
+import { ReferenceExtraction } from "./ReferenceExtraction";
+import type { ReferenceState } from "./reference-types";
+import "./reference-analysis.css";
 import {
   Busy,
   Empty,
@@ -38,7 +41,7 @@ import {
 type Props = {
   initialId?: string;
   navigate: (
-    id: "library" | "documents" | "jobs" | "workflows" | "models" | "backup",
+    id: "library" | "documents" | "reference" | "jobs" | "workflows" | "models" | "backup",
   ) => void;
 };
 const names: Record<string, string> = {
@@ -61,9 +64,7 @@ const stageNames: Record<string, string> = {
   review: "等待人工审核",
   complete: "已完成",
 };
-export default function Jobs({ initialId, navigate }: Props) {
-  const [mode, setMode] = useState<"reference" | "tasks">(initialId ? "tasks" : "reference");
-  const [referenceDirty, setReferenceDirty] = useState(false);
+function LegacyJobReview({ initialId, navigate }: Props) {
   const [items, setItems] = useState<Run[]>([]);
   const [docs, setDocs] = useState<DocumentMeta[]>([]);
   const [selected, setSelected] = useState<Run | null>(null);
@@ -143,23 +144,10 @@ export default function Jobs({ initialId, navigate }: Props) {
   }, []);
   useEffect(() => {
     if (initialId) {
-      setMode("tasks");
       void choose(initialId);
       void load();
     }
   }, [initialId, choose, load]);
-  useEffect(() => {
-    const focus = (event?: Event) => {
-      let target = (event as CustomEvent | undefined)?.detail;
-      if (!target) {
-        try { target = JSON.parse(sessionStorage.getItem("inkreference.catalog-focus") || "null"); } catch { return; }
-      }
-      if (target?.section === "jobs" && target.documentId) setMode("reference");
-    };
-    focus();
-    window.addEventListener("inkreference:catalog-focus", focus);
-    return () => window.removeEventListener("inkreference:catalog-focus", focus);
-  }, []);
   useEffect(() => {
     const timer = window.setInterval(() => {
       const run = selectedRef.current;
@@ -286,18 +274,8 @@ export default function Jobs({ initialId, navigate }: Props) {
   const modelSnapshot = ((selected?.snapshots || {}) as { model?: { connection_mode?: "local" | "remote"; base_url?: string; model?: string } }).model;
   const destination = modelEndpoint(modelSnapshot?.base_url);
   const remote = isRemoteModel(modelSnapshot);
-  const modeControl = <div className="reference-mode-switch" role="tablist" aria-label="分析工作台"><button role="tab" aria-selected={mode === "reference"} className={mode === "reference" ? "active" : ""} onClick={() => setMode("reference")}>作品分析</button><button role="tab" aria-selected={mode === "tasks"} className={mode === "tasks" ? "active" : ""} disabled={referenceDirty} title={referenceDirty ? "请先保存或取消当前编辑" : undefined} onClick={() => setMode("tasks")}>提取任务与素材审核</button></div>;
-  if (mode === "reference") return <main className="studio-main"><PageTitle kicker="" title="参考作品分析" action={modeControl} /><ReferenceAnalysis docs={docs} runs={items} loading={loading} navigate={navigate} onRun={run => { setMode("tasks"); void choose(run.id); }} onRefresh={load} onDirtyChange={setReferenceDirty} /></main>;
   return (
-    <main className="studio-main">
-      <PageTitle
-        kicker=""
-        title="分析与审核"
-        description=""
-        action={
-          modeControl
-        }
-      />
+    <div className="legacy-job-review">
       <Notice error={!!error} success={!error && !!message}>
         {error || message}
       </Notice>
@@ -803,6 +781,30 @@ export default function Jobs({ initialId, navigate }: Props) {
           </div>
         </Modal>
       )}
-    </main>
+    </div>
   );
+}
+
+
+function useAnalysisLibrary() {
+  const [docs, setDocs] = useState<DocumentMeta[]>([]), [runs, setRuns] = useState<Run[]>([]), [loading, setLoading] = useState(true), [error, setError] = useState("");
+  const load = useCallback(async () => { setLoading(true); try { const [d, r] = await Promise.all([studio<List<DocumentMeta>>("/documents"), studio<List<Run>>("/jobs")]); setDocs(normalizeList(d)); setRuns(normalizeList(r)); setError(""); } catch (e) { setError(messageOf(e)); } finally { setLoading(false); } }, []);
+  useEffect(() => { void load(); const refresh = () => { void load(); }; window.addEventListener("inkreference:jobs-refresh", refresh); window.addEventListener("inkreference:library-refresh", refresh); window.addEventListener("inkreference:reference-refresh", refresh); return () => { window.removeEventListener("inkreference:jobs-refresh", refresh); window.removeEventListener("inkreference:library-refresh", refresh); window.removeEventListener("inkreference:reference-refresh", refresh); }; }, [load]);
+  return { docs, runs, loading, error, load };
+}
+export function ReferencePage({ navigate }: Props) {
+  const { docs, runs, loading, error, load } = useAnalysisLibrary();
+  const [, setDirty] = useState(false);
+  return <main className="studio-main reference-page"><PageTitle title="参考作品分析" /><Notice error>{error}</Notice><ReferenceAnalysis docs={docs} runs={runs} loading={loading} navigate={navigate} onRun={run => { window.dispatchEvent(new CustomEvent("inkreference:navigate", { detail: { section: "jobs", runId: run.id } })); }} onRefresh={load} onDirtyChange={setDirty} /></main>;
+}
+export default function Jobs({ initialId, navigate }: Props) {
+  const { docs, runs, loading, error, load } = useAnalysisLibrary();
+  const [documentId, setDocumentId] = useState(""), [state, setState] = useState<ReferenceState | null>(null), [dirty, setDirty] = useState(false), [localError, setLocalError] = useState(""), [legacy, setLegacy] = useState(false);
+  const doc = docs.find(d => d.id === documentId);
+  const initialApplied = useRef("");
+  useEffect(() => { const target = (event?: Event) => { const id = (event as CustomEvent<{ documentId?: string }> | undefined)?.detail?.documentId || sessionStorage.getItem("inkreference.task-document"); if (id && !dirty) { sessionStorage.removeItem("inkreference.task-document"); setDocumentId(id); } }; target(); window.addEventListener("inkreference:task-document", target); return () => window.removeEventListener("inkreference:task-document", target); }, [dirty]);
+  useEffect(() => { const focus = (event: Event) => { const target = (event as CustomEvent<{ section?: string; runId?: string }>).detail; if (target?.section === "jobs" && target.runId && !dirty) { const run = runs.find(r => r.id === target.runId); if (run) setDocumentId(run.document_id); window.dispatchEvent(new CustomEvent("inkreference:focus-run", { detail: { runId: target.runId } })); } }; window.addEventListener("inkreference:catalog-focus", focus); return () => window.removeEventListener("inkreference:catalog-focus", focus); }, [runs, dirty]);
+  useEffect(() => { if (initialId && initialApplied.current !== initialId) { const run = runs.find(r => r.id === initialId); if (run) { initialApplied.current = initialId; setDocumentId(run.document_id); } } else if (!documentId && docs.length) setDocumentId(docs[0].id); }, [initialId, runs, docs, documentId]);
+  useEffect(() => { if (!documentId || legacy) return; let active = true; setState(null); void studio<ReferenceState>(`/documents/${documentId}/reference`).then(next => { if (active) setState(next); }).catch(e => { if (active) setLocalError(messageOf(e)); }); return () => { active = false; }; }, [documentId, legacy]);
+  return <main className="studio-main tasks-page"><PageTitle title="任务管理" action={<button className="button secondary" onClick={() => navigate("reference")}><FileSearch size={15} />查看作品分析</button>} /><Notice error>{error || localError}</Notice><section className="surface task-manager-panel"><div className="task-manager-toolbar"><label className="studio-field"><span>参考作品库</span><select aria-label="选择分析作品" value={documentId} disabled={dirty} onChange={e => { setDocumentId(e.target.value); setLocalError(""); }}>{!docs.length && <option value="">暂无作品</option>}{docs.map(d => <option key={d.id} value={d.id}>{d.title}</option>)}</select></label><button className="icon-button" aria-label="刷新任务" disabled={dirty} onClick={() => void load()}><RefreshCw size={16} /></button>{legacy && <button className="button secondary" disabled={dirty} onClick={() => setLegacy(false)}>返回分区审核</button>}</div>{loading && !docs.length && <Busy label="正在读取任务" />}{legacy ? <LegacyJobReview initialId={initialId} navigate={navigate} /> : state && doc ? <ReferenceExtraction key={doc.id} document={doc} state={state} runs={runs.filter(r => r.document_id === doc.id)} initialRunId={initialId} navigate={navigate} onRun={() => setLegacy(true)} onState={setState} onRefresh={load} onDirty={setDirty} /> : !loading && !docs.length ? <Empty icon={FileSearch} title="暂无参考作品" action={<button className="button primary" onClick={() => navigate("documents")}>上传文件<ArrowRight size={14} /></button>} /> : <Busy label="正在读取作品任务" />}</section></main>;
 }

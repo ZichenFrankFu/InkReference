@@ -32,51 +32,8 @@ def _chapter(value: Any) -> int | None:
 
 
 def reference_projection(sections: dict, chapter: int | None = None) -> dict:
-    """Return facts known by a chapter, preserving both clocks and unknown anchors."""
-    def visible(item: dict, field: str = "first_chapter") -> bool:
-        number = _chapter(item.get(field))
-        return chapter is None or number is None or number <= chapter
-
-    plot = copy.deepcopy(sections.get("plot") or {})
-    events_by_subject: dict[str, list[dict]] = {}
-    epochs = []
-    for epoch in _objects(plot.get("epochs")):
-        periods = []
-        for period in _objects(epoch.get("periods")):
-            events = [event for event in _objects(period.get("events")) if visible(event)]
-            if not events and chapter is not None:
-                continue
-            periods.append({**period, "events": events})
-            for event in events:
-                subject = str(event.get("subject") or "").strip()
-                text = str(event.get("description") or event.get("name") or "").strip()
-                if subject and text:
-                    events_by_subject.setdefault(subject, []).append({
-                        "chapter": str(event.get("first_chapter") or period.get("time") or ""), "text": text,
-                    })
-        if periods or chapter is None:
-            epochs.append({**epoch, "periods": periods})
-    plot["epochs"] = epochs
-    characters = []
-    for original in _objects(sections.get("characters")):
-        if not visible(original):
-            continue
-        person = copy.deepcopy(original)
-        # Check the original list before filtering: a later own experience must
-        # not cause earlier plot events to masquerade as the user's own facts.
-        owns_experiences = bool(_objects(person.get("experiences")))
-        for key in ("appearance", "personality", "experiences"):
-            person[key] = [item for item in _objects(person.get(key)) if visible(item, "chapter")]
-        if not owns_experiences:
-            person["experiences"] = copy.deepcopy(events_by_subject.get(str(person.get("name") or "").strip(), []))
-        characters.append(person)
-    settings = []
-    for original in _objects(sections.get("settings")):
-        if visible(original):
-            setting = copy.deepcopy(original)
-            setting["updates"] = [item for item in _objects(setting.get("updates")) if visible(item, "chapter")]
-            settings.append(setting)
-    return {"plot": plot, "characters": characters, "settings": settings}
+    from .analysis_projection import project_sections
+    return project_sections(sections, chapter)
 
 
 class CatalogLinks:
@@ -179,7 +136,7 @@ class CatalogLinks:
                     COALESCE(json_array_length(sections_json,'$.characters'),0),
                     COALESCE(json_array_length(sections_json,'$.settings'),0),
                     (SELECT COUNT(*) FROM json_each(reference_analysis.sections_json,'$.plot.epochs') e,
-                     json_each(e.value,'$.periods') p,json_each(p.value,'$.events'))
+                     json_each(e.value,'$.periods') p,json_each(p.value,'$.events')) + COALESCE(json_array_length(sections_json,'$.plot.events'),0)
                     FROM reference_analysis WHERE document_id=? AND revision>0""", (row["id"],)).fetchone() if exists else None
                 item["analysis"] = None
                 if analysis:
@@ -198,5 +155,8 @@ class CatalogLinks:
         if link["work_id"] != work_id:
             raise DataError(409, "此文本未关联当前作品")
         state = self.reference().get(document_id)
+        projection = reference_projection(state["sections"], chapter)
+        if chapter is not None:
+            state = {**state, "sections": projection}
         return {"work_id": work_id, "document_id": document_id, "latest_version_id": link["latest_version_id"],
-                "reference": state, "projection": reference_projection(state["sections"], chapter), "chapter": chapter}
+                "reference": state, "projection": projection, "chapter": chapter}

@@ -112,6 +112,14 @@ class ProjectStore:
                         with closing(sqlite3.connect(str(target))) as connection:
                             if connection.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
                                 raise DataError(422, "备份数据库完整性校验失败。")
+                # Book folders are deterministic projections of the backed-up
+                # versions and metadata, not a second source of truth. Rebuild
+                # them in the independent restored workspace.
+                if (destination / "workbench.sqlite3").is_file():
+                    from .documents import DocumentStore
+                    rebuilt = DocumentStore(destination).materialize_all_chapters()
+                    if any(item.get("state") == "error" for item in rebuilt):
+                        raise DataError(422, "正文数据已校验，但章节文件重建失败；请检查可用磁盘空间后重试。")
         except DataError:
             shutil.rmtree(destination, ignore_errors=True)
             raise

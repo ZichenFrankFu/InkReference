@@ -1,13 +1,16 @@
-import { useEffect, useId, useRef, useState, type ReactNode } from "react";
+import { useEffect, useId, useRef, type ReactNode } from "react";
 import {
   AlertCircle,
   CheckCircle2,
   ChevronRight,
   LoaderCircle,
+  Menu,
   Wrench,
   X,
 } from "lucide-react";
 import { openQuickRepair } from "./diagnostics";
+import { ActivityRail, PageActivityScope, useActivity, usePageNavigation } from "./activity";
+export { ActivityRail, PageActivityScope, PageNavigationScope } from "./activity";
 export const messageOf = (e: unknown) =>
   e instanceof Error ? e.message : "操作未完成，请重试。";
 export function Busy({
@@ -21,29 +24,17 @@ export function Busy({
   inline?: boolean;
   delay?: number;
 }) {
-  const [visible, setVisible] = useState(delay === 0);
-  useEffect(() => {
-    if (delay === 0) {
-      setVisible(true);
-      return;
-    }
-    const timer = window.setTimeout(() => setVisible(true), delay);
-    return () => window.clearTimeout(timer);
-  }, [delay]);
+  const { visible, scoped } = useActivity(label, true, delay);
+  if (scoped) return null;
   return (
     <div
-      className={`busy-state ${compact ? "compact" : ""} ${inline ? "busy-inline" : "busy-floating"} ${visible ? "busy-visible" : "busy-pending"}`}
+      className={`busy-state busy-inline ${compact ? "compact" : ""} ${inline ? "" : "busy-local"} ${visible ? "busy-visible" : "busy-pending"}`}
       role="status"
       aria-live="polite"
       aria-atomic="true"
     >
-      <span>
-        <LoaderCircle className="spin" size={16} />
-        {label}
-      </span>
-      <div className="indeterminate" role="progressbar" aria-label={label}>
-        <i />
-      </div>
+      <span>{label}</span>
+      <ActivityRail active={visible} label={label} />
     </div>
   );
 }
@@ -146,10 +137,14 @@ export function Modal({
     document.addEventListener("keydown", handle);
     return () => {
       document.removeEventListener("keydown", handle);
-      prev?.focus();
+      const target = prev?.isConnected && !prev.closest("[hidden]") && !prev.matches(":disabled")
+        ? prev
+        : document.getElementById("workspace-content");
+      target?.focus({ preventScroll: true });
     };
   }, []);
   return (
+    <PageActivityScope modal>
     <div
       className="modal-backdrop"
       onMouseDown={(e) => {
@@ -175,10 +170,16 @@ export function Modal({
             <X size={20} />
           </button>
         </header>
+        <ModalActivity busy={busy} title={title} />
         {children}
       </div>
     </div>
+    </PageActivityScope>
   );
+}
+function ModalActivity({ busy, title }: { busy: boolean; title: string }) {
+  useActivity(`正在处理${title}`, busy);
+  return <ActivityRail className="modal-title-progress" />;
 }
 export function Notice({
   children,
@@ -228,22 +229,25 @@ export function Empty({
   );
 }
 export function PageTitle({
-  kicker,
   title,
   action,
 }: {
-  kicker: string;
+  kicker?: string;
   title: string;
   description?: string;
   action?: ReactNode;
 }) {
+  const navigation = usePageNavigation();
   return (
-    <header className="studio-heading">
-      <div>
-        <span className="eyebrow">{kicker}</span>
-        <h1>{title}</h1>
+    <header className="studio-heading page-title">
+      <div className="page-title-row">
+        <div className="page-title-copy">
+          {navigation && <button className="icon-button page-menu" onClick={navigation.openMenu} aria-label="打开导航" aria-expanded={navigation.menuOpen} aria-controls="app-navigation"><Menu size={20} /></button>}
+          <h1>{title}</h1>
+        </div>
+        {(action || navigation?.returnAction) && <div className="page-title-actions">{navigation?.returnAction}{action}</div>}
       </div>
-      {action}
+      <ActivityRail className="page-title-progress" />
     </header>
   );
 }

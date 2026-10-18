@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { Check, ChevronLeft, ChevronRight, FilePlus2, ListChecks, Pencil, Plus, Search, Trash2 } from "lucide-react";
+import { Check, ChevronLeft, ChevronRight, FilePlus2, ListChecks, ListTree, Pencil, Plus, Search, Trash2, X } from "lucide-react";
 import { send, studio, type TextVersion } from "./studio";
 import { Busy, Empty, Modal, Notice, messageOf } from "./ui";
 import ChapterTextEditor, { ChapterTitleEditor, type ChapterEditorHandle, type TextHighlight } from "./ChapterTextEditor";
@@ -29,6 +29,7 @@ export default function ChapterWorkbench({ documentId, version, onVersion, onDir
   const [error, setError] = useState("");
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState("all");
+  const [directoryOpen, setDirectoryOpen] = useState(false);
   const [edit, setEdit] = useState<Draft | null>(null);
   const [dialog, setDialog] = useState("");
   const [newTitle, setNewTitle] = useState("");
@@ -41,7 +42,6 @@ export default function ChapterWorkbench({ documentId, version, onVersion, onDir
   const documentRef = useRef(documentId);
   const activeRef = useRef(active);
   const selectedChapterRef = useRef<string | undefined>(undefined);
-  const workspaceRef = useRef<HTMLDivElement>(null);
   const navigationRef = useRef<HTMLDivElement>(null);
   const [navigationTop, setNavigationTop] = useState(0);
   const editorRef = useRef<ChapterEditorHandle>(null);
@@ -61,21 +61,6 @@ export default function ChapterWorkbench({ documentId, version, onVersion, onDir
   useEffect(() => { onDirtyRef.current(dirty); }, [dirty]);
   useEffect(() => { activityRef.current?.(busy || (loading ? "正在读取章节" : reading ? "正在读取章节" : "")); }, [busy, loading, reading]);
   useEffect(() => () => { onDirtyRef.current(false); activityRef.current?.(""); }, []);
-
-  useLayoutEffect(() => {
-    const workspace = workspaceRef.current;
-    if (!workspace) return;
-    let frame = 0;
-    const fit = () => {
-      if (!workspace.getClientRects().length) return;
-      const top = workspace.getBoundingClientRect().top;
-      workspace.style.setProperty("--chapter-workspace-height", `${Math.max(410, Math.min(850, window.innerHeight - Math.max(0, top) - 26))}px`);
-    };
-    const schedule = () => { cancelAnimationFrame(frame); frame = requestAnimationFrame(fit); };
-    const observer = new ResizeObserver(schedule);
-    observer.observe(workspace.parentElement!); window.addEventListener("resize", schedule); fit();
-    return () => { observer.disconnect(); window.removeEventListener("resize", schedule); cancelAnimationFrame(frame); };
-  }, []);
 
   const fetchPage = useCallback(async (part: Chapter, start = 0) => {
     const key = `${version.id}:${part.id}:${start}`;
@@ -135,6 +120,7 @@ export default function ChapterWorkbench({ documentId, version, onVersion, onDir
     const part = chapters[next];
     if (!part) return;
     if (dirty && !force) { setDiscardAction(() => () => { void changePage(next, start, true, locate); }); return; }
+    setDirectoryOpen(false);
     if (next === active && start === pageStart && page?.id === part.id) {
       const finding = locate ? firstFinding(page) : undefined;
       if (finding) jumpToFinding(finding);
@@ -222,11 +208,11 @@ export default function ChapterWorkbench({ documentId, version, onVersion, onDir
   const hasPrevious = pageStart > 0;
   const hasNext = !!page && (page.next_start !== undefined ? page.next_start !== null : (page.editable_end ?? page.end) < page.total);
   return <div className="chapter-workbench chapter-workbench-v2" aria-busy={loading || reading || !!busy || (!!page?.version_id && page.version_id !== version.id)}>
-    <div className="chapter-workbench-toolbar"><div className="chapter-workbench-title"><strong>正文清理</strong><span>{actualCount} 章{missingCount ? ` · ${missingCount} 章待补全` : ""}</span></div><div className="inline-actions"><button className="button secondary compact-button" disabled={loading || !!busy || reading} onClick={() => openCleanup()}><ListChecks size={14} />批量清理{affected.length > 0 && <span className="chapter-counter">{affected.length}</span>}</button>{onComplete && <button className="button primary compact-button" disabled={loading || !!busy || reading} onClick={() => safeAction(onComplete)}><Check size={14} />完成清理</button>}</div></div>
-    <div className="chapter-guide" aria-label="正文标记说明"><span><i className="chapter-guide-swatch removing" />红色：待清理</span><span><i className="chapter-guide-swatch diagnostic" />紫色：待检查</span><span><i className="chapter-guide-swatch missing" />空章：待补充</span></div>
-    <div ref={workspaceRef} className="chapter-workspace">
-      <aside className="chapter-navigation" aria-label="章节目录">
-        <div className="chapter-navigation-top"><strong>章节目录</strong><button className="icon-button" title="添加章节" aria-label="添加章节" disabled={loading || !!busy} onClick={() => safeAction(() => { setNewTitle(""); setNewBody(""); setDialog("insert"); })}><Plus size={15} /></button></div>
+    <div className="chapter-workbench-toolbar"><button className="button secondary compact-button chapter-directory-toggle" aria-expanded={directoryOpen} aria-controls="chapter-directory" onClick={() => setDirectoryOpen((value) => !value)}><ListTree size={15} />章节目录</button><div className="chapter-guide" aria-label="正文标记说明"><span><i className="chapter-guide-swatch removing" />待清理</span><span><i className="chapter-guide-swatch diagnostic" />待检查</span><span><i className="chapter-guide-swatch missing" />待补充</span></div><span className="chapter-compact-count">{actualCount} 章{missingCount ? ` · 待补 ${missingCount}` : ""}</span><div className="inline-actions"><button className="button secondary compact-button" disabled={loading || !!busy || reading} onClick={() => openCleanup()}><ListChecks size={14} />批量清理{affected.length > 0 && <span className="chapter-counter">{affected.length}</span>}</button>{onComplete && <button className="button primary compact-button" disabled={loading || !!busy || reading} onClick={() => safeAction(onComplete)}><Check size={14} />完成清理</button>}</div></div>
+    <div className={`chapter-workspace ${directoryOpen ? "directory-open" : ""}`}>
+      {directoryOpen && <button className="chapter-directory-scrim" aria-label="关闭章节目录" onClick={() => setDirectoryOpen(false)} />}
+      <aside id="chapter-directory" className="chapter-navigation" aria-label="章节目录">
+        <div className="chapter-navigation-top"><strong>章节目录 <small>{chapters.length}</small></strong><div className="inline-actions"><button className="icon-button" title="添加章节" aria-label="添加章节" disabled={loading || !!busy} onClick={() => safeAction(() => { setNewTitle(""); setNewBody(""); setDialog("insert"); })}><Plus size={15} /></button><button className="icon-button chapter-directory-close" aria-label="关闭章节目录" onClick={() => setDirectoryOpen(false)}><X size={15} /></button></div></div>
         <label className="chapter-search"><Search size={14} /><input aria-label="搜索章节" placeholder="搜索章节" value={query} onChange={(e) => setQuery(e.target.value)} /></label>
         <div className="chapter-directory-filter"><button className={filter === "all" ? "active" : ""} onClick={() => setFilter("all")}>全部</button><button className={filter === "review" ? "active" : ""} onClick={() => setFilter("review")}>待检查 {affected.length || ""}</button></div>
         <div ref={navigationRef} className={`chapter-navigation-list ${virtual ? "virtual" : ""}`} onScroll={(event) => { if (virtual) setNavigationTop(event.currentTarget.scrollTop); }}>

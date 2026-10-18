@@ -1,820 +1,107 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import {
-  Background,
-  Controls,
-  ReactFlow,
-  Position,
-  applyNodeChanges,
-  type Node,
-  type NodeChange,
-} from "@xyflow/react";
-import "@xyflow/react/dist/style.css";
-import {
-  Check,
-  Code2,
-  FileCheck2,
-  FileText,
-  GitBranch,
-  Layers3,
-  Plus,
-  Save,
-  Settings2,
-  Sparkles,
-  Upload,
-} from "lucide-react";
-import {
-  studio,
-  send,
-  normalizeList,
-  describe,
-  type Workflow,
-  type Skill,
-  type List,
-} from "./studio";
-import {
-  Busy,
-  Empty,
-  Modal,
-  Notice,
-  PageTitle,
-  SelectField,
-  messageOf,
-} from "./ui";
-const newWorkflow: Workflow = {
-  id: "my-workflow",
-  version: "1.0.0",
-  name: "我的分析流程",
-  skill_id: "unified-reference",
-  skill_version: "1.0.0",
-  nodes: { summary: true, characters: true, events: true, cliches: true },
-  custom_prompt: "",
-  chunk_chars: 6000,
-  retry_limit: 2,
-  max_input_tokens: 12000,
-  max_output_tokens: 3000,
-  budget_tokens: 100000,
-};
-const newSkill: Skill = {
-  id: "my-skill",
-  version: "1.0.0",
-  name: "我的分析 Skill",
-  description: "",
-  prompt: "",
-  output_schema: {
-    type: "object",
-    properties: {
-      summary: { type: "string" },
-      characters: {
-        type: "array",
-        items: {
-          type: "object",
-          properties: {
-            name: { type: "string" },
-            description: { type: "string" },
-            evidence: { type: "string" },
-          },
-          required: ["name", "description", "evidence"],
-        },
-      },
-      ...Object.fromEntries(
-        ["events", "cliches"].map((key) => [
-          key,
-          {
-            type: "array",
-            items: {
-              type: "object",
-              properties: {
-                name: { type: "string" },
-                description: { type: "string" },
-                evidence: { type: "string" },
-              },
-              required: ["name", "description", "evidence"],
-            },
-          },
-        ]),
-      ),
-    },
-    required: ["summary", "characters", "events", "cliches"],
-  },
-};
-const outputNames: Record<string, string> = {
-  summary: "剧情梗概",
-  characters: "人物事实",
-  events: "剧情事件",
-  cliches: "桥段实例",
-};
-function nextVersion(version: string) {
-  const parts = version.split(".");
-  if (parts.length === 3 && !isNaN(Number(parts[2])))
-    return `${parts[0]}.${parts[1]}.${Number(parts[2]) + 1}`;
-  return `${version}-copy`;
-}
-function buildNodes(
-  workflow: Workflow,
-  positions: Record<string, { x: number; y: number }>,
-): Node[] {
-  const base = [
-    {
-      id: "source",
-      name: "来源全文",
-      detail: "固定文本版本",
-      icon: FileText,
-      x: 15,
-      y: 160,
-    },
-    {
-      id: "chunk",
-      name: "覆盖切分",
-      detail: `每块 ≤ ${workflow.chunk_chars.toLocaleString()} 字`,
-      icon: Layers3,
-      x: 235,
-      y: 160,
-    },
-    {
-      id: "extract",
-      name: "统一模型抽取",
-      detail: "Skill + 自定义提示词",
-      icon: Sparkles,
-      x: 455,
-      y: 160,
-    },
-    {
-      id: "validate",
-      name: "证据与格式校验",
-      detail: "连续原文 · 字符位置",
-      icon: FileCheck2,
-      x: 675,
-      y: 160,
-    },
-    {
-      id: "review",
-      name: "人工审核",
-      detail: "确认后入库",
-      icon: Check,
-      x: 895,
-      y: 160,
-    },
-  ];
-  return base.map((b) => ({
-    id: b.id,
-    position: positions[b.id] || { x: b.x, y: b.y },
-    data: {
-      label: (
-        <div className={`flow-node flow-${b.id}`}>
-          <span className="flow-node-icon">
-            <b.icon size={19} />
-          </span>
-          <strong>{b.name}</strong>
-          <small>{b.detail}</small>
-          {b.id === "extract" && (
-            <div className="flow-output-tags">
-              {Object.entries(outputNames)
-                .filter(([key]) => workflow.nodes[key])
-                .map(([key, name]) => (
-                  <span key={key}>{name}</span>
-                ))}
-            </div>
-          )}
-        </div>
-      ),
-    },
-    type: "default",
-    sourcePosition: Position.Right,
-    targetPosition: Position.Left,
-    style: {
-      width: 185,
-      padding: 0,
-      border: "none",
-      background: "transparent",
-    },
-  }));
-}
+import { useCallback, useEffect, useRef, useState } from "react";
+import { BookOpen, Check, ChevronRight, FileInput, Layers3, Plus, Save, Settings2, Sparkles, Upload } from "lucide-react";
+import { studio, send, normalizeList, type Workflow, type Skill, type ModelProfile, type List } from "./studio";
+import { Busy, Empty, Modal, Notice, PageTitle, SelectField, messageOf } from "./ui";
+import "./workflow-settings.css";
+
+type Stage = "plot" | "characters" | "settings" | "language";
+const stages: { id: Stage; name: string; output: string }[] = [
+  { id: "plot", name: "剧情大纲", output: "事件 · 情节线 · 卷级与全书大纲" },
+  { id: "characters", name: "角色", output: "角色 · 阶段状态 · 事件经历" },
+  { id: "settings", name: "设定", output: "设定 · 属性变化 · 认识修正" },
+  { id: "language", name: "语言分析", output: "语言风格 · 剧情分析 · 时代背景" },
+];
+const steps = ["输入文件", "数据清洗", "分卷与章节", ...stages.map(stage => stage.name)];
+const clean = <T extends { builtin?: boolean }>(value: T): T => { const result = structuredClone(value); delete result.builtin; return result; };
+const fingerprint = (value: unknown) => JSON.stringify(value);
+const nextVersion = (version: string) => { const match = version.match(/^(\d+)\.(\d+)\.(\d+)$/); return match ? `${match[1]}.${match[2]}.${Number(match[3]) + 1}` : `${version}-copy`; };
+
 export default function Workflows() {
-  const [tab, setTab] = useState<"workflows" | "skills">("workflows");
   const [workflows, setWorkflows] = useState<Workflow[]>([]);
   const [skills, setSkills] = useState<Skill[]>([]);
-  const [draft, setDraft] = useState<Workflow | null>(null);
+  const [profiles, setProfiles] = useState<ModelProfile[]>([]);
+  const [workflow, setWorkflow] = useState<Workflow | null>(null);
   const [skill, setSkill] = useState<Skill | null>(null);
-  const [schema, setSchema] = useState("");
-  const [nodes, setNodes] = useState<Node[]>([]);
-  const [positions, setPositions] = useState<
-    Record<string, { x: number; y: number }>
-  >({});
-  const [selectedNode, setSelectedNode] = useState("extract");
+  const [workflowBase, setWorkflowBase] = useState("");
+  const [skillBase, setSkillBase] = useState("");
+  const [tab, setTab] = useState<"agents" | "skills">("agents");
+  const [stage, setStage] = useState<Stage>("plot");
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
-  const [saveOpen, setSaveOpen] = useState(false);
-  const [saveId, setSaveId] = useState("");
-  const [saveVersion, setSaveVersion] = useState("");
-  const [file, setFile] = useState<File | null>(null);
-  const uploadRef = useRef<HTMLInputElement>(null);
+  const [saveKind, setSaveKind] = useState<"workflow" | "skill" | null>(null);
+  const [identity, setIdentity] = useState({ id: "", version: "", name: "" });
+  const [pending, setPending] = useState<(() => void) | null>(null);
+  const upload = useRef<HTMLInputElement>(null);
+  const workflowDirty = !!workflow && fingerprint(clean(workflow)) !== workflowBase;
+  const skillDirty = !!skill && fingerprint(clean(skill)) !== skillBase;
+  const dirty = workflowDirty || skillDirty;
+  const fixedWorkflows = workflows.filter(item => item.fixed_pipeline);
+  const fixedSkills = skills.filter(item => item.contract_version === 2);
+  const chooseWorkflow = (item: Workflow) => { setWorkflow(structuredClone(item)); setWorkflowBase(fingerprint(clean(item))); setError(""); };
+  const chooseSkill = (item: Skill) => { setSkill(structuredClone(item)); setSkillBase(fingerprint(clean(item))); setError(""); };
   const load = useCallback(async () => {
-    try {
-      const [w, s] = await Promise.all([
-        studio<List<Workflow>>("/workflows"),
-        studio<List<Skill>>("/skills"),
-      ]);
-      setWorkflows(normalizeList(w));
-      setSkills(normalizeList(s));
-    } catch (e) {
-      setError(messageOf(e));
-    } finally {
-      setLoading(false);
-    }
+    const [w, s, p] = await Promise.all([studio<List<Workflow>>("/workflows"), studio<List<Skill>>("/skills"), studio<List<ModelProfile>>("/models")]);
+    const ws = normalizeList(w), ss = normalizeList(s); setWorkflows(ws); setSkills(ss); setProfiles(normalizeList(p));
+    return { ws, ss };
   }, []);
+  useEffect(() => { let live = true; void load().then(({ ws, ss }) => { if (!live) return; const w = ws.find(item => item.fixed_pipeline); const s = ss.find(item => item.contract_version === 2); if (w) chooseWorkflow(w); if (s) chooseSkill(s); }).catch(e => { if (live) setError(messageOf(e)); }).finally(() => { if (live) setLoading(false); }); return () => { live = false; }; }, [load]);
   useEffect(() => {
-    void load();
+    const refresh = () => { setBusy(current => current || "refresh"); void load().catch(e => setError(messageOf(e))).finally(() => setBusy(current => current === "refresh" ? "" : current)); };
+    const refreshModels = () => { void studio<List<ModelProfile>>("/models").then(data => setProfiles(normalizeList(data))).catch(e => setError(messageOf(e))); };
+    window.addEventListener("inkreference:workflows-refresh", refresh);
+    window.addEventListener("inkreference:models-changed", refreshModels);
+    return () => { window.removeEventListener("inkreference:workflows-refresh", refresh); window.removeEventListener("inkreference:models-changed", refreshModels); };
   }, [load]);
-  const choose = async (w: Workflow) => {
-    setBusy("load");
-    setError("");
-    try {
-      const result = await studio<Workflow>(
-        `/workflows/${w.id}/versions/${w.version}`,
-      );
-      setDraft(result);
-      let layout: Record<string, { x: number; y: number }> = {};
-      try {
-        const l = await studio<{
-          layout: { positions?: Record<string, { x: number; y: number }> };
-        }>(`/workflows/${w.id}/versions/${w.version}/layout`);
-        layout = l.layout?.positions || {};
-      } catch {
-        /* older workflow layout defaults to generated graph */
-      }
-      setPositions(layout);
-    } catch (e) {
-      setError(messageOf(e));
-    } finally {
-      setBusy("");
-    }
+  useEffect(() => { const warn = (event: BeforeUnloadEvent) => { if (dirty) event.preventDefault(); }; window.addEventListener("beforeunload", warn); return () => window.removeEventListener("beforeunload", warn); }, [dirty]);
+  const guard = (action: () => void) => { if (dirty) setPending(() => action); else action(); };
+  const update = (patch: Partial<Workflow>) => setWorkflow(value => value ? { ...value, ...patch } : value);
+  const openSave = (kind: "workflow" | "skill", fresh = false) => {
+    const value = kind === "workflow" ? workflow : skill; if (!value) return;
+    const unsavedSkill = kind === "skill" && !skillBase;
+    setIdentity({ id: fresh || value.builtin ? kind === "workflow" ? "my-analysis" : "my-skill" : value.id, version: fresh || value.builtin ? "1.0.0" : unsavedSkill ? value.version : nextVersion(value.version), name: value.name });
+    setSaveKind(kind); setError("");
   };
-  useEffect(() => {
-    if (draft) setNodes(buildNodes(draft, positions));
-  }, [draft, positions]);
-  const edges = useMemo(
-    () =>
-      ["source", "chunk", "extract", "validate"].map((id, i) => ({
-        id: `${id}-${i}`,
-        source: id,
-        target: ["chunk", "extract", "validate", "review"][i],
-        animated: false,
-        style: { stroke: "#8eaaa0", strokeWidth: 1.7 },
-        type: "smoothstep",
-      })),
-    [],
-  );
-  const onNodesChange = useCallback((changes: NodeChange[]) => {
-    setNodes((n) => applyNodeChanges(changes, n));
-  }, []);
   const save = async () => {
-    if (!draft) return;
-    setBusy("save");
-    setError("");
+    const source = saveKind === "workflow" ? workflow : skill; if (!source || !saveKind) return;
+    setBusy("save"); setError(""); setMessage("");
     try {
-      const result = await send<Workflow>("/workflows", {
-        ...draft,
-        id: saveId,
-        version: saveVersion,
-        builtin: undefined,
-      });
-      const pos = Object.fromEntries(nodes.map((n) => [n.id, n.position]));
-      await send(
-        `/workflows/${result.id}/versions/${result.version}/layout`,
-        { positions: pos },
-        "PUT",
-      );
-      setDraft(result);
-      setPositions(pos);
-      setSaveOpen(false);
-      setMessage("工作流新版本已保存。");
+      const payload = { ...clean(source), ...identity };
+      const result = await send<Workflow | Skill>(saveKind === "workflow" ? "/workflows" : "/skills", payload);
       await load();
-    } catch (e) {
-      setError(messageOf(e));
-    } finally {
-      setBusy("");
-    }
+      if (saveKind === "workflow") chooseWorkflow(result as Workflow); else chooseSkill(result as Skill);
+      setSaveKind(null); setMessage("已保存新版本");
+    } catch (e) { setError(messageOf(e)); } finally { setBusy(""); }
   };
-  const saveLayout = async () => {
-    if (!draft) return;
-    setBusy("layout");
-    setError("");
-    try {
-      const pos = Object.fromEntries(nodes.map((n) => [n.id, n.position]));
-      await send(
-        `/workflows/${draft.id}/versions/${draft.version}/layout`,
-        { positions: pos },
-        "PUT",
-      );
-      setPositions(pos);
-      setMessage("画布布局已保存。");
-    } catch (e) {
-      setError(messageOf(e));
-    } finally {
-      setBusy("");
-    }
+  const uploadSkill = async (file: File) => {
+    setBusy("upload"); setError(""); setMessage("");
+    try { const body = new FormData(); body.append("file", file); const result = await studio<Skill>("/skills/upload?contract_version=2", { method: "POST", body }); await load(); chooseSkill(result); setTab("skills"); setMessage("Skill 已导入"); }
+    catch (e) { setError(messageOf(e)); } finally { setBusy(""); if (upload.current) upload.current.value = ""; }
   };
-  const saveSkill = async () => {
-    if (!skill) return;
-    setBusy("skill");
-    setError("");
-    try {
-      let parsed;
-      try {
-        parsed = JSON.parse(schema);
-      } catch {
-        throw new Error("输出 Schema 需要是有效的 JSON。");
-      }
-      const result = await send<Skill>("/skills", {
-        ...skill,
-        output_schema: parsed,
-        builtin: undefined,
-      });
-      setSkill(result);
-      setMessage("Skill 版本已保存。");
-      await load();
-    } catch (e) {
-      setError(messageOf(e));
-    } finally {
-      setBusy("");
-    }
-  };
-  const upload = async (f: File) => {
-    setFile(f);
-    setBusy("upload");
-    setError("");
-    try {
-      const form = new FormData();
-      form.append("file", f);
-      const result = await studio<Skill>("/skills/upload", {
-        method: "POST",
-        body: form,
-      });
-      setSkill(result);
-      setSchema(describe(result.output_schema));
-      setMessage("Skill 已校验并导入。");
-      await load();
-    } catch (e) {
-      setError(messageOf(e));
-    } finally {
-      setBusy("");
-      if (uploadRef.current) uploadRef.current.value = "";
-    }
-  };
-  return (
-    <main className="studio-main">
-      <PageTitle
-        kicker="WORKFLOW STUDIO"
-        title="工作流与 Skills"
-        description="把自己的阅读方法，变成可以重复运行的流程。"
-        action={
-          <div className="inline-actions">
-            {tab === "skills" ? (
-              <>
-                <input
-                  ref={uploadRef}
-                  type="file"
-                  accept=".json,.zip,.md"
-                  hidden
-                  onChange={(e) => {
-                    const f = e.target.files?.[0];
-                    if (f) void upload(f);
-                  }}
-                />
-                <button
-                  className="button secondary"
-                  onClick={() => uploadRef.current?.click()}
-                  disabled={!!busy}
-                >
-                  <Upload size={16} />
-                  上传 Skill
-                </button>
-                <button
-                  className="button primary"
-                  onClick={() => {
-                    setSkill({ ...newSkill });
-                    setSchema(describe(newSkill.output_schema));
-                  }}
-                >
-                  <Plus size={16} />
-                  新建 Skill
-                </button>
-              </>
-            ) : (
-              <button
-                className="button primary"
-                onClick={() => {
-                  setDraft({ ...newWorkflow });
-                  setPositions({});
-                }}
-              >
-                <Plus size={16} />
-                新建工作流
-              </button>
-            )}
-          </div>
-        }
-      />
-      <div className="page-tabs">
-        <button
-          className={tab === "workflows" ? "active" : ""}
-          onClick={() => setTab("workflows")}
-        >
-          <GitBranch size={16} />
-          工作流
-        </button>
-        <button
-          className={tab === "skills" ? "active" : ""}
-          onClick={() => setTab("skills")}
-        >
-          <Code2 size={16} />
-          Skills<span>{skills.length}</span>
-        </button>
-      </div>
-      <Notice error={!!error} success={!error && !!message}>
-        {error || message}
-      </Notice>
-      {busy && (
-        <Busy
-          label={
-            {
-              load: "正在读取工作流",
-              save: "正在保存新版本",
-              layout: "正在保存画布",
-              skill: "正在校验并保存 Skill",
-              upload: `正在校验 ${file?.name || "Skill"}`,
-            }[busy]
-          }
-          compact
-        />
-      )}
-      {tab === "workflows" ? (
-        <div className="workflow-layout">
-          <aside className="surface workflow-index">
-            <div className="surface-heading">
-              <h2>工作流版本</h2>
-              <span>{workflows.length}</span>
-            </div>
-            {loading ? (
-              <Busy label="正在读取工作流" />
-            ) : (
-              workflows.map((w) => (
-                <button
-                  className={`workflow-list-item ${draft?.id === w.id && draft.version === w.version ? "active" : ""}`}
-                  onClick={() => void choose(w)}
-                  key={`${w.id}@${w.version}`}
-                >
-                  <span>
-                    <GitBranch size={17} />
-                    <strong>{w.name}</strong>
-                  </span>
-                  <small>
-                    v{w.version}
-                    {w.builtin ? " · 内置" : ""}
-                  </small>
-                </button>
-              ))
-            )}
-          </aside>
-          <section className="surface workflow-editor">
-            {!draft ? (
-              <Empty
-                icon={GitBranch}
-                title="选择工作流"
-              />
-            ) : (
-              <>
-                <div className="workflow-toolbar">
-                  <div>
-                    <h2>{draft.name}</h2>
-                    <span>
-                      v{draft.version}
-                      {draft.builtin ? " · 内置模板" : ""}
-                    </span>
-                  </div>
-                  <div className="inline-actions">
-                    <button
-                      className="button secondary"
-                      disabled={!!busy}
-                      onClick={() => void saveLayout()}
-                    >
-                      <Save size={14} />
-                      保存布局
-                    </button>
-                    <button
-                      className="button primary"
-                      disabled={!!busy}
-                      onClick={() => {
-                        setSaveId(draft.id);
-                        setSaveVersion(nextVersion(draft.version));
-                        setSaveOpen(true);
-                      }}
-                    >
-                      保存为新版本
-                    </button>
-                  </div>
-                </div>
-                <div className="workflow-canvas">
-                  <ReactFlow
-                    nodes={nodes}
-                    edges={edges}
-                    onNodesChange={onNodesChange}
-                    onNodeClick={(_, node) => setSelectedNode(node.id)}
-                    onNodeDragStop={(_, node) =>
-                      setPositions((p) => ({ ...p, [node.id]: node.position }))
-                    }
-                    nodesConnectable={false}
-                    edgesReconnectable={false}
-                    fitView
-                    fitViewOptions={{ padding: 0.14 }}
-                    minZoom={0.3}
-                    maxZoom={1.5}
-                    deleteKeyCode={null}
-                    proOptions={{ hideAttribution: false }}
-                  >
-                    <Background color="#d7dfd7" gap={24} size={1} />
-                    <Controls showInteractive={false} />
-                  </ReactFlow>
-                  <span className="canvas-caption">
-                    拖动节点调整布局 · 点击查看配置
-                  </span>
-                </div>
-                <div className="workflow-configuration">
-                  <div className="configuration-title">
-                    <Settings2 size={17} />
-                    <h3>
-                      {selectedNode === "chunk"
-                        ? "文本分块"
-                        : selectedNode === "extract"
-                          ? "模型抽取配置"
-                          : selectedNode === "review"
-                            ? "审核设置"
-                            : selectedNode === "validate"
-                              ? "来源证据校验"
-                              : "工作流配置"}
-                    </h3>
-                  </div>
-                  <div className="workflow-config-grid">
-                    <section>
-                      <label className="studio-field">
-                        <span>工作流名称</span>
-                        <input
-                          value={draft.name}
-                          onChange={(e) =>
-                            setDraft({ ...draft, name: e.target.value })
-                          }
-                        />
-                      </label>
-                      <SelectField
-                        label="使用的 Skill 版本"
-                        value={`${draft.skill_id}@${draft.skill_version}`}
-                        onChange={(value) => {
-                          const [id, version] = value.split("@");
-                          setDraft({
-                            ...draft,
-                            skill_id: id,
-                            skill_version: version,
-                          });
-                        }}
-                      >
-                        {skills.map((s) => (
-                          <option
-                            key={`${s.id}@${s.version}`}
-                            value={`${s.id}@${s.version}`}
-                          >
-                            {s.name} · v{s.version}
-                          </option>
-                        ))}
-                      </SelectField>
-                      <div className="output-toggles">
-                        {Object.entries(outputNames).map(([key, name]) => (
-                          <label key={key}>
-                            <span>{name}</span>
-                            <input
-                              type="checkbox"
-                              role="switch"
-                              checked={!!draft.nodes[key]}
-                              onChange={(e) =>
-                                setDraft({
-                                  ...draft,
-                                  nodes: {
-                                    ...draft.nodes,
-                                    [key]: e.target.checked,
-                                  },
-                                })
-                              }
-                            />
-                          </label>
-                        ))}
-                      </div>
-                    </section>
-                    <section>
-                      <div className="form-grid">
-                        {[
-                          ["chunk_chars", "每块字数"],
-                          ["retry_limit", "额外重试次数"],
-                          ["max_input_tokens", "单次输入上限"],
-                          ["max_output_tokens", "单次输出上限"],
-                          ["budget_tokens", "任务 token 预算"],
-                        ].map(([key, label]) => (
-                          <label className="studio-field" key={key}>
-                            <span>{label}</span>
-                            <input
-                              type="number"
-                              min={key === "retry_limit" ? 0 : 1}
-                              value={Number(draft[key as keyof Workflow] || 0)}
-                              onChange={(e) =>
-                                setDraft({
-                                  ...draft,
-                                  [key]: Number(e.target.value),
-                                })
-                              }
-                            />
-                          </label>
-                        ))}
-                      </div>
-                    </section>
-                    <section className="prompt-section">
-                      <label className="studio-field">
-                        <span>自定义提示词</span>
-                        <textarea
-                          rows={6}
-                          placeholder="例如：重点提取人物首次登场、伏笔及其回收；所有事实附原文证据。"
-                          value={draft.custom_prompt}
-                          onChange={(e) =>
-                            setDraft({
-                              ...draft,
-                              custom_prompt: e.target.value,
-                            })
-                          }
-                        />
-                      </label>
-                    </section>
-                  </div>
-                </div>
-              </>
-            )}
-          </section>
-        </div>
-      ) : (
-        <div className="skills-layout">
-          <aside className="surface skill-index">
-            <div className="surface-heading">
-              <h2>Skills</h2>
-              <span>{skills.length}</span>
-            </div>
-            {loading ? (
-              <Busy label="正在读取 Skills" />
-            ) : (
-              skills.map((s) => (
-                <button
-                  className={`workflow-list-item ${skill?.id === s.id && skill.version === s.version ? "active" : ""}`}
-                  onClick={() => {
-                    setSkill({ ...s, version: nextVersion(s.version) });
-                    setSchema(describe(s.output_schema));
-                  }}
-                  key={`${s.id}@${s.version}`}
-                >
-                  <span>
-                    <Code2 size={17} />
-                    <strong>{s.name}</strong>
-                  </span>
-                  <small>
-                    v{s.version}
-                    {s.builtin ? " · 内置" : ""}
-                  </small>
-                </button>
-              ))
-            )}
-          </aside>
-          <section className="surface skill-editor">
-            {!skill ? (
-              <Empty
-                icon={Code2}
-                title="选择 Skill"
-              />
-            ) : (
-              <>
-                <div className="surface-heading">
-                  <h2>{skill.name}</h2>
-                  <button
-                    className="button primary"
-                    disabled={!!busy}
-                    onClick={() => void saveSkill()}
-                  >
-                    <Save size={15} />
-                    保存 Skill 版本
-                  </button>
-                </div>
-                <div className="skill-editor-body">
-                  <div className="form-grid">
-                    <label className="studio-field">
-                      <span>Skill ID</span>
-                      <input
-                        value={skill.id}
-                        onChange={(e) =>
-                          setSkill({ ...skill, id: e.target.value })
-                        }
-                      />
-                    </label>
-                    <label className="studio-field">
-                      <span>新版本</span>
-                      <input
-                        value={skill.version}
-                        onChange={(e) =>
-                          setSkill({ ...skill, version: e.target.value })
-                        }
-                      />
-                    </label>
-                  </div>
-                  <label className="studio-field">
-                    <span>名称</span>
-                    <input
-                      value={skill.name}
-                      onChange={(e) =>
-                        setSkill({ ...skill, name: e.target.value })
-                      }
-                    />
-                  </label>
-                  <label className="studio-field">
-                    <span>说明</span>
-                    <input
-                      value={skill.description}
-                      onChange={(e) =>
-                        setSkill({ ...skill, description: e.target.value })
-                      }
-                    />
-                  </label>
-                  <label className="studio-field">
-                    <span>提取提示词</span>
-                    <textarea
-                      rows={9}
-                      value={skill.prompt}
-                      onChange={(e) =>
-                        setSkill({ ...skill, prompt: e.target.value })
-                      }
-                      placeholder="清楚描述需要提取的内容、约束和证据要求。"
-                    />
-                  </label>
-                  <label className="studio-field">
-                    <span>输出 JSON Schema</span>
-                    <textarea
-                      className="code-editor"
-                      rows={12}
-                      value={schema}
-                      onChange={(e) => setSchema(e.target.value)}
-                      spellCheck={false}
-                    />
-                  </label>
-                </div>
-              </>
-            )}
-          </section>
-        </div>
-      )}
-      {saveOpen && draft && (
-        <Modal
-          title="保存工作流新版本"
-          onClose={() => setSaveOpen(false)}
-          busy={busy === "save"}
-        >
-          <div className="modal-body">
-            <label className="studio-field">
-              <span>工作流 ID</span>
-              <input
-                value={saveId}
-                onChange={(e) => setSaveId(e.target.value)}
-              />
-            </label>
-            <label className="studio-field">
-              <span>版本</span>
-              <input
-                value={saveVersion}
-                onChange={(e) => setSaveVersion(e.target.value)}
-              />
-            </label>
-            <Notice error>{error}</Notice>
-          </div>
-          <div className="modal-footer">
-            <button
-              className="button secondary"
-              disabled={!!busy}
-              onClick={() => setSaveOpen(false)}
-            >
-              取消
-            </button>
-            <button
-              className="button primary"
-              disabled={!!busy || !saveId || !saveVersion}
-              onClick={() => void save()}
-            >
-              保存新版本
-            </button>
-          </div>
-        </Modal>
-      )}
-    </main>
-  );
+  const stageConfig = workflow?.stage_settings?.[stage] || {};
+  const selectedStage = stages.find(item => item.id === stage)!;
+  return <main className="studio-main agent-settings-main">
+    <PageTitle title="Agent 与 Skill" action={<div className="segmented" role="tablist" aria-label="Agent 与 Skill"><button role="tab" aria-selected={tab === "agents"} className={tab === "agents" ? "active" : ""} onClick={() => setTab("agents")}><Settings2 size={14} />Agent</button><button role="tab" aria-selected={tab === "skills"} className={tab === "skills" ? "active" : ""} onClick={() => setTab("skills")}><Sparkles size={14} />Skills</button></div>} />
+    {(loading || busy) && <Busy label={loading || busy === "refresh" ? "正在读取配置" : busy === "upload" ? "正在导入 Skill" : "正在保存配置"} />}
+    <div className="fixed-pipeline" aria-label="固定作品处理流程">{steps.map((label, index) => <span key={label}><i>{index + 1}</i>{label}{index < steps.length - 1 && <ChevronRight size={12} />}</span>)}</div>
+    <Notice error={!!error} success={!error && !!message}>{error || message}</Notice>
+    {tab === "agents" ? workflow ? <section className="surface fixed-agent-editor">
+      <div className="agent-config-heading"><SelectField label="分析方案" value={`${workflow.id}@${workflow.version}`} onChange={key => guard(() => { const found = fixedWorkflows.find(item => `${item.id}@${item.version}` === key); if (found) chooseWorkflow(found); })}>{fixedWorkflows.map(item => <option key={`${item.id}@${item.version}`} value={`${item.id}@${item.version}`}>{item.name} · v{item.version}</option>)}</SelectField><button className="button secondary" onClick={() => openSave("workflow", true)} disabled={!!busy}><Plus size={15} />另存方案</button><button className="button primary" disabled={!workflowDirty || !!busy} onClick={() => openSave("workflow")}><Save size={15} />保存新版本</button></div>
+      <div className="agent-stage-layout"><nav className="agent-stage-list" aria-label="提取阶段">{stages.map((item, index) => <button className={item.id === stage ? "active" : ""} key={item.id} onClick={() => setStage(item.id)}><span>{index + 4}</span><strong>{item.name}</strong><ChevronRight size={14} /></button>)}</nav>
+        <div className="agent-stage-content"><header><div><h2>{selectedStage.name}</h2><span className="tag">Schema 2</span></div><p className="agent-output-fields">{selectedStage.output}</p></header>
+          <SelectField label="Skill" value={`${workflow.stage_skills?.[stage]?.id || workflow.skill_id}@${workflow.stage_skills?.[stage]?.version || workflow.skill_version}`} onChange={key => { const value = fixedSkills.find(item => `${item.id}@${item.version}` === key); if (value) update({ stage_skills: { ...workflow.stage_skills, [stage]: { id: value.id, version: value.version } } }); }}>{fixedSkills.map(item => <option value={`${item.id}@${item.version}`} key={`${item.id}@${item.version}`}>{item.name} · v{item.version}</option>)}</SelectField>
+          <SelectField label="模型" value={workflow.stage_models?.[stage] || ""} onChange={profileId => { const overrides = { ...workflow.stage_models }; if (profileId) overrides[stage] = profileId; else delete overrides[stage]; update({ stage_models: overrides }); }}><option value="">使用任务模型</option>{profiles.map(item => <option key={item.id} value={item.id}>{item.name} · {item.model}</option>)}</SelectField>
+          <label className="studio-field"><span>提取要求</span><textarea aria-label={`${selectedStage.name}提取要求`} rows={10} value={workflow.stage_prompts?.[stage] || ""} onChange={e => update({ stage_prompts: { ...workflow.stage_prompts, [stage]: e.target.value } })} /></label>
+          <details className="agent-settings-details"><summary><Settings2 size={15} />阶段用量</summary><div className="agent-number-grid"><label className="studio-field"><span>最大输出 Token</span><input type="number" min={64} max={128000} value={stageConfig.max_output_tokens ?? workflow.max_output_tokens} onChange={e => update({ stage_settings: { ...workflow.stage_settings, [stage]: { ...stageConfig, max_output_tokens: Number(e.target.value) } } })} /></label><label className="studio-field"><span>阶段 Token 预算</span><input type="number" min={1} max={100000000} value={stageConfig.budget_tokens ?? workflow.budget_tokens} onChange={e => update({ stage_settings: { ...workflow.stage_settings, [stage]: { ...stageConfig, budget_tokens: Number(e.target.value) } } })} /></label></div></details>
+        </div></div>
+      <details className="agent-settings-details agent-global-settings"><summary><Layers3 size={15} />分块与总用量</summary><div className="agent-number-grid">{([["chunk_chars", "分块字数上限", 100, 100000], ["max_input_tokens", "单次输入 Token 上限", 128, 2000000], ["max_output_tokens", "默认输出 Token 上限", 64, 128000], ["budget_tokens", "任务 Token 总预算", 1, 100000000], ["retry_limit", "失败重试次数", 0, 8]] as const).map(([key, label, min, max]) => <label className="studio-field" key={key}><span>{label}</span><input aria-label={label} type="number" min={min} max={max} value={workflow[key]} onChange={e => update({ [key]: Number(e.target.value) })} /></label>)}</div><label className="check-line" style={{ padding: "0 16px 16px" }}><input type="checkbox" checked={workflow.reuse_candidates !== false} onChange={e => update({ reuse_candidates: e.target.checked })} />复用完全相同的候选</label><label className="studio-field"><span>全局提取要求</span><textarea rows={4} value={workflow.custom_prompt} onChange={e => update({ custom_prompt: e.target.value })} /></label></details>
+      {workflowDirty && <div className="agent-draft-status"><span className="unsaved"><span />未保存</span></div>}
+    </section> : !loading ? <Empty icon={BookOpen} title="没有可用分析方案" /> : null : <section className="surface skill-content-editor">
+      <div className="agent-config-heading"><SelectField label="Skill" value={skill ? `${skill.id}@${skill.version}` : ""} onChange={key => guard(() => { const found = fixedSkills.find(item => `${item.id}@${item.version}` === key); if (found) chooseSkill(found); })}>{fixedSkills.map(item => <option value={`${item.id}@${item.version}`} key={`${item.id}@${item.version}`}>{item.name} · v{item.version}</option>)}{skill && !fixedSkills.some(item => item.id === skill.id && item.version === skill.version) && <option value={`${skill.id}@${skill.version}`}>{skill.name || "新 Skill"}</option>}</SelectField><button className="button secondary" disabled={!!busy} onClick={() => guard(() => { const base = fixedSkills.find(item => item.builtin) || fixedSkills[0]; if (base) { setSkill({ ...clean(base), id: "my-skill", version: "1.0.0", name: "我的 Skill", description: "", prompt: "" }); setSkillBase(""); } })}><Plus size={15} />添加 Skill</button><button className="button secondary" disabled={!!busy} onClick={() => guard(() => upload.current?.click())}><Upload size={15} />上传 Skill</button><input ref={upload} hidden type="file" accept=".json,.zip,.md" onChange={e => { if (e.target.files?.[0]) void uploadSkill(e.target.files[0]); }} /></div>
+      {skill ? <div className="skill-content-fields"><div className="agent-number-grid"><label className="studio-field"><span>名称</span><input value={skill.name} onChange={e => setSkill({ ...skill, name: e.target.value })} /></label><label className="studio-field"><span>描述</span><input value={skill.description} onChange={e => setSkill({ ...skill, description: e.target.value })} /></label></div><label className="studio-field"><span>提取要求与示例</span><textarea rows={15} aria-label="Skill 提取要求与示例" value={skill.prompt} onChange={e => setSkill({ ...skill, prompt: e.target.value })} /></label><details className="agent-settings-details"><summary><FileInput size={15} />输出结构 · Schema 2</summary><pre className="readonly-schema">{JSON.stringify(skill.output_schema, null, 2)}</pre></details><div className="agent-save-row">{skillDirty && <span className="unsaved"><span />未保存</span>}<button className="button primary" disabled={!skillDirty || !!busy || !skill.prompt.trim()} onClick={() => openSave("skill")}><Save size={15} />保存新版本</button></div></div> : !loading ? <Empty icon={Sparkles} title="尚无 Skill" /> : null}
+    </section>}
+    {saveKind && <Modal title={saveKind === "workflow" ? "保存分析方案" : "保存 Skill"} busy={!!busy} onClose={() => setSaveKind(null)}><div className="modal-body"><label className="studio-field"><span>名称</span><input value={identity.name} onChange={e => setIdentity({ ...identity, name: e.target.value })} /></label><label className="studio-field"><span>ID</span><input value={identity.id} onChange={e => setIdentity({ ...identity, id: e.target.value })} /></label><label className="studio-field"><span>版本</span><input value={identity.version} onChange={e => setIdentity({ ...identity, version: e.target.value })} /></label><Notice error>{error}</Notice></div><div className="modal-footer"><button className="button secondary" disabled={!!busy} onClick={() => setSaveKind(null)}>取消</button><button className="button primary" disabled={!!busy || !identity.name.trim() || !identity.id || !identity.version} onClick={() => void save()}><Check size={15} />保存</button></div></Modal>}
+    {pending && <Modal title="配置尚未保存" onClose={() => setPending(null)}><div className="modal-footer"><button className="button secondary" onClick={() => setPending(null)}>继续编辑</button><button className="button danger" onClick={() => { const action = pending; setPending(null); if (workflowBase) { const base = JSON.parse(workflowBase) as Workflow; chooseWorkflow(workflows.find(item => item.id === base.id && item.version === base.version) || base); } const baseSkill = skillBase ? JSON.parse(skillBase) as Skill : fixedSkills[0]; if (baseSkill) chooseSkill(skills.find(item => item.id === baseSkill.id && item.version === baseSkill.version) || baseSkill); action(); }}>放弃修改</button></div></Modal>}
+  </main>;
 }

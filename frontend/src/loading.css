@@ -1,33 +1,31 @@
-.documents-title-progress {
+.activity-rail {
   position: relative;
   width: 100%;
-  height: 4px;
-  margin: -8px 0 18px;
+  height: 3px;
+  min-height: 3px;
   overflow: hidden;
-  border-radius: 6px;
+  border-radius: 8px;
   background: transparent;
   pointer-events: none;
   isolation: isolate;
 }
-.documents-title-progress > i {
+.activity-rail > i {
   position: absolute;
   inset: 0;
   display: block;
   border-radius: inherit;
-  background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--accent, #3268e8) 40%, transparent) 18%, var(--accent, #3268e8) 50%, color-mix(in srgb, var(--accent, #3268e8) 40%, transparent) 82%, transparent);
+  background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--accent, #3268e8) 38%, transparent) 18%, var(--accent, #3268e8) 50%, color-mix(in srgb, var(--accent, #3268e8) 38%, transparent) 82%, transparent);
   opacity: 0;
-  box-shadow: 0 0 12px color-mix(in srgb, var(--accent, #3268e8) 70%, transparent);
+  box-shadow: 0 0 12px color-mix(in srgb, var(--accent, #3268e8) 60%, transparent);
 }
-.documents-title-progress.active > i,
-.documents-title-progress:not([aria-hidden]) > i {
-  animation: document-progress-breathe 1.65s ease-in-out infinite .15s;
-}
-@keyframes document-progress-breathe {
-  0%, 100% { opacity: .25; filter: brightness(.9); transform: scaleX(.86); }
-  50% { opacity: 1; filter: brightness(1.2); transform: scaleX(1); }
+.activity-rail.active > i { animation: activity-breathe 1.65s ease-in-out infinite; }
+.activity-rail.measured > i { right: auto; background: var(--accent); transition: width .25s ease; }
+.modal-title-progress { flex: 0 0 3px; width: calc(100% - 40px); margin: -2px 20px 0; z-index: 1; }
+@keyframes activity-breathe {
+  0%, 100% { opacity: .28; filter: brightness(.92); transform: scaleX(.88); }
+  50% { opacity: 1; filter: brightness(1.13); transform: scaleX(1); }
 }
 @media (prefers-reduced-motion: reduce) {
-  .documents-title-progress > i { animation: none !important; transform: none !important; filter: none !important; }
-  .documents-title-progress.active > i,
-  .documents-title-progress:not([aria-hidden]) > i { opacity: .8; }
+  .activity-rail > i { animation: none !important; transform: none !important; filter: none !important; transition: none !important; }
+  .activity-rail.active > i { opacity: .8; }
 }

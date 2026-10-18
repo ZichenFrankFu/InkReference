@@ -148,7 +148,7 @@ export function PlotEditor({ value, onSave, busy, onDirty, summaryAction, chunkR
 }
 
 const metrics = [
-  ["avg_sentence_length", "平均句长", "字", 60], ["vocab_complexity", "词汇丰富度", "", 1],
+  ["avg_sentence_length", "平均句长", "字", 60],
   ["dialogue_ratio", "对话占比", "", 1], ["description_density", "描写密度", "", 1],
   ["rhetoric_frequency", "修辞频率", "/千字", 20], ["payoff_density", "爽点密度", "/万字", 10],
   ["info_density", "信息密度", "", 1], ["hook_density", "钩子密度", "/章", 5],

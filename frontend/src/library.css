@@ -44,7 +44,7 @@
 .studio-app .library-workspace .pagination label { display: flex; align-items: center; gap: 5px; font-size: 11px; }
 .studio-app .library-workspace .pagination select { font-size: 12px; }
 .studio-app .library-workspace .search-summary { flex-wrap: wrap; gap: 8px 14px; overflow-wrap: anywhere; }
-.studio-app .library-workspace .detail-panel { position: sticky; top: 44px; width: 380px; max-width: 100%; height: calc(100dvh - 44px); border-radius: 0; box-shadow: -8px 0 30px #1a40700a; }
+.studio-app .library-workspace .detail-panel { position: sticky; top: 0; width: 380px; max-width: 100%; height: 100dvh; border-radius: 0; box-shadow: -8px 0 30px #1a40700a; }
 .studio-app .library-workspace .detail-heading { padding: 24px 22px; }
 .studio-app .library-workspace .detail-heading h2 { font-size: 21px; }
 .studio-app .library-workspace .detail-tabs { display: flex; gap: 8px; padding: 0 22px; }
@@ -122,8 +122,8 @@
 .studio-app .library-workspace .preview-table th,
 .studio-app .library-workspace .preview-table td { font-size: 12px; }
 @container library (max-width: 1050px) {
-  .studio-app .library-workspace .detail-panel { position: fixed; right: 0; top: 44px; height: calc(100dvh - 44px); width: min(440px,calc(100vw - 24px)); max-width: none; z-index: 42; box-shadow: -18px 0 70px #20385c25; }
-  .studio-app .library-workspace .library-detail-shade { display: block; position: fixed; inset: 44px 0 0; border: 0; background: #17294320; backdrop-filter: blur(2px); z-index: 41; cursor: default; }
+  .studio-app .library-workspace .detail-panel { position: fixed; right: 0; top: 0; height: 100dvh; width: min(440px,calc(100vw - 24px)); max-width: none; z-index: 42; box-shadow: -18px 0 70px #20385c25; }
+  .studio-app .library-workspace .library-detail-shade { display: block; position: fixed; inset: 0; border: 0; background: #17294320; backdrop-filter: blur(2px); z-index: 41; cursor: default; }
   .studio-app .library-workspace .library-main { grid-column: 1 / -1; }
 }
 @container library (max-width: 760px) {
@@ -164,8 +164,8 @@
   .studio-app .library-workspace .exchange-export-option .option-icon { display: none; }
 }
 @media (max-width: 720px) {
-  .studio-app .library-workspace .detail-panel { top: 57px; height: calc(100dvh - 57px); }
-  .studio-app .library-workspace .library-detail-shade { top: 57px; }
+  .studio-app .library-workspace .detail-panel { top: 0; height: 100dvh; }
+  .studio-app .library-workspace .library-detail-shade { top: 0; }
 }
 .studio-app .library-workspace .exchange-requirements { margin: 0 0 18px; font-size: 12px; color: #687a96; }
 .studio-app .library-workspace .exchange-requirements summary { cursor: pointer; padding: 5px 0; color: #4269a5; }
