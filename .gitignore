@@ -1,0 +1,43 @@
+# User data and secrets
+.env
+.env.*
+!.env.example
+data/
+local-data/
+imports/
+exports/
+models/
+logs/
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+build/
+dist/
+
+# Frontend
+node_modules/
+frontend/dist/
+*.tsbuildinfo
+
+# Local verification
+artifacts/
+playwright-report/
+test-results/
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
