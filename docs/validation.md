@@ -1,4 +1,4 @@
-# Batch 01 verification
+# Verification record
 
 ## Local checks completed
 
@@ -33,7 +33,7 @@ Pop-Location
 
 The development host is Linux. The included GitHub Actions workflow runs backend tests on Windows/Python 3.12 and Linux/Python 3.11, parses the scripts with Windows PowerShell, builds the frontend, runs the Windows setup script, and checks launcher HTTP health with a Chinese data-directory path. Its actual run status should be checked on the PR. A Windows runner pass does not establish interactive installation, browser opening or desktop GUI behavior on a user's PC.
 
-Full export is a table data export, not a project restore format. Use compatible export for CSV reimport. Text processing is an offline reusable module in Batch 01; the GUI does not yet upload or analyze full novels. LangGraph extraction, uploaded Skills, model connections, token/cost accounting and desktop installers remain later work.
+The records below preserve Batch 01 evidence. Workbench batches now add full-text processing, real LangGraph execution, uploaded declarative Skills, model protocols, usage, backups and desktop/package entry points. Table CSV export remains distinct from the full restore-capable project ZIP.
 
 ## Synthetic GUI verification detail
 
@@ -52,3 +52,21 @@ The first browser pass verified:
 A production-build pass additionally verified a server-side revision change produces a conflict notice without losing the local draft; the reload action fetches the current record. The full ZIP and single-table CSV downloads use the expected attachment names. Cliche descriptions remain editable while their immutable ID prefix is retained. Searching for one work filters the list to one result.
 
 Screenshots are local verification artifacts under `artifacts/ui-*.png`; they are excluded from git. TypeScript checking and Vite production compilation passed again after text contrast, font-size and modal focus improvements. These checks establish browser/API behavior on Linux, not interactive Windows verification.
+
+## Workbench batches: local verification
+
+- Python 3.12: **250 tests passed**, including real SQLite transactions, source coverage, immutable uploads/versions, EPUB conversion, durable LangGraph interruptions, retries, failed-request accounting, exact evidence, manual revision protection and idempotent materialization.
+- Real competing processes verify exclusive workspace ownership, normal/exception/crash release, and delayed release while an existing model worker is still finishing.
+- Real subprocesses verify conversion cancellation/close, process-tree cleanup, interrupted restart and retry. A conversion-to-document transaction key prevents duplicates even when document commit precedes conversion-link commit.
+- The original private v8 CSV semantic round trip was rerun: 536 works, 1,213 characters, 138 cliches, 1,155 relations. All fields and row order remain identical; reimport skips 1,887 rows with no inserts/updates.
+- TypeScript and production Vite build passed. Headless Chromium against a real local API completed CSV import, model configuration, HTTP provider fixture + usage, full-text import, LangGraph extraction + explicit approval, React Flow, real MinerU conversion, TXT download, project backup and the 390px layout. No JavaScript page errors. Model output in this browser check came from an explicitly synthetic local HTTP fixture, not a real LLM.
+- **Real MinerU 4.0.12** was installed independently and used through ConversionStore on a generated 12-page PDF with Chinese and unique per-page markers. `flash/txt` -> full Markdown -> TXT retained all 12 markers and Chinese, including page 12. Default Markdown rendering omitted header-classified content in this fixture; full rendering fixes that boundary. This is native PDF text extraction, **not OCR or an LLM-quality evaluation**.
+- Windows desktop lifecycle tests use a fake renderer. Windows/Conda installation, frozen build and HTTP smoke are run by GitHub Actions; consult the PR run status. Native window interaction, actual Setup install/uninstall and scanned-page OCR remain separate real-machine acceptance items.
+
+Reproduce the optional native-PDF integration (after installing MinerU in the app environment):
+
+```powershell
+conda run --no-capture-output -n InkReference python scripts/verify_mineru.py
+```
+
+If MinerU runs in a separate environment, set `INKREFERENCE_MINERU_PYTHON` to its Python executable and ensure ReportLab is available in the environment running this verification script (MinerU's installed dependencies include it). This generates invented pages in a temporary directory, makes no model API calls and requests no inference weights.

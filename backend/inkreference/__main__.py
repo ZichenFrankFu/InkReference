@@ -21,6 +21,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--port", type=int, default=8000, help="HTTP 端口，默认 8000")
     parser.add_argument("--data-dir", help="数据库和导入原文件保存目录")
     parser.add_argument("--no-open", action="store_true", help="启动后不自动打开浏览器")
+    parser.add_argument("--desktop", action="store_true", help="打开原生桌面窗口")
     args = parser.parse_args(argv)
     if not 1 <= args.port <= 65535:
         parser.error("端口必须在 1 至 65535 之间。")
@@ -57,7 +58,7 @@ def main(argv: list[str] | None = None) -> int:
     url = f"http://{url_host}:{args.port}"
     stop = threading.Event()
 
-    if not args.no_open:
+    if not args.no_open and not args.desktop:
         def open_when_ready():
             # Disable environment proxy routing for a local health check.
             opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
@@ -85,6 +86,9 @@ def main(argv: list[str] | None = None) -> int:
             loop="asyncio:SelectorEventLoop" if sys.platform == "win32" else "auto",
         )
         server = uvicorn.Server(config)
+        if args.desktop:
+            from .desktop import run_desktop
+            return run_desktop(server, listener, url)
         server.run(sockets=[listener])
         return 0 if server.started else 1
     except KeyboardInterrupt:

@@ -11,6 +11,7 @@ import json
 import os
 import re
 import shutil
+import sys
 import threading
 import time
 import uuid
@@ -30,6 +31,7 @@ from starlette.concurrency import run_in_threadpool
 from . import __version__
 from .csvio import commit_import, export_table, export_zip, parse_files, preview_import
 from .database import DataError, DataStore
+from .workspace_lock import workspace_lock
 
 TableName = Literal["works", "characters", "cliches"]
 MAX_FILE_BYTES = 32 * 1024 * 1024
@@ -78,6 +80,15 @@ class Runtime:
         self.lock = threading.RLock()
         self.pending: dict[str, PendingBatch] = {}
         self._store: DataStore | None = None
+        self._studio = None
+
+    @property
+    def studio(self):
+        with self.lock:
+            if self._studio is None:
+                from .studio import Studio
+                self._studio = Studio(self)
+            return self._studio
 
     @property
     def store(self) -> DataStore:
@@ -154,11 +165,19 @@ def create_app(data_dir: str | Path | None = None, static_dir: str | Path | None
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
-        runtime.store
-        yield
-        # DataStore operations own their SQLite connections. In-memory preview
-        # tokens intentionally become invalid when this server process exits.
-        runtime.pending.clear()
+        with workspace_lock(runtime.data_dir, pending_threads=lambda: runtime._studio.runner.active_threads() if runtime._studio else []):
+            runtime.store
+            try:
+                yield
+            finally:
+                if runtime._studio is not None:
+                    # Stop native conversion processes before waiting for a
+                    # model request boundary; the desktop close is bounded.
+                    conversions = runtime._studio._conversions
+                    if conversions is not None:
+                        await run_in_threadpool(conversions.shutdown)
+                    await run_in_threadpool(runtime._studio.runner.shutdown)
+                runtime.pending.clear()
 
     application = FastAPI(title="InkReference", version=__version__, lifespan=lifespan)
     application.state.runtime = runtime
@@ -231,6 +250,11 @@ def create_app(data_dir: str | Path | None = None, static_dir: str | Path | None
         expected_revision: Annotated[int, Query(ge=1)],
         cascade: bool = False,
     ):
+        if table == "works":
+            with runtime.studio.lock:
+                if any(item.get("work_id") == record_id for item in runtime.studio.documents.list_documents()):
+                    raise DataError(409, "此作品已关联全文，请保留其作品 ID；仍可编辑作品字段。")
+                return runtime.store.delete_record(table, record_id, expected_revision, cascade=cascade)
         return runtime.store.delete_record(table, record_id, expected_revision, cascade=cascade)
 
     @application.post("/api/import/preview")
@@ -301,12 +325,16 @@ def create_app(data_dir: str | Path | None = None, static_dir: str | Path | None
             headers={"Content-Disposition": f'attachment; filename="{filename}"'},
         )
 
+    from .studio import install_studio_routes
+    install_studio_routes(application, runtime)
+
     # API typos must stay JSON 404s rather than falling through to the SPA.
     @application.api_route("/api/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
     def unknown_api(path: str):
         raise DataError(404, "API 路径不存在。")
 
-    frontend = Path(static_dir) if static_dir is not None else Path(__file__).resolve().parents[2] / "frontend" / "dist"
+    resource_root = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[2]))
+    frontend = Path(static_dir) if static_dir is not None else resource_root / "frontend" / "dist"
     if (frontend / "index.html").is_file():
         application.mount("/", StaticFiles(directory=frontend, html=True), name="frontend")
     else:

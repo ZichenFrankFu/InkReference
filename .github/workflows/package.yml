@@ -1,0 +1,75 @@
+name: Build Windows desktop package
+
+on:
+  pull_request:
+    paths:
+      - 'backend/**'
+      - 'frontend/**'
+      - 'scripts/**'
+      - 'packaging/**'
+      - 'pyproject.toml'
+      - 'requirements-lock.txt'
+      - '.github/workflows/package.yml'
+  workflow_dispatch:
+    inputs:
+      installer:
+        description: Also compile an Inno Setup installer
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v7
+      - uses: conda-incubator/setup-miniconda@v4
+        with:
+          miniforge-version: latest
+          activate-environment: ""
+          auto-activate: false
+          run-init: "false"
+          remove-profiles: "false"
+      - name: Build the desktop application and optional installer
+        shell: powershell
+        run: |
+          $buildInstaller = '${{ github.event_name }}' -eq 'pull_request' -or '${{ inputs.installer }}' -eq 'true'
+          .\scripts\package.ps1 -EnvironmentName InkReferenceBuild -Installer:$buildInstaller
+      - name: Check the frozen application without opening a window
+        shell: powershell
+        run: |
+          $env:INKREFERENCE_DATA_DIR = Join-Path $env:RUNNER_TEMP 'InkReference frozen smoke'
+          $exe = Join-Path $PWD.Path 'release/app/InkReference/InkReference.exe'
+          $server = Start-Process -FilePath $exe -ArgumentList @('--no-open', '--port', '18767') -PassThru
+          try {
+            $ready = $false
+            for ($i = 0; $i -lt 60; $i++) {
+              if ($server.HasExited) { throw 'The packaged application exited before readiness.' }
+              try {
+                $health = Invoke-RestMethod -Uri 'http://127.0.0.1:18767/api/health' -TimeoutSec 1
+                if ($health.status -eq 'ok') { $ready = $true; break }
+              } catch { Start-Sleep -Milliseconds 200 }
+            }
+            if (-not $ready) { throw 'The packaged application did not become ready.' }
+            $page = Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:18767/' -TimeoutSec 5
+            if ($page.StatusCode -ne 200 -or $page.Content -notmatch 'InkReference') { throw 'The frozen application did not serve its UI.' }
+            $meta = Invoke-RestMethod -Uri 'http://127.0.0.1:18767/api/meta' -TimeoutSec 5
+            if ($meta.tables.Count -ne 3) { throw 'The frozen application did not initialize its database.' }
+          } finally {
+            if (-not $server.HasExited) { & taskkill.exe /PID $server.Id /T /F | Out-Null }
+            $log = Join-Path $env:INKREFERENCE_DATA_DIR 'logs/desktop.log'
+            if (Test-Path $log) { Get-Content $log }
+          }
+      - name: Upload portable ZIP and Setup
+        uses: actions/upload-artifact@v7
+        with:
+          name: InkReference-windows-x64
+          path: |
+            release/InkReference-windows-x64.zip
+            release/installer/*.exe
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0

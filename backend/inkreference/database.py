@@ -14,7 +14,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-VERSION = "0.1.0"
+from . import __version__
+
+VERSION = __version__
 WORK_COLUMNS = ["作品ID", "作品", "类别", "作者", "发布日期", "版本与原作关系", "用户是否完整体验过", "两句话概括", "剧情补充说明", "热度", "典型桥段（剧透）"]
 CHARACTER_COLUMNS = ["人物ID", "作品ID", "作品", "版本", "角色", "角色定位", "开场身份", "开场能力／专长", "后续能力", "性格", "人物补充说明"]
 CLICHE_COLUMNS = ["cliché内容", "cliché程度", "出现作品"]

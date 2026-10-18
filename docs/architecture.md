@@ -1,35 +1,37 @@
-# 第一批架构
+# InkReference 架构
 
-## 运行方式
+React/TypeScript 工作台通过同源 `/api` 与 FastAPI 通信。Windows PowerShell 在指定 Conda 环境中安装和启动；`--desktop` 用 pywebview 打开原生窗口，浏览器入口复用相同服务。默认只监听 `127.0.0.1`。界面使用 React Flow 处理画布、CSS 动画处理过渡，并尊重 reduced-motion。
 
-React/TypeScript 前端通过同源 `/api` 请求 FastAPI。Python 负责 SQLite、CSV 校验、事务和文件响应，前端负责导入预览、表格、关联查看及编辑。开发时前端代理 API；构建后的静态文件由 Python 服务。
+## 数据与版本
 
-Windows 入口为 `scripts/setup.cmd` 与 `scripts/start.cmd`；实际脚本兼容 PowerShell 5.1。`python -m inkreference` 默认绑定 `127.0.0.1:8000`，等待健康检查后打开本地浏览器。当前交付是本地 Web GUI，pywebview 桌面窗口和安装包在后续批次提供。
+应用数据默认在 `%LOCALAPPDATA%\InkReference`；`INKREFERENCE_DATA_DIR` 或 `-DataDir` 可以指定另一目录。同一工作区通过系统级文件锁限制一个应用实例，防止另一个端口上的进程错误恢复仍在运行的任务。
 
-接口及前后端共享类型以 [api-contract.md](api-contract.md) 为准。核心模块为 `inkreference.database`、`inkreference.csvio` 和 `inkreference.api`。
+| 数据库 | 内容 |
+|---|---|
+| inkreference.sqlite3 | v8 作品、人物、桥段、权威关联、revision 墓碑和已审核分析的幂等入库记录 |
+| workbench.sqlite3 | 不可变全文原件及清洗版本、转换任务、模型配置、逐请求用量、分析任务与块级结果 |
+| skills.sqlite3 | 不可变声明式 Skill 版本 |
+| workflow_definitions.sqlite3 | 不可变工作流定义、独立的可变画布布局 |
+| checkpoints.sqlite3 | LangGraph 状态与中断 checkpoint，禁用 pickle 和任意模块构造 |
 
-## 数据边界
+上传原件作为字节与 SHA 保存，清洗生成新版本。疑似乱码保留并定位；不能恢复的文字不假装修复。明确的原文、清洗版本、字符范围和块覆盖状态可以追溯。所有范围采用 Unicode codepoint，前端按后端分页读取，避免 UTF-16 偏移错误。大文本不一次挂载到编辑控件。
 
-SQLite 是当前素材数据的权威来源。默认数据目录为 `%LOCALAPPDATA%\InkReference`，可用 `INKREFERENCE_DATA_DIR` 或 CLI 的 `--data-dir` 指定。项目环境和构建产物留在源码目录；用户数据、上传原件和数据库留在私有数据目录。
+## 转换与模型
 
-三个外部素材表以现有 ID 识别记录。字段值按字符串保存，保留单元格换行、日期精度、空白与未知值。作品标题不充当去重键。数据库结构变化通过显式迁移完成。
+EPUB 转换复用安全 spine 读取、markdownify 和 markdown-it-py。PDF 通过独立可信 Python 子进程调用 MinerU 4 SDK，输入文件路径仅作为参数，不通过 shell。默认全文原生文本解析；扫描件 OCR 需要独立准备的模型。FULL Markdown 渲染保留可能被标为页眉的正文。子进程支持取消，关闭时先终止全部进程树；任务恢复需要用户操作。
 
-作品与桥段只维护一份权威关联集合。两侧 CSV 中的关联列从该集合生成；人物通过作品 ID 关联作品。未分类的自由文本原样保存。导入时校验关系目标与两侧声明的一致性，冲突交给用户处理。
+ModelService 通过 HTTPX 连接原生 Ollama 或 OpenAI-compatible 服务（含本地 LM Studio/vLLM）。模型配置快照不含 Key；会话 Key 只在内存，环境变量通过名字引用。每次真实请求及重试都有独立账本，进程中断的请求标为结果/费用未知。提供商实际计数、规划预估、未知值独立记录，价格与币种由用户配置。
 
-## 写入与导出
+## LangGraph 与审核
 
-CSV 经过标准解析器、严格解码、表头识别、ID 与关系校验后生成导入预览。预览本身不修改素材表；提交重新校验当前数据库，再以单个事务写入。任何错误回滚整批写入。
+StateGraph 执行 prepare → extract → validate → advance 循环，最终进入人工 review。定义固定 Skill 版本、节点开关、自定义提示词、分块上限、重试与预算；画布布局不改变版本化执行定义。分块前按完整提示词估算上下文预算，保持全文无缺口、无重叠；预算不足在请求前停止。
 
-重复 ID 的行为由显式策略控制：跳过、更新或报错。创建和编辑检查关系完整性；编辑与删除需要记录 revision，避免两个页面互相覆盖。有关联的删除默认阻止，级联操作需在 GUI 说明影响并确认。
+任务固定全文版本哈希和工作流、Skill、模型快照。每块先持久化响应，再验证结构及精确引文；checkpoint 间隙恢复会复用已保存响应，避免重复请求。失败、取消和关闭都保留状态，重开不自动请求模型。待审核结果只能显式修订；revision 检查防止覆盖别人的修改，已进入人工审核的任务不能被恢复执行覆盖。
 
-兼容导出保留 v8 的三份文件与字段。完整导出为所有业务表生成 CSV 和 `manifest.json`。输出为 UTF-8 BOM；标准 CSV quoting 保留分隔符、引号与单元格换行。完整导出目前指结构化素材表，未来的全文、Skill 和运行记录需要单独项目备份格式。
+审核通过后通过已有 DataStore 的同一事务写素材与 `analysis_commits`。即使主库已提交、任务库尚未标 approved 就退出，再次审批也只返回原映射。关联现有作品时保留其人工字段；新人物和桥段关系仍遵守主库约束。已关联全文的作品 ID 受到删除保护。
 
-## 后续 AI 扩展位置
+## 导出与恢复
 
-未来引入独立 `reference_core`，把清洗、分章和提取函数与 API、全局配置及 UI 解耦。模型调用统一通过可替换适配层，LangGraph 节点接收固定版本的输入，保存块级结果及 checkpoint。工作流定义与画布布局分别管理。
+兼容 CSV 保留三张 v8 表的字符串、字段、版本、未知值和多行内容。全部业务表导出对四个业务数据库的每张表输出 CSV；BLOB 使用 hex。完整项目备份使用 SQLite backup API 产生一致文件快照，包含五个数据库及原始 CSV 导入文件，并附大小和 SHA 清单。活跃分析/转换结束或取消后才可备份。
 
-Skill 优先使用声明式包：说明、提示词、Schema 与示例。上传文本是数据；普通 Skill 不自动执行 Python。需要执行代码的开发者插件另行设计权限和运行边界。
-
-全文清洗将保留原始文件并生成新版本；提取结果保留证据位置。修改某章只使相关分析失效。各次运行固定全文、工作流、Skill、模型参数版本，并通过去重键避免恢复时重复写入。
-
-token 账本会区分提供商实际用量、tokenizer 预估和未知值；每次真实请求及重试分别记账。上述模型、LangGraph、全文清洗和 Skills 能力尚未接入第一批素材库。
+恢复验证归档路径、大小、哈希与 SQLite 完整性，创建独立目录，保留当前项目。会话 Key、环境变量、运行锁、日志、安装环境与模型权重不进入备份。接口详见 [api-contract.md](api-contract.md)，运行与验证见 README 和 [validation.md](validation.md)。

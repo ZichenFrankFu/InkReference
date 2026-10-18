@@ -1,0 +1,3 @@
+# Optional PDF conversion runtime; install explicitly with scripts/install.ps1 -MinerU.
+# Keep separate from requirements-lock.txt: OCR engines have their own constraints.
+mineru==4.0.12
