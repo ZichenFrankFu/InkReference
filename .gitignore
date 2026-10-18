@@ -1,43 +1,152 @@
-# User data and secrets
+# Local credentials. Commit examples, never populated environment files.
 .env
 .env.*
 !.env.example
-data/
-local-data/
+!.env.*.example
+!.env.sample
+secrets/
+credentials/
+*.pem
+*.key
+*.p12
+*.pfx
+
+# User-owned sources, uploads, cleaning versions and portable backups.
+# Runtime defaults live outside the checkout; these cover local overrides.
+/data/
+/local-data/
+/user-data/
+/private/
 imports/
+uploads/
+originals/
+raw-texts/
+fulltexts/
+full_texts/
+cleaned/
+text_versions/
 exports/
-models/
-logs/
+backups/
+restored_projects/
+*.bak
+*.backup
+*.backup.zip
+*-backup.zip
+backup-*.zip
+# Uploaded books and material CSVs accidentally copied to the checkout root.
+*.epub
+*.pdf
+*.docx
+*.srt
+*.txt
+*.csv
+!requirements*.txt
+!third_party/*LICENSE*.txt
+
+# SQLite files and all transactional sidecars (including Windows filenames).
 *.db
-*.db-shm
-*.db-wal
+*.db3
 *.sqlite
 *.sqlite3
+*.db-wal
+*.db-shm
+*.db-journal
+*.db3-wal
+*.db3-shm
+*.db3-journal
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite-journal
+*.sqlite3-wal
+*.sqlite3-shm
+*.sqlite3-journal
+workspace.lock
 
-# Python
+# Python, virtual environments and Conda environments; configuration stays tracked.
 .venv/
+.venv-*/
 venv/
+venv.bak/
+env.bak/
+/env/
+/envs/
+/ENV/
+conda-env/
+.conda/
+conda-meta/
 __pycache__/
 *.py[cod]
 *.egg-info/
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
 .coverage
+.coverage.*
 htmlcov/
-build/
-dist/
+coverage/
 
-# Frontend
-node_modules/
-frontend/dist/
-*.tsbuildinfo
+# Local model weights/cache. Tokenizer/config JSON and built-in Skills remain source.
+/models/
+/model_cache/
+/model-cache/
+.cache/
+.huggingface/
+.ollama/
+*.safetensors
+*.gguf
+*.ggml
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.bin
+*.h5
+*.hdf5
 
-# Local verification
+# Logs and generated verification evidence.
+logs/
+*.log
+*.log.*
 artifacts/
+screenshots/
 playwright-report/
 test-results/
 
-# Editors and operating systems
+# Frontend dependencies, caches and build products.
+node_modules/
+.vite/
+*.tsbuildinfo
+build/
+dist/
+
+# PyInstaller/Inno Setup outputs; .spec and .iss build instructions stay tracked.
+/release/
+/releases/
+Output/
+packaging/output/
+installer/output/
+*.exe
+*.msi
+*.msix
+*.appx
+*.appxbundle
+*.dmg
+*.AppImage
+
+# Editors and Windows/macOS temporary files.
 .idea/
 .vscode/
 .DS_Store
 Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*.stackdump
+*.swp
+*.swo
+*~
+
+# Committed fixtures are invented test data, not user corpus or model downloads.
+!tests/fixtures/
+!tests/fixtures/**

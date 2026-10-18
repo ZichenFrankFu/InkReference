@@ -1,0 +1,11 @@
+name: InkReference
+channels:
+  - conda-forge
+  - nodefaults
+dependencies:
+  - python=3.12
+  - pip
+  - nodejs=22
+  - pip:
+      - -c requirements-lock.txt
+      - -e .[dev,desktop]
