@@ -7,6 +7,7 @@ without silently changing their ranges. Original text is never rewritten here.
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 import re
 import sqlite3
 import uuid
@@ -93,8 +94,14 @@ class VolumeStore:
                 document_id TEXT NOT NULL, version_id TEXT NOT NULL, revision INTEGER NOT NULL,
                 plan_json TEXT NOT NULL, PRIMARY KEY(document_id,version_id))""")
 
+    @contextmanager
     def _connect(self):
-        return sqlite3.connect(self.db_path, timeout=30)
+        connection = sqlite3.connect(self.db_path, timeout=30)
+        try:
+            with connection:
+                yield connection
+        finally:
+            connection.close()
 
     def get(self, document_id: str, version_id: str) -> dict:
         version = self.documents.get_version(document_id, version_id)

@@ -11,13 +11,14 @@ prevent retries from doubling facts or overwriting a user's edits.
 from __future__ import annotations
 
 import copy
+import contextlib
 import json
 import math
 import re
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from .database import DataError
 
@@ -257,8 +258,9 @@ def rhythm_from_style(style: dict, chars: int) -> dict:
 class ReferenceAnalysisStore:
     def __init__(self, data_dir: str | Path, *, documents: Any = None):
         self.path = Path(data_dir) / "workbench.sqlite3"
+        self.path.parent.mkdir(parents=True, exist_ok=True)
         self.documents = documents
-        with sqlite3.connect(self.path) as db:
+        with self._connect() as db:
             db.execute("CREATE TABLE IF NOT EXISTS reference_analysis (document_id TEXT PRIMARY KEY,revision INTEGER NOT NULL,structure_type TEXT NOT NULL,sections_json TEXT NOT NULL,updated_at TEXT NOT NULL)")
             db.execute("CREATE TABLE IF NOT EXISTS reference_section_commits (document_id TEXT NOT NULL,run_id TEXT NOT NULL,chunk_id TEXT NOT NULL,section TEXT NOT NULL,data_json TEXT NOT NULL,chars INTEGER NOT NULL,committed_at TEXT NOT NULL,PRIMARY KEY(document_id,run_id,chunk_id,section))")
             columns = {row[1] for row in db.execute("PRAGMA table_info(reference_section_commits)")}
@@ -268,6 +270,15 @@ class ReferenceAnalysisStore:
             db.execute("CREATE TABLE IF NOT EXISTS reference_analysis_history (document_id TEXT NOT NULL,revision INTEGER NOT NULL,structure_type TEXT NOT NULL,sections_json TEXT NOT NULL,updated_at TEXT NOT NULL,PRIMARY KEY(document_id,revision))")
             if "commits_json" not in {row[1] for row in db.execute("PRAGMA table_info(reference_analysis_history)")}:
                 db.execute("ALTER TABLE reference_analysis_history ADD COLUMN commits_json TEXT NOT NULL DEFAULT '[]'")
+
+    @contextlib.contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
+        connection = sqlite3.connect(self.path, timeout=30)
+        try:
+            with connection:
+                yield connection
+        finally:
+            connection.close()
 
     def _ensure(self, db: sqlite3.Connection, document_id: str) -> None:
         if self.documents:
@@ -290,7 +301,7 @@ class ReferenceAnalysisStore:
                 "commits": [{"run_id": item[0], "chunk_id": item[1], "section": item[2], "committed_at": item[3], "source_version_id": item[4]} for item in db.execute("SELECT run_id,chunk_id,section,committed_at,source_version_id FROM reference_section_commits WHERE document_id=? ORDER BY committed_at", (document_id,))]}
 
     def get(self, document_id: str) -> dict:
-        with sqlite3.connect(self.path, timeout=30) as db:
+        with self._connect() as db:
             self._ensure(db, document_id)
             return self._get(db, document_id)
 
@@ -302,7 +313,7 @@ class ReferenceAnalysisStore:
     def configure(self, document_id: str, structure_type: str, expected_revision: int) -> dict:
         if structure_type not in {"narrative", "setting_collection"}:
             raise DataError(422, "作品结构类型无效")
-        with sqlite3.connect(self.path, timeout=30) as db:
+        with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             self._ensure(db, document_id)
             self._revision(self._get(db, document_id), expected_revision)
@@ -312,7 +323,7 @@ class ReferenceAnalysisStore:
 
     def save_section(self, document_id: str, section: str, data: Any, expected_revision: int) -> dict:
         value = validate_section(section, data)
-        with sqlite3.connect(self.path, timeout=30) as db:
+        with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             self._ensure(db, document_id)
             state = self._get(db, document_id)
@@ -333,7 +344,7 @@ class ReferenceAnalysisStore:
         if any(section not in incoming for section in sections):
             raise DataError(422, "候选未包含所选分析分区")
         document_id = run["document_id"]
-        with sqlite3.connect(self.path, timeout=30) as db:
+        with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             self._ensure(db, document_id)
             state = self._get(db, document_id)
@@ -370,11 +381,11 @@ class ReferenceAnalysisStore:
 
     def list_history(self, document_id: str) -> list[dict]:
         self.get(document_id)
-        with sqlite3.connect(self.path) as db:
+        with self._connect() as db:
             return [{"revision": row[0], "structure_type": row[1], "updated_at": row[2]} for row in db.execute("SELECT revision,structure_type,updated_at FROM reference_analysis_history WHERE document_id=? ORDER BY revision DESC", (document_id,))]
 
     def restore(self, document_id: str, target_revision: int, expected_revision: int) -> dict:
-        with sqlite3.connect(self.path, timeout=30) as db:
+        with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             self._ensure(db, document_id)
             self._revision(self._get(db, document_id), expected_revision)
@@ -436,7 +447,7 @@ class ReferenceAnalysisStore:
         if not isinstance(data, dict) or set(data) != fields:
             raise DataError(422, "设定集文本需包含原始文本、设定、角色、设定特征四个分区")
         values = {key: validate_section(key, value) for key, value in data.items()}
-        with sqlite3.connect(self.path, timeout=30) as db:
+        with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             self._ensure(db, document_id)
             state = self._get(db, document_id)

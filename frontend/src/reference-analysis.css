@@ -309,3 +309,30 @@
 @media (max-width: 960px) { .reference-layout { grid-template-columns: 1fr; } .reference-index { position: static; max-height: 240px; } .reference-work-item { display: inline-flex; vertical-align: top; width: 220px; margin-right: 0; } .reference-index .index-search { margin-bottom: 7px; } .reference-index .reference-add { display: inline-flex; width: auto; margin: 12px; } .reference-workspace { min-height: 620px; } }
 @media (max-width: 600px) { .reference-mode-switch { display: flex; margin-bottom: 20px; } .reference-mode-switch > button { flex: 1; justify-content: center; padding: 9px; font-size: 12px; } .reference-index { max-height: 215px; } .reference-work-item { width: calc(100% - 14px); padding: 10px; } .ref-metric-grid { gap: 18px; } .ref-extract-empty > .inline-actions { flex-direction: column; } .ref-extract-actions { align-items: flex-start; flex-direction: column; } .ref-pacing-segments { grid-template-columns: 1fr; } .reference-layout .modal { border-radius: 13px; } }
 @media (prefers-reduced-motion: reduce) { .reference-layout *, .reference-layout *::before, .reference-layout *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; } }
+
+/* Review headers are a disclosure button plus an independent commit action. */
+.ref-section-review > header { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 54px; padding: 11px 14px; background: #fafcff; }
+.ref-section-review-title { flex: 1; justify-content: flex-start; min-width: 0; min-height: 29px; padding: 0; border: 0; background: transparent; color: #6b89b5; text-align: left; }
+.ref-section-review-title > strong { font-size: 12px; font-weight: 550; }
+.ref-section-review-title > span { margin-left: 2px; padding: 2px 5px; border-radius: 4px; background: #edf3fc; font-size: 10px; color: #8ca7cd; }
+.ref-section-review-title > svg { transform: rotate(-90deg); transition: transform .15s; }
+.ref-section-review-title > svg.rotated { transform: rotate(0); }
+.ref-section-review > header > .button { font-size: 11px; min-height: 31px; padding: 6px 10px; }
+.ref-section-review.committed > header { background: #f6f9ff; }
+.ref-no-candidate { display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 14px; min-height: 230px; }
+.ref-no-candidate > svg { color: #a2b9dc; }
+.ref-source-summary > pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 300px; overflow: auto; border: 1px solid #e7eef9; background: #fbfcff; border-radius: 7px; padding: 15px; margin: 14px 0 0; color: #667fA2; font-size: 12px; line-height: 1.9; font-family: inherit; }
+.ref-extraction .modal-body > .ref-segment-control { margin-bottom: 21px; }
+.ref-entity-intro, .ref-event-body > p, .ref-opening, .ref-fact-view p,
+.ref-signals p, .ref-chapter-features > article > p, .ref-chapter-signals p { color: #576f94; }
+@container reference-work (max-width: 530px) { .ref-section-review > header { padding: 10px; gap: 7px; } .ref-section-review > header > .button { font-size: 10px; padding-inline: 8px; } }
+.reference-index div.reference-add { flex-direction: column; align-items: stretch; gap: 12px; padding: 0; border: 0; background: transparent; }
+.reference-index div.reference-add > .button { width: 100%; border-style: dashed; color: #7898c8; }
+.reference-index div.reference-add > .text-button { justify-content: center; font-size: 11px; }
+.reference-work-heading > .inline-actions { flex-shrink: 0; }
+.ref-history-list { display: flex; flex-direction: column; max-height: 470px; overflow: auto; scrollbar-width: thin; }
+.ref-history-list > div { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 15px 0; border-bottom: 1px solid #eaf0f9; }
+.ref-history-list > div:last-child { border-bottom: 0; }
+.ref-history-list > div > span { display: flex; flex-direction: column; gap: 7px; }
+.ref-history-list strong { color: #5e7daa; font-size: 13px; font-weight: 550; }
+.ref-history-list small { color: #9aadca; font-size: 11px; }

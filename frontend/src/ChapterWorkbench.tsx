@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { AlignLeft, Check, ChevronDown, ChevronLeft, ChevronRight, CircleAlert, FilePlus2, ListFilter, Pencil, Plus, RotateCcw, Search, Settings2, Sparkles, Trash2, Upload } from "lucide-react";
 import { send, studio, type TextVersion } from "./studio";
 import { Busy, Empty, Modal, Notice, messageOf } from "./ui";
@@ -51,6 +51,7 @@ export default function ChapterWorkbench({ documentId, version, onVersion, onDir
   const documentRef = useRef(documentId);
   const activeRef = useRef(active);
   const pageRef = useRef<HTMLElement>(null);
+  const workspaceRef = useRef<HTMLDivElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const onDirtyRef = useRef(onDirty);
   onDirtyRef.current = onDirty;
@@ -62,6 +63,32 @@ export default function ChapterWorkbench({ documentId, version, onVersion, onDir
   const editDirty = !!edit && edit.body !== edit.original;
   useEffect(() => { onDirtyRef.current(editDirty); }, [editDirty]);
   useEffect(() => () => onDirtyRef.current(false), []);
+
+  useLayoutEffect(() => {
+    const workspace = workspaceRef.current;
+    if (!workspace) return;
+    const workbench = workspace.parentElement!;
+    const container = workbench.closest<HTMLElement>(".document-content, .reference-preprocess-panel") || workbench;
+    let frame = 0;
+    const fit = () => {
+      // Document coordinates keep the reader height stable while the page scrolls.
+      if (!workspace.getClientRects().length) return;
+      const top = workspace.getBoundingClientRect().top + window.scrollY;
+      const footer = workbench.querySelector<HTMLElement>(".chapter-workbench-footer")?.offsetHeight || 43;
+      const documentFooter = container.querySelector<HTMLElement>(".document-footer")?.offsetHeight || 0;
+      const available = window.innerHeight - top - footer - documentFooter - 24;
+      const minimum = window.innerWidth <= 760 ? 420 : 340;
+      workspace.style.setProperty("--chapter-workspace-height", `${Math.max(minimum, Math.min(760, available))}px`);
+    };
+    const schedule = () => { cancelAnimationFrame(frame); frame = requestAnimationFrame(fit); };
+    fit();
+    const observer = new ResizeObserver(schedule);
+    observer.observe(container);
+    const preceding = container.parentElement;
+    if (preceding && preceding !== container) observer.observe(preceding);
+    window.addEventListener("resize", schedule);
+    return () => { observer.disconnect(); window.removeEventListener("resize", schedule); cancelAnimationFrame(frame); };
+  }, []);
 
   const fetchPage = useCallback(async (part: Chapter, start = 0, prefetch = false) => {
     const key = `${version.id}:${part.id}:${start}`;
@@ -208,7 +235,7 @@ export default function ChapterWorkbench({ documentId, version, onVersion, onDir
         <button className="button secondary compact-button" disabled={loading || !!busy} onClick={() => safeAction(() => { setDialog("append"); setError(""); })}><Upload size={14} />接续章节</button>
       </div>
     </div>
-    <div className="chapter-workspace">
+    <div ref={workspaceRef} className="chapter-workspace">
       <aside className="chapter-navigation" aria-label="章节目录">
         <div className="chapter-navigation-top"><strong>章节目录</strong><button className="icon-button" title="添加章节" aria-label="添加章节" disabled={loading || !!busy} onClick={() => safeAction(() => { setNewTitle(`第${chapters.length + 1}章 `); setNewBody(""); setDialog("insert"); })}><Plus size={15} /></button></div>
         <label className="chapter-search"><Search size={14} /><input aria-label="搜索章节" placeholder="搜索章节" value={query} onChange={(e) => setQuery(e.target.value)} /></label>

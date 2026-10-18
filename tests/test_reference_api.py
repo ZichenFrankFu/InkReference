@@ -131,3 +131,39 @@ def test_volume_api_validation_does_not_overwrite_plan(client):
     assert preview['volumes'][0]['title']=='新卷'
     assert checked(client.get(path))==saved
     assert checked(client.get(path+'/prompt'))['chapter_count']==2
+
+
+def test_reference_workspace_backup_restores_sources_reviews_and_plans(client, tmp_path):
+    import sqlite3
+    document, base = upload(client)
+    original = client.get(base+'/original/download').content
+    tail = '第三章 春风\n春天到了。\n'.encode()
+    version = checked(client.post(base+'/append',data={'base_version_id':document['latest_version_id']},files={'file':('next.txt',tail,'text/plain')}))
+    plan = [{'title':'伞缘','start_chapter':1,'end_chapter':3}]
+    checked(client.put(f"{base}/versions/{version['id']}/volumes",json={'expected_revision':0,'volumes':plan}))
+    state = checked(client.get(base+'/reference'))
+    state = checked(client.put(base+'/reference/metadata',json={'expected_revision':state['revision'],'data':{'rating':5,'notes':'保留的笔记\n第二行'}}))
+    job = checked(client.post('/api/studio/jobs',json={'document_id':document['id'],'version_id':version['id'],'manual':True,'start':False}))
+    chunk = job['candidates'][0]['chunk_id']
+    job = checked(client.post(f"/api/studio/jobs/{job['id']}/chunks/{chunk}/paste",json={'expected_revision':job['revision'],'content':json.dumps({'settings':[{'title':'石桥','category':'geography','content':'桥头相会。'}],'style':{'narrative_perspective':'第三人称'}},ensure_ascii=False)}))
+    state = checked(client.post(f"/api/studio/jobs/{job['id']}/chunks/{chunk}/commit",json={'expected_revision':state['revision'],'sections':['settings','style']}))
+    # Partial/manual jobs can be saved and explicitly paused before a portable snapshot.
+    if job['status'] == 'queued': checked(client.post(f"/api/studio/jobs/{job['id']}/cancel",json={}))
+    history = checked(client.get(base+'/reference/history'))
+    source_list = checked(client.get(base+'/sources'))
+    archive = client.get('/api/studio/projects/export')
+    assert archive.status_code == 200, archive.text
+    restored = checked(client.post('/api/studio/projects/restore',files={'file':('project.zip',archive.content,'application/zip')}))
+    target = restored['data_dir']
+    with TestClient(create_app(target,tmp_path/'restored-dist'),base_url='http://127.0.0.1') as reopened:
+        assert checked(reopened.get(base+'/reference')) == state
+        assert checked(reopened.get(base+'/reference/history')) == history
+        assert checked(reopened.get(base+'/sources')) == source_list
+        assert reopened.get(base+'/original/download').content == original
+        assert reopened.get(f"{base}/sources/{source_list['items'][1]['id']}/download").content == tail
+        assert checked(reopened.get(f"{base}/versions/{version['id']}"))['text']==version['text']
+        assert checked(reopened.get(f"{base}/versions/{version['id']}/volumes"))['volumes']==plan
+    from pathlib import Path
+    for path in Path(target).glob('*.sqlite3'):
+        with sqlite3.connect(path) as connection:
+            assert connection.execute('PRAGMA integrity_check').fetchall()==[('ok',)], path.name
