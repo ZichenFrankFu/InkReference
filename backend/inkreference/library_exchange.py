@@ -25,11 +25,11 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from .csvio import ImportBatch, ImportTable, _apply_import, _csv_bytes, _decode, _snapshot
-from .database import TABLES, LEGACY_TABLES, ASSOCIATIONS, modern_values, association_items, DataError, DataStore, character_version, parse_work_relations, record_id, validate_values
+from .database import TABLES, LEGACY_TABLES, SCHEMA4_COLUMNS as CORE_SCHEMA4_COLUMNS, ASSOCIATIONS, modern_values, association_items, DataError, DataStore, character_version, parse_work_relations, record_id, validate_values
 
 FORMAT = "InkReference material library"
 FORMAT_VERSION = 1
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 MAX_BYTES = 128 * 1024 * 1024
 MAX_EXPANDED_BYTES = 256 * 1024 * 1024
 MAX_ROWS = 200_000
@@ -39,6 +39,7 @@ RELATION_COLUMNS = ["work_id", "cliche_id", "detail", "work_position", "cliche_p
 MATERIAL_RELATION_COLUMNS = ["id", "source_table", "source_id", "target_table", "target_id", "relation_type", "description", "metadata_json"]
 COLUMNS = {**{key: list(spec["columns"]) for key, spec in TABLES.items()}, "material_relations": MATERIAL_RELATION_COLUMNS, "legacy_values": ["table_key","record_id","values_json"]}
 LEGACY_COLUMNS = {**{key:list(spec["columns"]) for key,spec in LEGACY_TABLES.items()}, "work_cliches":RELATION_COLUMNS,"material_relations":MATERIAL_RELATION_COLUMNS}
+SCHEMA4_COLUMNS = {**CORE_SCHEMA4_COLUMNS, "material_relations": MATERIAL_RELATION_COLUMNS, "legacy_values": ["table_key","record_id","values_json"]}
 LABELS = {**{key: spec["label"] for key, spec in TABLES.items()}, "work_cliches": "作品与桥段关联", "material_relations": "素材关联说明", "legacy_values":"旧版字段归档"}
 LEGACY_NAMES = {"works": "works_library_v8.csv", "characters": "character_database_v8.csv", "cliches": "cliche_database_v8.csv"}
 CELL_REF = "__INKREFERENCE_TEXT__:"
@@ -125,11 +126,11 @@ def _zip_entries(data: bytes, *, xlsx: bool = False) -> dict[str, bytes]:
 def _manifest(value: Any) -> dict[str, Any]:
     if not isinstance(value,dict) or value.get("format") != FORMAT or value.get("format_version") != FORMAT_VERSION:
         raise DataError(422,"manifest.json / _manifest 不是受支持的 InkReference 素材库格式")
-    if value.get("schema_version") not in {3,4}:
-        raise DataError(422,f"素材库结构版本为 {value.get('schema_version')}，当前支持 3、4；请使用匹配版本应用重新导出全部表")
+    if value.get("schema_version") not in {3,4,5}:
+        raise DataError(422,f"素材库结构版本为 {value.get('schema_version')}，当前支持 3、4、5；请使用匹配版本应用重新导出全部表")
     if not isinstance(value.get("bundle_id"),str) or not value["bundle_id"] or not isinstance(value.get("tables"),dict):
         raise DataError(422,"格式信息缺少 bundle_id 或 tables")
-    columns = LEGACY_COLUMNS if value["schema_version"] == 3 else COLUMNS
+    columns = {3: LEGACY_COLUMNS, 4: SCHEMA4_COLUMNS, 5: COLUMNS}[value["schema_version"]]
     missing = set(TABLES) - set(value["tables"])
     extra = set(value["tables"]) - set(columns)
     if missing or extra:
@@ -210,7 +211,7 @@ def _parse_csv(batch: ExchangeBatch, files: list[tuple[str, bytes]]) -> None:
             if {"_bundle_id", "_schema_version"} & set(header):
                 batch.legacy = False
             plain = [field for field in header if field not in {"_bundle_id", "_schema_version"}]
-            matches = list(dict.fromkeys(table for specs in (COLUMNS,LEGACY_COLUMNS) for table,columns in specs.items() if set(plain) == set(columns)))
+            matches = list(dict.fromkeys(table for specs in (COLUMNS,SCHEMA4_COLUMNS,LEGACY_COLUMNS) for table,columns in specs.items() if set(plain) == set(columns)))
             if len(matches) != 1:
                 raise DataError(422, _header_error(filename, header))
             table = matches[0]
@@ -220,6 +221,9 @@ def _parse_csv(batch: ExchangeBatch, files: list[tuple[str, bytes]]) -> None:
             if version:
                 versions[filename] = version.group(1)
             if batch.manifest:
+                declaration = batch.manifest["tables"].get(table)
+                if declaration is None or plain != declaration["columns"]:
+                    raise DataError(422, f"{filename} 与 manifest.json 声明的 {table} 字段或版本不一致；请重新选择同批文件。")
                 for number, row in enumerate(rows, 2):
                     if "_bundle_id" in row and row["_bundle_id"] != batch.manifest["bundle_id"]:
                         raise DataError(422, f"{filename} 第 {number} 行与 manifest.json 的导出批次不一致；{filename} 与 manifest.json 疑似来自不同版本，请重新选择同一次导出的完整文件包。")
@@ -318,7 +322,7 @@ def _parse_xlsx(batch: ExchangeBatch, filename: str, data: bytes) -> None:
                 header = [cell.value for cell in next(iterator,[])]
                 if not header or any(not isinstance(column,str) or not column for column in header) or len(header) != len(set(header)):
                     raise DataError(422,f"{filename} / {sheet.title} 缺少有效表头或存在重复字段；请每个字段仅保留一列。")
-                matches = [table for table,spec in TABLES.items() if set(header) == set(spec["columns"])]
+                matches = list(dict.fromkeys(table for specs in (COLUMNS,SCHEMA4_COLUMNS,LEGACY_COLUMNS) for table,columns in specs.items() if table in TABLES and set(header) == set(columns)))
                 if len(matches) != 1:
                     raise DataError(422,_header_error(f"{filename} / {sheet.title}",header))
                 rows = []
@@ -492,7 +496,8 @@ def _validate_complete(batch: ExchangeBatch) -> None:
     if batch.manifest:
         for table,rows in {**{item.table:item.rows for item in batch.tables},**batch.relation_tables}.items():
             info = batch.manifest["tables"][table]
-            if info.get("sha256") != _digest(rows) or info.get("rows") != len(rows):
+            original_view = [{column:row[column] for column in info["columns"]} for row in rows]
+            if info.get("sha256") != _digest(original_view) or info.get("rows") != len(rows):
                 batch.warnings.append(f"{batch.filenames[table]} 与导出时不同，可能经过编辑；请核对预览中的关联。")
 
 
@@ -659,7 +664,7 @@ def _export_db(rows: dict[str, list[dict[str, str]]], manifest: dict[str, Any]) 
         connection.execute('CREATE TABLE "_manifest" ("json" TEXT NOT NULL)')
         connection.execute('INSERT INTO "_manifest" VALUES (?)', (_json(manifest),))
         for table in rows:
-            columns = COLUMNS[table]
+            columns = manifest["tables"][table]["columns"]
             declaration = ",".join('"' + column.replace('"', '""') + '" TEXT NOT NULL' for column in columns)
             connection.execute(f'CREATE TABLE "{table}" ({declaration})')
             placeholders = ",".join("?" for _ in columns)
@@ -672,8 +677,8 @@ def _export_csv(rows: dict[str, list[dict[str, str]]], manifest: dict[str, Any])
     target = io.BytesIO()
     with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as archive:
         for table in rows:
-            columns = COLUMNS[table]
-            extended = [{**row, "_bundle_id": manifest["bundle_id"], "_schema_version": str(SCHEMA_VERSION)} for row in rows[table]]
+            columns = manifest["tables"][table]["columns"]
+            extended = [{**row, "_bundle_id": manifest["bundle_id"], "_schema_version": str(manifest["schema_version"])} for row in rows[table]]
             archive.writestr(f"{table}.csv", _csv_bytes([*columns, "_bundle_id", "_schema_version"], extended))
         archive.writestr("manifest.json", _json(manifest).encode("utf-8"))
     return target.getvalue()
@@ -686,7 +691,7 @@ def _export_xlsx(rows: dict[str, list[dict[str, str]]], manifest: dict[str, Any]
     workbook = Workbook(write_only=True)
     long_rows: list[list[str]] = []
     for table in rows:
-        columns = COLUMNS[table]
+        columns = manifest["tables"][table]["columns"]
         sheet = workbook.create_sheet(table)
         sheet.freeze_panes = "A2"
         header = []
@@ -713,7 +718,7 @@ def _export_xlsx(rows: dict[str, list[dict[str, str]]], manifest: dict[str, Any]
                 cell.data_type = "s"  # An '=' prefix remains text, never a formula.
                 cell.number_format = "@"
                 cells.append(cell)
-            for value in (manifest["bundle_id"], str(SCHEMA_VERSION)):
+            for value in (manifest["bundle_id"], str(manifest["schema_version"])):
                 cell = WriteOnlyCell(sheet, value=value)
                 cell.data_type = "s"
                 cells.append(cell)

@@ -1,7 +1,6 @@
 import { lazy, memo, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import {
   BookOpen,
-  ChevronRight,
   FileText,
   FolderArchive,
   GitBranch,
@@ -135,7 +134,6 @@ export default function App() {
     window.addEventListener("hashchange", update);
     return () => window.removeEventListener("hashchange", update);
   }, [nav]);
-  const current = sections.find((s) => s.id === section);
   return (
     <div className={`app studio-app ${collapsed ? "sidebar-collapsed" : ""}`}>
       <a href="#workspace-content" className="skip-link">
@@ -197,8 +195,8 @@ export default function App() {
         </div>
       </aside>
       <div className="workspace">
-        <header className="topbar">
-          <div className="breadcrumb">
+        <header className="topbar topbar-compact">
+          <div className="navigation-controls">
             <button
               className="icon-button mobile-menu"
               onClick={() => setMobile(true)}
@@ -214,9 +212,6 @@ export default function App() {
             >
               <PanelLeftClose size={17} />
             </button>
-            <span>工作台</span>
-            <ChevronRight size={13} />
-            <strong>{current?.label || "备份与恢复"}</strong>
           </div>
           <div className="topbar-actions">
             {section === "models" && modelReturn && (

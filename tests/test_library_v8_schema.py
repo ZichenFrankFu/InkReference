@@ -134,7 +134,7 @@ def test_schema3_migration_archives_and_explicit_v8_export(tmp_path):
     batch = parse_files(old);assert not preview_import(store,batch)["errors"];commit_import(store,batch)
     # Simulate a persisted v3 database: v4 tables did not exist in this state.
     with store.connect() as connection:
-        connection.execute("DELETE FROM schema_migrations WHERE version=4")
+        connection.execute("DELETE FROM schema_migrations WHERE version>=4")
         connection.execute("DROP TABLE library_links");connection.execute("DROP TABLE legacy_values")
     migrated = DataStore(tmp_path/"old.db")
     assert "剧情补充说明" not in migrated.get_record("works","W950")["values"]

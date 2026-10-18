@@ -207,7 +207,7 @@ def test_export_archives_and_migration_reopen(populated):
     assert reopened.stats() == populated.stats()
     with sqlite3.connect(populated.db_path) as connection:
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
-        assert connection.execute("SELECT version FROM schema_migrations").fetchall() == [(1,), (2,), (3,), (4,)]
+        assert connection.execute("SELECT version FROM schema_migrations").fetchall() == [(1,), (2,), (3,), (4,), (5,)]
 
 
 def test_filter_search_and_relations_respect_editions(populated):

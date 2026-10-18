@@ -26,6 +26,7 @@ import {
   Link2,
   LoaderCircle,
   PanelRightClose,
+  Pencil,
   Plus,
   Search,
   Trash2,
@@ -100,6 +101,20 @@ const encoded = (v: string) => encodeURIComponent(v);
 const fieldLabel = (field: string) => ({ "用户是否完整体验过": "看过", "cliché程度（%）": "常见程度（%）", "关联cliché": "关联桥段", "cliché内容": "桥段内容", "clichéID": "桥段 ID" } as Record<string, string>)[field] || field;
 const hiddenColumns = new Set(["版本与原作关系", "剧情补充说明", "典型桥段（剧透）", "经典桥段（剧透）"]);
 const seenKey = "用户是否完整体验过";
+const clicheTypes = [
+  { key: "人设塑造", options: ["强大", "智谋", "利他", "共情", "利己", "执念", "反差", "宿命"] },
+  { key: "剧情机制", options: ["信息反转", "机械降神", "顿悟突破", "代价交换"] },
+] as const;
+const isRelationColumn = (column: string) => /^关联/.test(column);
+function ClicheTypeTags({ values }: { values: Record<string, string> }) {
+  return <span className="cliche-type-tags">{clicheTypes.map(group => values[group.key] ? <span key={group.key} className={`cliche-type-tag ${group.key === "剧情机制" ? "mechanism" : ""}`}>{group.key}·{values[group.key]}</span> : null)}</span>;
+}
+function ClicheTypeFields({ values, onChange }: { values: Record<string, string>; onChange: (key: string, value: string) => void }) {
+  return <fieldset className="cliche-type-fields"><legend>类型</legend>{clicheTypes.map(group => <div className="cliche-type-group" key={group.key}>
+    <div><span>{group.key}</span>{values[group.key] && <button className="icon-button" type="button" aria-label={`清除${group.key}`} onClick={() => onChange(group.key, "")}><X size={13} /></button>}</div>
+    <div className="cliche-type-options" role="group" aria-label={group.key}>{group.options.map(option => <button type="button" key={option} aria-pressed={values[group.key] === option} className={values[group.key] === option ? "selected" : ""} onClick={() => onChange(group.key, values[group.key] === option ? "" : option)}>{option}</button>)}</div>
+  </div>)}</fieldset>;
+}
 function arrayValue(value: string): unknown[] | null {
   if (!value.trim()) return [];
   try { const parsed: unknown = JSON.parse(value); return Array.isArray(parsed) ? parsed : null; } catch { return null; }
@@ -404,6 +419,7 @@ function DetailPanel({
   const [error, setError] = useState("");
   const [conflict, setConflict] = useState(false);
   const [tab, setTab] = useState<"details" | "relations" | "reference">("details");
+  const [editingRelations, setEditingRelations] = useState(!id);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleteBusy, setDeleteBusy] = useState(false);
   const [deleteError, setDeleteError] = useState("");
@@ -441,6 +457,7 @@ function DetailPanel({
   useEffect(() => {
     void load();
     setTab("details");
+    setEditingRelations(!id);
     setConfirmDelete(false);
   }, [load, refreshRecord]);
   useEffect(() => {
@@ -483,10 +500,7 @@ function DetailPanel({
     (total, t) => total + (relations[t.key]?.length || 0),
     0,
   );
-  const needsCascade =
-    table === "works"
-      ? !!(relations.characters.length || relations.cliches.length)
-      : table === "cliches" && !!relations.works.length;
+  const needsCascade = relatedTotal > 0;
   const remove = async () => {
     if (!item) return;
     setDeleteBusy(true);
@@ -521,7 +535,7 @@ function DetailPanel({
           <PanelRightClose size={20} />
         </button>
       </div>
-      {id && (
+      {
         <div className="detail-tabs" role="tablist" aria-label="详情视图">
           <button
             role="tab"
@@ -539,20 +553,17 @@ function DetailPanel({
           >
             关联 <span>{relatedTotal}</span>
           </button>
-          {table === "works" && <button role="tab" aria-selected={tab === "reference"} className={tab === "reference" ? "active" : ""} onClick={() => setTab("reference")}>文本与分析</button>}
+          {table === "works" && id && <button role="tab" aria-selected={tab === "reference"} className={tab === "reference" ? "active" : ""} onClick={() => setTab("reference")}>文本与分析</button>}
         </div>
-      )}
+      }
       {loading ? (
         <div className="panel-loading">
           <Spinner />
         </div>
       ) : (
-        <>
-          {tab === "details" ? (
-            <form className="detail-form" onSubmit={(e) => void save(e)}>
-              <div className="detail-scroll">
+        <div className="detail-form">
                 {error && (
-                  <div className="notice error" role="alert">
+                  <div className="notice error detail-error" role="alert">
                     <CircleAlert size={17} />
                     <div>
                       {error}
@@ -573,10 +584,11 @@ function DetailPanel({
                     </div>
                   </div>
                 )}
-                {columns.map((column) => {
+          <form id="library-record-form" className="detail-scroll" hidden={tab !== "details"} onSubmit={(e) => void save(e)}>
+                {table === "cliches" && <ClicheTypeFields values={draft} onChange={(key, value) => setDraft(d => ({ ...d, [key]: value }))} />}
+                {columns.filter(column => !isRelationColumn(column) && !(table === "cliches" && clicheTypes.some(group => group.key === column))).map((column) => {
                   const immutable = !!id && column === meta?.id_field;
                   const fieldId = `field-${column}`;
-                  if (/^关联/.test(column)) return <AssociationField key={column} column={column} value={draft[column] || ""} table={table} onChange={value => setDraft(d => ({ ...d, [column]: value }))} />;
                   return <div className={`field ${isLong(column) ? "field-long" : ""}`} key={column}>
                     <label htmlFor={fieldId}>{fieldLabel(column)}{immutable && <span aria-hidden="true">ID</span>}</label>
                     {column === seenKey ? <select id={fieldId} value={draft[column] || ""} onChange={e => setDraft(d => ({ ...d, [column]: e.target.value }))}>
@@ -585,8 +597,50 @@ function DetailPanel({
                   </div>;
                 })}
                 {!columns.length && <p className="muted">正在读取数据字段…</p>}
-              </div>
-              <div className="detail-footer">
+          </form>
+          {tab === "reference" && id && <Suspense fallback={<div className="panel-loading"><Spinner /></div>}><WorkReference workId={id} /></Suspense>}
+          <div className="detail-scroll relations-list" hidden={tab !== "relations"}>
+            <div className="relations-toolbar"><h3>关联</h3>{id && <button type="button" className="button secondary" aria-pressed={editingRelations} onClick={() => setEditingRelations(value => !value)}>{editingRelations ? <BookOpen size={14} /> : <Pencil size={14} />}{editingRelations ? "查看关联" : "编辑关联"}</button>}</div>
+            {editingRelations ? <div className="relations-editor">{columns.filter(isRelationColumn).map(column => <AssociationField key={column} column={column} value={draft[column] || ""} table={table} onChange={value => setDraft(d => ({ ...d, [column]: value }))} />)}</div> : relationGroups.map((group) => (
+                <section key={group.key}>
+                  <h3>
+                    <group.icon size={16} />
+                    {group.label}
+                    <span>{relations[group.key]?.length || 0}</span>
+                  </h3>
+                  {relations[group.key]?.length ? (
+                    relations[group.key].map((link) => (
+                      <button
+                        key={link.id}
+                        className="relation-card"
+                        type="button"
+                        onClick={() => onNavigate(group.key, link.id)}
+                      >
+                        <span>
+                          <strong>{titleOf(link, group.key)}</strong>
+                          <small>
+                            {link.id}
+
+                          </small>
+                          <span className="relation-semantics">
+                            {(link.relationships?.length ? link.relationships : link.relationship ? [link.relationship] : []).map((relationship, index) => <span className="relation-meaning" key={`${relationship.id}-${index}`}>
+                              <span className="relation-type">{relationship.label || relationship.type || "关联"}</span>
+                              {relationship.description && relationship.description !== relationship.label && <span className="relation-description">{relationship.description}</span>}
+                              {relationMetadata((relationship as typeof relationship & { metadata?: unknown }).metadata).map(([label, value]) => <span className="relation-attribute" key={label}><small>{label}</small>{value}</span>)}
+                            </span>)}
+                            {!link.relationship && !link.relationships?.length && <span className="relation-description">{link.values["关联说明"] || link.values["关系说明"] || "关联"}</span>}
+                          </span>
+                        </span>
+                        <ArrowUpRight size={16} />
+                      </button>
+                    ))
+                  ) : (
+                    <p className="relation-empty">暂无关联{group.singular}</p>
+                  )}
+                </section>
+              ))}
+            </div>
+              <div className="detail-footer" hidden={tab === "reference" && !dirty}>
                 <div>
                   {id && (
                     <button
@@ -620,6 +674,7 @@ function DetailPanel({
                 <button
                   className="button primary"
                   type="submit"
+                  form="library-record-form"
                   disabled={saving || (!dirty && !!id) || !columns.length}
                 >
                   {saving ? (
@@ -632,49 +687,7 @@ function DetailPanel({
                   )}
                 </button>
               </div>
-            </form>
-          ) : tab === "reference" && id ? <Suspense fallback={<div className="panel-loading"><Spinner /></div>}><WorkReference workId={id} /></Suspense> : (
-            <div className="detail-scroll relations-list">
-              {relationGroups.map((group) => (
-                <section key={group.key}>
-                  <h3>
-                    <group.icon size={16} />
-                    {group.label}
-                    <span>{relations[group.key]?.length || 0}</span>
-                  </h3>
-                  {relations[group.key]?.length ? (
-                    relations[group.key].map((link) => (
-                      <button
-                        key={link.id}
-                        className="relation-card"
-                        onClick={() => onNavigate(group.key, link.id)}
-                      >
-                        <span>
-                          <strong>{titleOf(link, group.key)}</strong>
-                          <small>
-                            {link.id}
-
-                          </small>
-                          <span className="relation-semantics">
-                            {(link.relationships?.length ? link.relationships : link.relationship ? [link.relationship] : []).map((relationship, index) => <span className="relation-meaning" key={`${relationship.id}-${index}`}>
-                              <span className="relation-type">{relationship.label || relationship.type || "关联"}</span>
-                              {relationship.description && relationship.description !== relationship.label && <span className="relation-description">{relationship.description}</span>}
-                              {relationMetadata((relationship as typeof relationship & { metadata?: unknown }).metadata).map(([label, value]) => <span className="relation-attribute" key={label}><small>{label}</small>{value}</span>)}
-                            </span>)}
-                            {!link.relationship && !link.relationships?.length && <span className="relation-description">{link.values["关联说明"] || link.values["关系说明"] || "关联"}</span>}
-                          </span>
-                        </span>
-                        <ArrowUpRight size={16} />
-                      </button>
-                    ))
-                  ) : (
-                    <p className="relation-empty">暂无关联{group.singular}</p>
-                  )}
-                </section>
-              ))}
-            </div>
-          )}
-        </>
+        </div>
       )}
       {confirmDelete && (
         <Modal
@@ -689,28 +702,7 @@ function DetailPanel({
               <span>{id}</span>
             </div>
             <p>删除后无法直接恢复。建议先导出需要保留的数据。</p>
-            {table === "works" ? (
-              <div className="notice warning">
-                <CircleAlert size={18} />
-                <span>
-                  将删除此作品并解除 <strong>{relatedTotal} 项关联</strong>。人物与桥段保留。
-                </span>
-              </div>
-            ) : table === "cliches" ? (
-              <div className="notice warning">
-                <CircleAlert size={18} />
-                <span>
-                  将删除此桥段并解除与{" "}
-                  <strong>{relations.works.length} 部作品</strong>
-                  的关联，作品本身保留。
-                </span>
-              </div>
-            ) : (
-              <div className="notice info">
-                <CircleAlert size={18} />
-                <span>仅删除当前人物记录，所属作品保留。</span>
-              </div>
-            )}
+            {relatedTotal > 0 && <div className="notice warning"><CircleAlert size={18} /><span>将解除与 <strong>{relatedTotal} 条素材</strong> 的关联。关联素材保留。</span></div>}
             {needsCascade && (
               <label className="check-line">
                 <input
@@ -718,7 +710,7 @@ function DetailPanel({
                   checked={cascade}
                   onChange={(e) => setCascade(e.target.checked)}
                 />
-                我已了解以上关联影响，确认一并处理
+                同时解除关联
               </label>
             )}
             {deleteError && (
@@ -749,15 +741,16 @@ function DetailPanel({
   );
 }
 
-type LibraryPage = Page & { facets?: { categories?: string[] } };
+type LibraryFacets = { categories?: string[]; roles?: string[]; character_traits?: string[]; plot_mechanisms?: string[]; works?: { id: string; title: string }[] };
+type LibraryPage = Page & { facets?: LibraryFacets };
 function RecordTable({ table, items, selectedId, onSelect, onToggleSeen, seenBusy }: {
   table: TableKey; items: Item[]; selectedId?: string; onSelect: (item: Item) => void;
   onToggleSeen: (item: Item) => void; seenBusy: string;
 }) {
-  const headings = table === "works" ? ["作品", "类别", "作者", "年份", "看过"] : table === "characters" ? ["角色", "角色定位", "开场身份", "关联作品"] : ["桥段内容", "程度", "命中作品", "桥段 ID"];
+  const headings = table === "works" ? ["作品", "类别", "作者", "年份", "看过"] : table === "characters" ? ["角色", "角色定位", "开场身份", "关联作品"] : ["桥段内容", "程度", "关联作品"];
   return <div className="record-table-wrap"><table className={`record-table table-${table}`}><thead><tr>{headings.map((heading, i) => <th key={heading} className={table === "works" && (i === 2 || i === 3) ? "optional-column" : ""}>{heading}</th>)}<th className="row-action"><span className="visually-hidden">操作</span></th></tr></thead><tbody>{items.map(item => <tr key={item.id} className={item.id === selectedId ? "selected" : ""}>
-    <td><button className={`record-title ${table === "cliches" ? "cliche-title" : ""}`} onClick={() => onSelect(item)}><span><strong>{titleOf(item, table)}</strong><small>{item.id}</small></span></button></td>
-    {table === "works" ? <><td><span className="tag">{item.values["类别"] || "—"}</span></td><td className="optional-column">{item.values["作者"] || "—"}</td><td className="optional-column date-cell">{item.values["发布日期"] || "—"}</td><td><button className={`seen-toggle ${item.values[seenKey] === "是" ? "seen" : ""} ${!["是", "否"].includes(item.values[seenKey]) ? "unknown" : ""}`} onClick={() => onToggleSeen(item)} disabled={seenBusy === item.id} aria-busy={seenBusy === item.id} aria-label={`${titleOf(item, table)} 看过：${["是", "否"].includes(item.values[seenKey]) ? item.values[seenKey] : "未记录"}`} aria-pressed={item.values[seenKey] === "是"}>{seenBusy === item.id ? <LoaderCircle size={13} className="spin" /> : item.values[seenKey] === "是" ? <Check size={13} /> : null}{["是", "否"].includes(item.values[seenKey]) ? item.values[seenKey] : "—"}{seenBusy === item.id && <i className="seen-progress" role="progressbar" aria-label="保存看过状态"><b /></i>}</button></td></> : table === "characters" ? <><td><span className="tag neutral">{item.values["角色定位"] || "—"}</span></td><td><span className="cell-truncate" title={item.values["开场身份"]}>{item.values["开场身份"] || "—"}</span></td><td><span className="link-count"><Link2 size={13} />{linkedCount(item.values["关联作品"] || "[]")}</span></td></> : <><td className="date-cell">{item.values["cliché程度（%）"] || item.values["cliché程度"] ? `${item.values["cliché程度（%）"] || item.values["cliché程度"]}%` : "—"}</td><td><span className="link-count"><Link2 size={13} />{item.values["命中作品数"] || linkedCount(item.values["关联作品"] || "[]")}</span></td><td className="mono">{item.id}</td></>}
+    <td><button className={`record-title ${table === "cliches" ? "cliche-title" : ""}`} onClick={() => onSelect(item)}><span><strong>{titleOf(item, table)}</strong><small>{item.id}</small>{table === "cliches" && <ClicheTypeTags values={item.values} />}</span></button></td>
+    {table === "works" ? <><td><span className="tag">{item.values["类别"] || "—"}</span></td><td className="optional-column">{item.values["作者"] || "—"}</td><td className="optional-column date-cell">{item.values["发布日期"] || "—"}</td><td><button className={`seen-toggle ${item.values[seenKey] === "是" ? "seen" : ""} ${!["是", "否"].includes(item.values[seenKey]) ? "unknown" : ""}`} onClick={() => onToggleSeen(item)} disabled={seenBusy === item.id} aria-busy={seenBusy === item.id} aria-label={`${titleOf(item, table)} 看过：${["是", "否"].includes(item.values[seenKey]) ? item.values[seenKey] : "未记录"}`} aria-pressed={item.values[seenKey] === "是"}>{seenBusy === item.id ? <LoaderCircle size={13} className="spin" /> : item.values[seenKey] === "是" ? <Check size={13} /> : null}{["是", "否"].includes(item.values[seenKey]) ? item.values[seenKey] : "—"}{seenBusy === item.id && <i className="seen-progress" role="progressbar" aria-label="保存看过状态"><b /></i>}</button></td></> : table === "characters" ? <><td><span className="tag neutral">{item.values["角色定位"] || "—"}</span></td><td><span className="cell-truncate" title={item.values["开场身份"]}>{item.values["开场身份"] || "—"}</span></td><td><span className="link-count"><Link2 size={13} />{linkedCount(item.values["关联作品"] || "[]")}</span></td></> : <><td className="date-cell">{item.values["cliché程度（%）"] || item.values["cliché程度"] ? `${item.values["cliché程度（%）"] || item.values["cliché程度"]}%` : "—"}</td><td><span className="link-count"><Link2 size={13} />{item.values["命中作品数"] || linkedCount(item.values["关联作品"] || "[]")}</span></td></>}
     <td className="row-action"><button className="icon-button" aria-label={`查看${titleOf(item, table)}`} onClick={() => onSelect(item)}><ChevronRight size={17} /></button></td>
   </tr>)}</tbody></table></div>;
 }
@@ -793,9 +786,13 @@ export default function Library() {
   const [sortBy, setSortBy] = useState("");
   const [seenBusy, setSeenBusy] = useState("");
   const [detailRefresh, setDetailRefresh] = useState(0);
-  const [categories, setCategories] = useState<string[]>([]);
-  const filterActive = !!(category || seen || hasText || hasAnalysis);
-  const resetFilters = () => { setCategory(""); setSeen(""); setHasText(""); setHasAnalysis(""); setOffset(0); };
+  const [facets, setFacets] = useState<LibraryFacets>({});
+  const [role, setRole] = useState("");
+  const [workId, setWorkId] = useState("");
+  const [characterTrait, setCharacterTrait] = useState("");
+  const [plotMechanism, setPlotMechanism] = useState("");
+  const filterActive = !!(category || seen || hasText || hasAnalysis || role || workId || characterTrait || plotMechanism);
+  const resetFilters = () => { setCategory(""); setSeen(""); setHasText(""); setHasAnalysis(""); setRole(""); setWorkId(""); setCharacterTrait(""); setPlotMechanism(""); setOffset(0); };
 
   const workspaceRef = useRef<HTMLDivElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
@@ -851,12 +848,18 @@ export default function Library() {
       if (hasText) params.set("has_text", hasText);
       if (hasAnalysis) params.set("has_analysis", hasAnalysis);
     }
+    if (table !== "works" && workId) params.set("work_id", workId);
+    if (table === "characters" && role) params.set("role", role);
+    if (table === "cliches") {
+      if (characterTrait) params.set("character_trait", characterTrait);
+      if (plotMechanism) params.set("plot_mechanism", plotMechanism);
+    }
     if (sortBy) { params.set("sort_by", sortBy); params.set("sort_direction", sortBy === "发布日期" ? "desc" : "asc"); }
     request<LibraryPage>(`/records/${table}?${params}`, { signal: controller.signal })
       .then((data) => {
         if (!controller.signal.aborted) {
           setPage(data);
-          if (table === "works" && data.facets?.categories) setCategories(data.facets.categories);
+          if (data.facets) setFacets(data.facets);
           if (offset > 0 && !data.items.length && data.total > 0)
             setOffset(Math.floor((data.total - 1) / limit) * limit);
         }
@@ -868,7 +871,7 @@ export default function Library() {
         if (!controller.signal.aborted) setLoading(false);
       });
     return () => controller.abort();
-  }, [table, debouncedQuery, offset, limit, refresh, category, seen, hasText, hasAnalysis, sortBy]);
+  }, [table, debouncedQuery, offset, limit, refresh, category, seen, hasText, hasAnalysis, role, workId, characterTrait, plotMechanism, sortBy]);
   useEffect(() => {
     if (!toast) return;
     const timer = window.setTimeout(() => setToast(""), 6500);
@@ -1048,10 +1051,16 @@ export default function Library() {
             <div className="database-filterbar" aria-label="数据库筛选">
               <SlidersHorizontal size={15} />
               {table === "works" && <>
-                <label><span>类别</span><select aria-label="筛选类别" value={category} onChange={e => { setCategory(e.target.value); setOffset(0); }}><option value="">全部类别</option>{categories.map(value => <option key={value}>{value}</option>)}</select></label>
+                <label><span>类别</span><select aria-label="筛选类别" value={category} onChange={e => { setCategory(e.target.value); setOffset(0); }}><option value="">全部类别</option>{facets.categories?.map(value => <option key={value}>{value}</option>)}</select></label>
                 <label><span>看过</span><select aria-label="筛选看过" value={seen} onChange={e => { setSeen(e.target.value); setOffset(0); }}><option value="">全部</option><option value="是">是</option><option value="否">否</option><option value="unknown">未记录</option></select></label>
                 <label><FileText size={13} /><select aria-label="筛选文本" value={hasText} onChange={e => { setHasText(e.target.value); setOffset(0); }}><option value="">文本</option><option value="true">有文本</option><option value="false">无文本</option></select></label>
                 <label><Sparkles size={13} /><select aria-label="筛选分析" value={hasAnalysis} onChange={e => { setHasAnalysis(e.target.value); setOffset(0); }}><option value="">分析</option><option value="true">有分析</option><option value="false">无分析</option></select></label>
+              </>}
+              {table !== "works" && <label className="database-work-filter"><span>作品</span><select aria-label="筛选关联作品" value={workId} onChange={e => { setWorkId(e.target.value); setOffset(0); }}><option value="">全部作品</option>{facets.works?.map(work => <option key={work.id} value={work.id}>{work.title} · {work.id}</option>)}</select></label>}
+              {table === "characters" && <label><span>定位</span><select aria-label="筛选角色定位" value={role} onChange={e => { setRole(e.target.value); setOffset(0); }}><option value="">全部定位</option>{facets.roles?.map(value => <option key={value}>{value}</option>)}</select></label>}
+              {table === "cliches" && <>
+                <label><span>人设塑造</span><select aria-label="筛选人设塑造" value={characterTrait} onChange={e => { setCharacterTrait(e.target.value); setOffset(0); }}><option value="">全部</option>{clicheTypes[0].options.map(value => <option key={value}>{value}</option>)}</select></label>
+                <label><span>剧情机制</span><select aria-label="筛选剧情机制" value={plotMechanism} onChange={e => { setPlotMechanism(e.target.value); setOffset(0); }}><option value="">全部</option>{clicheTypes[1].options.map(value => <option key={value}>{value}</option>)}</select></label>
               </>}
               <label className="database-sort"><ArrowDownUp size={13} /><select aria-label="排序" value={sortBy} onChange={e => { setSortBy(e.target.value); setOffset(0); }}><option value="">默认排序</option><option value={table === "works" ? "作品" : table === "characters" ? "角色" : "cliché内容"}>名称</option>{table === "works" && <option value="发布日期">年份</option>}</select></label>
               {filterActive && <button className="text-button" onClick={resetFilters}><X size={13} />清除</button>}

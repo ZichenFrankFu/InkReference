@@ -28,7 +28,12 @@ LEGACY_TABLES = {
 }
 LIBRARY_WORK_COLUMNS = ["作品ID", "作品", "类别", "作者", "发布日期", "用户是否完整体验过", "两句话概括", "热度权重", "关联作品", "关联角色", "关联cliché"]
 LIBRARY_CHARACTER_COLUMNS = ["人物ID", "角色", "别名", "角色定位", "开场身份", "开场能力／专长", "后续能力", "性格", "人物补充说明", "关联作品", "关联cliché"]
-LIBRARY_CLICHE_COLUMNS = ["clichéID", "cliché内容", "cliché程度（%）", "命中作品数", "命中热度合计", "关联作品", "关联角色"]
+SCHEMA4_CLICHE_COLUMNS = ["clichéID", "cliché内容", "cliché程度（%）", "命中作品数", "命中热度合计", "关联作品", "关联角色"]
+CLICHE_CHARACTER_TRAITS = ("强大", "智谋", "利他", "共情", "利己", "执念", "反差", "宿命")
+CLICHE_PLOT_MECHANISMS = ("信息反转", "机械降神", "顿悟突破", "代价交换")
+CLICHE_TAGS = {"人设塑造": CLICHE_CHARACTER_TRAITS, "剧情机制": CLICHE_PLOT_MECHANISMS}
+LIBRARY_CLICHE_COLUMNS = [*SCHEMA4_CLICHE_COLUMNS, *CLICHE_TAGS]
+SCHEMA4_COLUMNS = {"works": LIBRARY_WORK_COLUMNS, "characters": LIBRARY_CHARACTER_COLUMNS, "cliches": SCHEMA4_CLICHE_COLUMNS}
 TABLES = {
     "works": {"label": "作品", "id_field": "作品ID", "columns": LIBRARY_WORK_COLUMNS},
     "characters": {"label": "人物", "id_field": "人物ID", "columns": LIBRARY_CHARACTER_COLUMNS},
@@ -108,6 +113,10 @@ def validate_values(table: str, values: dict[str, str], *, partial: bool = False
         raise DataError(422, "所有 CSV 字段必须为字符串")
     normalized = dict(values) if partial else {column: values.get(column, "[]" if column in ASSOCIATIONS or column == "别名" else "") for column in columns}
     if modern:
+        if table == "cliches":
+            for field, options in CLICHE_TAGS.items():
+                if field in normalized and normalized[field] not in ("", *options):
+                    raise DataError(422, f"{field} 仅可单选：{'、'.join(options)}，或留空")
         for column in (*ASSOCIATIONS, "别名"):
             if column in normalized:
                 association_items(normalized[column], column)
@@ -201,7 +210,7 @@ class DataStore:
         with self.transaction() as connection:
             connection.execute("CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)")
             current = connection.execute("SELECT COALESCE(MAX(version), 0) FROM schema_migrations").fetchone()[0]
-            if current > 4:
+            if current > 5:
                 raise DataError(409, "数据库版本高于当前应用，请使用更新的应用")
             applied = {row[0] for row in connection.execute("SELECT version FROM schema_migrations")}
             if 1 not in applied:
@@ -280,6 +289,16 @@ class DataStore:
                 self._upgrade_legacy_rows(connection)
                 self._rebuild_library_links(connection)
                 connection.execute("INSERT INTO schema_migrations VALUES (4, ?)", (datetime.now(timezone.utc).isoformat(),))
+            if 5 not in applied:
+                # Schema-only addition: retain all imported text and existing
+                # revisions. A missing classification is never inferred.
+                for row in connection.execute("SELECT id,values_json FROM cliches").fetchall():
+                    values = json.loads(row["values_json"])
+                    if modern_values("cliches", values):
+                        for field in CLICHE_TAGS:
+                            values.setdefault(field, "")
+                        connection.execute("UPDATE cliches SET values_json=? WHERE id=?", (_json(values), row["id"]))
+                connection.execute("INSERT INTO schema_migrations VALUES (5, ?)", (datetime.now(timezone.utc).isoformat(),))
 
     def _stats(self, connection: sqlite3.Connection) -> dict[str, int]:
         return {table: connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] for table in (*TABLES, "work_cliches")}
@@ -291,7 +310,7 @@ class DataStore:
 
     def meta(self) -> dict[str, Any]:
         counts = self.stats()
-        return {"tables": [{"key": table, **spec, "count": counts[table]} for table, spec in TABLES.items()], "version": VERSION, "schema_version": 4}
+        return {"tables": [{"key": table, **spec, "count": counts[table]} for table, spec in TABLES.items()], "version": VERSION, "schema_version": 5}
 
     def _row(self, connection: sqlite3.Connection, table: str, identifier: str) -> sqlite3.Row:
         require_table(table)
@@ -381,9 +400,13 @@ class DataStore:
                     raise DataError(422,"work_ids 必须为作品编号列表")
                 clauses.append("r.id IN (SELECT value FROM json_each(?))");parameters.append(_json(list(value)))
                 continue
-            field = {"category":"类别","seen":"用户是否完整体验过","看过":"用户是否完整体验过"}.get(key,key)
+            field = {"category":"类别","seen":"用户是否完整体验过","看过":"用户是否完整体验过","role":"角色定位","character_trait":"人设塑造","plot_mechanism":"剧情机制"}.get(key,key)
             if field not in TABLES[table]["columns"]:
                 raise DataError(422,f"不支持的筛选字段：{key}")
+            if not isinstance(value, str):
+                raise DataError(422,f"筛选字段 {key} 必须为字符串")
+            if field in CLICHE_TAGS and value not in ("", *CLICHE_TAGS[field]):
+                raise DataError(422,f"{field} 筛选值无效")
             if field == "用户是否完整体验过" and value == "unknown":
                 clauses.append("COALESCE(json_extract(r.values_json,?), '') NOT IN ('是','否')");parameters.append('$."'+field+'"')
             elif value != "":
@@ -407,7 +430,10 @@ class DataStore:
             rows = connection.execute(f"SELECT r.* FROM {table} r{where} ORDER BY {order} LIMIT ? OFFSET ?",(*rows_parameters,limit,offset))
             items = [self._render(connection,table,row) for row in rows]
             categories = [row[0] for row in connection.execute("SELECT DISTINCT json_extract(values_json,'$.类别') category FROM works WHERE COALESCE(json_extract(values_json,'$.类别'),'') != '' ORDER BY category")]
-            return {"items":items,"total":total,"offset":offset,"limit":limit,"facets":{"categories":categories},"summary":{"matches":total,**self._stats(connection)}}
+            roles = [row[0] for row in connection.execute("SELECT DISTINCT json_extract(values_json,'$.角色定位') role FROM characters WHERE COALESCE(json_extract(values_json,'$.角色定位'),'') != '' ORDER BY role")]
+            works = [{"id":row["id"], "title":row["title"]} for row in connection.execute("SELECT id,json_extract(values_json,'$.作品') title FROM works ORDER BY sort_order,id")]
+            facets = {"categories":categories,"roles":roles,"works":works,"character_traits":list(CLICHE_CHARACTER_TRAITS),"plot_mechanisms":list(CLICHE_PLOT_MECHANISMS)}
+            return {"items":items,"total":total,"offset":offset,"limit":limit,"facets":facets,"summary":{"matches":total,**self._stats(connection)}}
 
     def relations(self, table: str, identifier: str) -> dict[str, list[dict[str, Any]]]:
         """Return direct, labelled edges; sharing a work never creates an edge.

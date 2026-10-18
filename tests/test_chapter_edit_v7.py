@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 
 from inkreference.api import create_app
 from inkreference.database import DataError
-from inkreference.documents import DocumentStore
+from inkreference.documents import DocumentStore, READ_MODEL_VERSION
 
 
 @pytest.fixture
@@ -159,7 +159,7 @@ def test_old_cache_upgrades_heading_proposals_before_reads_and_direct_other_chap
     index = store.chapter_index(document["id"], saved["id"])
     assert index["chapters"][0]["heading_proposal_count"] == 1
     with sqlite3.connect(store.db_path) as connection:
-        assert connection.execute("SELECT layout_version FROM doc_version_views WHERE version_id=?", (saved["id"],)).fetchone()[0] == 4
+        assert connection.execute("SELECT layout_version FROM doc_version_views WHERE version_id=?", (saved["id"],)).fetchone()[0] == READ_MODEL_VERSION
 
 
 def test_rebuild_views_repairs_partial_rows_without_mutating_sources_or_versions(store, monkeypatch):

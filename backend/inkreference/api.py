@@ -284,12 +284,16 @@ def create_app(data_dir: str | Path | None = None, static_dir: str | Path | None
         cliche_id: Annotated[str | None, Query(max_length=300)] = None,
         category: Annotated[str | None, Query(max_length=300)] = None,
         seen: Annotated[str | None, Query(max_length=100)] = None,
+        role: Annotated[str | None, Query(max_length=300)] = None,
+        character_trait: Annotated[str | None, Query(max_length=100)] = None,
+        plot_mechanism: Annotated[str | None, Query(max_length=100)] = None,
         has_text: bool | None = None,
         has_analysis: bool | None = None,
         sort_by: Annotated[str | None, Query(max_length=100)] = None,
         sort_direction: Literal["asc", "desc"] = "asc",
     ):
-        filters = {key: value for key, value in {"category": category, "seen": seen}.items() if value is not None}
+        filters = {key: value for key, value in {"category": category, "seen": seen, "role": role,
+            "character_trait": character_trait, "plot_mechanism": plot_mechanism}.items() if value is not None}
         if has_text is not None or has_analysis is not None:
             if table != "works":
                 raise DataError(422, "文本与分析筛选仅适用于作品")

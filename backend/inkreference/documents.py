@@ -31,7 +31,7 @@ from .database import DataError
 from .chapter_layout import (chapter_label, chapter_body_span, chapter_sequence, duplicate_heading_repairs,
                              expand_missing_chapters, normalize_chapter_body, normalize_document_chapter_bodies,
                              renumber_after_deletion)
-from .chapter_preprocessing import AUTHOR_KEYWORDS, annotate_chapters, chapter_proposals, chapter_title_span, validate_settings
+from .chapter_preprocessing import AUTHOR_KEYWORDS, LEGACY_AUTHOR_KEYWORDS, annotate_chapters, chapter_proposals, chapter_title_span, validate_settings
 from .text_processing import analyze_text, chunk_text, diagnose_text, split_chapters
 
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024
@@ -42,6 +42,8 @@ SUPPORTED_FORMATS = {".txt", ".md", ".srt", ".docx", ".epub"}
 ENCODING_CHOICES = ["utf-8", "gb18030", "utf-16-le", "utf-16-be", "big5"]
 HISTORY_LIMIT = 10
 READ_VIEW_LIMIT = 3
+READ_MODEL_VERSION = 5
+PREPROCESSING_VERSION = 2
 # Use the stored exact codepoint count, rather than SQLite length(text), which
 # stops at a literal NUL. This does not fetch original BLOBs or full version text.
 _CURRENT_CHARACTERS_SQL = ("COALESCE((SELECT characters FROM doc_version_views WHERE version_id=doc_documents.latest_version_id), "
@@ -472,7 +474,7 @@ class DocumentStore:
                     version_id TEXT PRIMARY KEY REFERENCES doc_versions(id) ON DELETE CASCADE,
                     document_id TEXT NOT NULL, characters INTEGER NOT NULL,
                     summary_json TEXT NOT NULL, index_json TEXT NOT NULL, navigation_json TEXT NOT NULL,
-                    layout_version INTEGER NOT NULL DEFAULT 4
+                    layout_version INTEGER NOT NULL DEFAULT 5
                 );
                 CREATE TABLE IF NOT EXISTS doc_chapter_views (
                     version_id TEXT NOT NULL REFERENCES doc_versions(id) ON DELETE CASCADE,
@@ -642,6 +644,7 @@ class DocumentStore:
         identifier = _sha(identity.encode("utf-8"))
         version = {**{k: v for k, v in payload.items() if not k.startswith("_")}, "id": identifier, "document_id": document_id,
                    "parent_version_id": parent_id, "version_number": number,
+                   "preprocessing_version": PREPROCESSING_VERSION,
                    "source_text": source, "source_sha256": _sha(source.encode("utf-8")),
                    "created_at": now}
         connection.execute("INSERT INTO doc_versions VALUES (?,?,?,?,?,?)",
@@ -849,9 +852,9 @@ class DocumentStore:
                                  for chunk in version.get("chunks", [])],
                       "diagnostics": version.get("diagnostics", []),
                       "source_diagnostics": version.get("source_diagnostics", [])}
-        connection.execute("INSERT OR REPLACE INTO doc_version_views VALUES (?,?,?,?,?,?,4)",
+        connection.execute("INSERT OR REPLACE INTO doc_version_views VALUES (?,?,?,?,?,?,?)",
                            (version["id"], version["document_id"], summary["characters"],
-                            _json(summary), _json(index), _json(navigation)))
+                            _json(summary), _json(index), _json(navigation), READ_MODEL_VERSION))
         rows = []
         for order, chapter in enumerate(expanded["chapters"]):
             metadata = {k: v for k, v in chapter.items() if k not in {"text", "content"}}
@@ -869,14 +872,14 @@ class DocumentStore:
                 if document is None:
                     raise DataError(404, "全文文档不存在")
                 version_id = document["latest_version_id"]
-            row = connection.execute(f"SELECT {column} FROM doc_version_views WHERE version_id=? AND document_id=? AND layout_version=4",
-                                     (version_id, document_id)).fetchone()
+            row = connection.execute(f"SELECT {column} FROM doc_version_views WHERE version_id=? AND document_id=? AND layout_version=?",
+                                     (version_id, document_id, READ_MODEL_VERSION)).fetchone()
             if row is None:
                 # Serialize only the one-time lazy rebuild. Recheck after the
                 # lock so simultaneous summary/index reads do not rescan or
                 # contend while upgrading a deferred read transaction.
                 connection.execute("BEGIN IMMEDIATE")
-                concurrent = connection.execute(f"SELECT {column} FROM doc_version_views WHERE version_id=? AND document_id=? AND layout_version=4", (version_id, document_id)).fetchone()
+                concurrent = connection.execute(f"SELECT {column} FROM doc_version_views WHERE version_id=? AND document_id=? AND layout_version=?", (version_id, document_id, READ_MODEL_VERSION)).fetchone()
                 if concurrent is not None:
                     return json.loads(concurrent[column])
                 stored = connection.execute("SELECT payload_json FROM doc_versions WHERE id=? AND document_id=?",
@@ -992,7 +995,10 @@ class DocumentStore:
 
     @staticmethod
     def _version_options(base: dict[str, Any], **changes: Any) -> dict[str, Any]:
-        return _options({**base.get("options", {}), **changes})
+        options = dict(base.get("options", {}))
+        if base.get("preprocessing_version", 1) < PREPROCESSING_VERSION and options.get("author_keywords") == LEGACY_AUTHOR_KEYWORDS:
+            options["author_keywords"] = list(AUTHOR_KEYWORDS)
+        return _options({**options, **changes})
 
     def chapter_index(self, document_id: str, version_id: str | None = None) -> dict[str, Any]:
         return self._view(document_id, version_id, "index_json")
@@ -1004,7 +1010,7 @@ class DocumentStore:
         # Ensure a legacy snapshot is materialized only once. The existence
         # check is small; body reads do not deserialize the chapter directory.
         with self._connection() as connection:
-            exists = connection.execute("SELECT 1 FROM doc_version_views WHERE version_id=? AND document_id=? AND layout_version=4", (version_id, document_id)).fetchone()
+            exists = connection.execute("SELECT 1 FROM doc_version_views WHERE version_id=? AND document_id=? AND layout_version=?", (version_id, document_id, READ_MODEL_VERSION)).fetchone()
         if exists is None:
             self.get_version_summary(document_id, version_id)
         with self._connection() as connection:

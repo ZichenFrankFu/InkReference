@@ -19,13 +19,15 @@ from .database import DataError
 from .chapter_layout import chapter_label, chapter_sequence
 from .text_processing import diagnose_text
 
-AUTHOR_KEYWORDS = [
+LEGACY_AUTHOR_KEYWORDS = [
     "求收藏", "求订阅", "求推荐", "求月票", "求票", "推荐票", "月票", "打赏",
     "感谢书友", "感谢读者", "感谢支持", "请假", "断更", "章节缺失", "卡文", "码字",
     "作者菌", "作者大大", "本作者", "本章说", "晚点更新", "明天更新", "今日两更",
     "今日三更", "亲爱的读者", "书友们", "对不起大家", "盟主", "白银盟", "感谢打赏",
     "万赏", "万订", "月票榜", "上架感言", "完本感言", "作者说", "作者的话",
 ]
+AUTHOR_KEYWORDS = [*LEGACY_AUTHOR_KEYWORDS, "PS："]
+_POSTSCRIPT = re.compile(r"^ps\s*[:：]", re.IGNORECASE)
 _TITLE_MARKERS = ["感言", "请假", "通知", "公告", "致歉", "本章说", "闲聊", "杂谈", "作者的话", "作者说"]
 _DIALOGUE = re.compile(r"说道|[“”「」『』]")
 _RULE = re.compile(r"^[ \t　]*[-=*＝—─]{3,}[ \t　]*$", re.MULTILINE)
@@ -181,7 +183,9 @@ def chapter_proposals(chapter: dict[str, Any], options: dict[str, Any]) -> list[
         for index, (start, end, paragraph) in enumerate(paragraphs):
             if len(paragraph) > 160 or _DIALOGUE.search(paragraph):
                 continue
-            hits = [keyword for keyword in keywords if keyword in paragraph]
+            hits = [keyword for keyword in keywords
+                    if (_POSTSCRIPT.match(paragraph) if re.fullmatch(r"ps\s*[:：]", keyword, re.IGNORECASE)
+                        else keyword in paragraph)]
             tail = index >= len(paragraphs) - 2
             after_fence = fence is not None and index > fence
             if len(hits) >= 2 or (hits and (tail or after_fence)) or (after_fence and tail and len(paragraph) < 80):

@@ -33,6 +33,7 @@ export default function ChapterWorkbench({ documentId, version, onVersion, onDir
   const [dialog, setDialog] = useState("");
   const [newTitle, setNewTitle] = useState("");
   const [newBody, setNewBody] = useState("");
+  const [visibleFindingCount, setVisibleFindingCount] = useState(8);
   const [discardAction, setDiscardAction] = useState<(() => void) | null>(null);
   const cache = useRef(new Map<string, ChapterPage>());
   const request = useRef(0);
@@ -126,16 +127,25 @@ export default function ChapterWorkbench({ documentId, version, onVersion, onDir
     requestAnimationFrame(() => editorRef.current?.reveal(start, end));
   }, [edit?.chapterId, edit?.versionId, edit?.start, loading, reading]);
 
-  const changePage = async (next: number, start = 0, force = false) => {
+  const firstFinding = (result: ChapterPage): Finding | undefined => {
+    const proposal = result.proposals.find((item) => item.scope !== "heading") || result.proposals[0];
+    return proposal ? { ...proposal, chapter_id: result.id, chapter_index: result.index, chapter_title: chapterLabel(result) } : undefined;
+  };
+  const changePage = async (next: number, start = 0, force = false, locate = false) => {
     const part = chapters[next];
-    if (!part || (next === active && start === pageStart && page?.id === part.id)) return;
-    if (dirty && !force) { setDiscardAction(() => () => { void changePage(next, start, true); }); return; }
+    if (!part) return;
+    if (dirty && !force) { setDiscardAction(() => () => { void changePage(next, start, true, locate); }); return; }
+    if (next === active && start === pageStart && page?.id === part.id) {
+      const finding = locate ? firstFinding(page) : undefined;
+      if (finding) jumpToFinding(finding);
+      return;
+    }
     setActive(next); setPageStart(start); setError("");
     const saved = cache.current.get(`${version.id}:${part.id}:${start}`);
     const ticket = ++request.current;
-    if (saved) { setPage(saved); setReading(false); return; }
+    if (saved) { if (locate) pendingFocus.current = firstFinding(saved) || null; setPage(saved); setReading(false); return; }
     setReading(true);
-    try { const result = await fetchPage(part, start); if (ticket === request.current && result) setPage(result); }
+    try { const result = await fetchPage(part, start); if (ticket === request.current && result) { if (locate) pendingFocus.current = firstFinding(result) || null; setPage(result); } }
     catch (e) { if (ticket === request.current) { setError(messageOf(e)); if (page) { const old = chapters.findIndex((part) => part.id === page.id); setActive(Math.max(0, old)); setPageStart(page.start); } } }
     finally { if (ticket === request.current) setReading(false); }
   };
@@ -171,7 +181,7 @@ export default function ChapterWorkbench({ documentId, version, onVersion, onDir
     if (page?.id === finding.chapter_id && edit && finding.start >= edit.start && finding.end <= edit.end) {
       pendingFocus.current = null;
       requestAnimationFrame(() => editorRef.current?.reveal(displayOffset(edit.offsets, finding.start, edit.start), displayOffset(edit.offsets, finding.end, edit.start)));
-    } else void changePage(next, Math.max(0, Math.floor((finding.start - (chapters[next].body_start || chapters[next].start) + chapters[next].start) / PAGE) * PAGE), true);
+    } else void changePage(next, Math.max(0, Math.floor(finding.start / PAGE) * PAGE), true);
   };
   const annotations = useMemo<TextHighlight[]>(() => {
     if (!page || !edit) return [];
@@ -195,7 +205,8 @@ export default function ChapterWorkbench({ documentId, version, onVersion, onDir
     if (!page || !edit || edit.title !== edit.originalTitle) return [];
     return (page.title_proposals || page.proposals.filter((proposal) => proposal.scope === "heading")).map((proposal) => ({ id: proposal.id, start: Math.max(0, proposal.start - (page.title_source_start || 0)), end: Math.max(0, proposal.end - (page.title_source_start || 0)), label: proposal.reason || proposal.label, kind: issueClass(proposal.kind), selected: true, removable: proposal.removable }));
   }, [page, edit?.title, edit?.originalTitle]);
-  const manualFindings = useMemo(() => page?.proposals.filter((proposal) => !proposal.removable) || [], [page]);
+  const findings = useMemo(() => page?.proposals || [], [page]);
+  useEffect(() => setVisibleFindingCount(8), [page?.id, page?.version_id]);
   const filtered = useMemo(() => chapters.filter((part) => (!query || chapterLabel(part).toLocaleLowerCase().includes(query.toLocaleLowerCase()) || String(part.number ?? part.index + 1).includes(query)) && (filter === "all" || (filter === "review" ? needsReview(part) : part.issues.some((issue) => issueClass(issue.kind) === filter)))), [chapters, query, filter]);
   const virtual = filtered.length > 150;
   const virtualStart = virtual ? Math.max(0, Math.floor(navigationTop / 66) - 6) : 0;
@@ -220,13 +231,13 @@ export default function ChapterWorkbench({ documentId, version, onVersion, onDir
         <div className="chapter-directory-filter"><button className={filter === "all" ? "active" : ""} onClick={() => setFilter("all")}>全部</button><button className={filter === "review" ? "active" : ""} onClick={() => setFilter("review")}>待检查 {affected.length || ""}</button></div>
         <div ref={navigationRef} className={`chapter-navigation-list ${virtual ? "virtual" : ""}`} onScroll={(event) => { if (virtual) setNavigationTop(event.currentTarget.scrollTop); }}>
           <div className="chapter-directory-items" style={virtual ? { height: filtered.length * 66, position: "relative" } : undefined}>
-          {loading && !index ? <div className="chapter-directory-skeleton" aria-label="正在读取目录"><i /><i /><i /><i /></div> : !filtered.length ? <div className="chapter-small-empty">没有匹配的章节</div> : directoryItems.map((part, row) => <button style={virtual ? { position: "absolute", top: (virtualStart + row) * 66, left: 0, right: 0, height: 66 } : undefined} key={part.id} className={`chapter-navigation-item ${chapter?.id === part.id ? "active" : ""} ${part.placeholder ? "placeholder" : ""} ${needsReview(part) && !part.placeholder ? part.issues.some((issue) => issueClass(issue.kind) === "glyph" || issueClass(issue.kind) === "length") ? "has-diagnostic" : "has-removal" : ""}`} disabled={loading || !!busy} onClick={() => void changePage(chapters.findIndex((item) => item.id === part.id))} aria-current={chapter?.id === part.id ? "location" : undefined}><span className="chapter-navigation-copy"><strong>{chapterLabel(part)}</strong><small>{part.placeholder ? "待补充正文" : `${part.char_count.toLocaleString()} 字`}</small></span></button>)}
+          {loading && !index ? <div className="chapter-directory-skeleton" aria-label="正在读取目录"><i /><i /><i /><i /></div> : !filtered.length ? <div className="chapter-small-empty">没有匹配的章节</div> : directoryItems.map((part, row) => <button style={virtual ? { position: "absolute", top: (virtualStart + row) * 66, left: 0, right: 0, height: 66 } : undefined} key={part.id} className={`chapter-navigation-item ${chapter?.id === part.id ? "active" : ""} ${part.placeholder || part.kind === "missing" ? "placeholder has-missing" : ""} ${needsReview(part) && !part.placeholder ? part.issues.some((issue) => issueClass(issue.kind) === "glyph" || issueClass(issue.kind) === "length") ? "has-diagnostic" : "has-removal" : ""}`} disabled={loading || !!busy} onClick={() => void changePage(chapters.findIndex((item) => item.id === part.id), Math.max(0, Math.floor((part.first_body_issue_start ?? 0) / PAGE) * PAGE), false, true)} aria-current={chapter?.id === part.id ? "location" : undefined}><span className="chapter-navigation-copy"><strong>{chapterLabel(part)}</strong><small>{part.placeholder ? "待补充正文" : `${part.char_count.toLocaleString()} 字`}</small></span></button>)}
           </div>
         </div>
       </aside>
       <section className="chapter-reading-pane">
-        <div className="chapter-reader-header"><div className="chapter-heading-fields"><span className="chapter-reader-overline">{chapter ? `${active + 1} / ${chapters.length}` : "章节正文"}</span>{chapter && edit ? <div className="chapter-editable-heading">{chapter.kind !== "preamble" && <strong className="chapter-number-label">第{chapter.number ?? chapter.index + 1}章</strong>}<ChapterTitleEditor ref={titleRef} value={edit.title} highlights={titleAnnotations} readOnly={!!chapter.gap_range || !!busy || reading || loading || page?.id !== chapter.id || edit.versionId !== version.id} placeholder={missing ? "章节标题" : ""} onChange={(title) => setEdit((draft) => draft ? { ...draft, title } : null)} /></div> : <h3>{chapter ? chapterLabel(chapter) : "选择章节"}</h3>}</div><div className="chapter-reader-actions"><button className="icon-button" title="上一章" aria-label="上一章" disabled={loading || active <= 0 || !!busy} onClick={() => void changePage(active - 1)}><ChevronLeft size={16} /></button><button className="icon-button" title="下一章" aria-label="下一章" disabled={loading || active >= chapters.length - 1 || !!busy} onClick={() => void changePage(active + 1)}><ChevronRight size={16} /></button><button className="button secondary compact-button chapter-delete-button" disabled={!chapter || !!missing || !!busy || reading || loading} onClick={() => safeAction(() => setDialog("delete"))}><Trash2 size={14} /><span>删除本章</span></button></div></div>
-        {!!page && page.id === chapter?.id && (!!page.structured_issues?.length || manualFindings.length > 0) && <div className="chapter-inline-findings" aria-label="本章问题位置">{page.structured_issues?.map((issue) => <span className="chapter-structural-issue" key={issue.id} title={issue.reason}>{issue.label}{issue.reason && issue.reason !== issue.label ? ` · ${issue.reason}` : ""}</span>)}{manualFindings.slice(0, 4).map((finding) => <button className="chapter-inline-finding" key={finding.id} disabled={dirty || !!busy || reading || loading} onClick={() => jumpToFinding({ ...finding, chapter_id: page.id, chapter_index: page.index, chapter_title: chapterLabel(page) })}><span>{finding.scope === "heading" ? "章节名 · " : ""}{finding.label}</span><code>{/^[\p{Cf}\p{Cc}\s]*$/u.test(finding.text) ? "〔隐藏字符〕" : Array.from(finding.text).slice(0, 16).join("")}</code>{finding.scope !== "heading" && (finding.start < (edit?.start || 0) || finding.end > (edit?.end || 0)) ? <small>第{Math.floor(finding.start / PAGE) + 1}段</small> : null}</button>)}</div>}
+        <div className="chapter-reader-header"><div className="chapter-heading-fields"><span className="chapter-reader-overline">{chapter ? `${active + 1} / ${chapters.length}` : "章节正文"}</span>{chapter && edit ? <div className="chapter-editable-heading">{chapter.kind !== "preamble" && <strong className="chapter-number-label">第{chapter.number ?? chapter.index + 1}章</strong>}<ChapterTitleEditor ref={titleRef} value={edit.title} highlights={titleAnnotations} readOnly={!!chapter.gap_range || !!busy || reading || loading || page?.id !== chapter.id || edit.versionId !== version.id} placeholder={missing ? "章节标题" : ""} onChange={(title) => setEdit((draft) => draft ? { ...draft, title } : null)} /></div> : <h3>{chapter ? chapterLabel(chapter) : "选择章节"}</h3>}</div><div className="chapter-reader-actions"><button className="icon-button chapter-delete-button" title="删除本章" aria-label="删除本章" disabled={!chapter || !!missing || !!busy || reading || loading} onClick={() => safeAction(() => setDialog("delete"))}><Trash2 size={16} /></button></div></div>
+        {!!page && page.id === chapter?.id && (!!page.structured_issues?.length || findings.length > 0) && <div className="chapter-inline-findings" aria-label="本章问题位置">{page.structured_issues?.map((issue) => <span className="chapter-structural-issue" key={issue.id} title={issue.reason}>{issue.label}{issue.reason && issue.reason !== issue.label ? ` · ${issue.reason}` : ""}</span>)}{findings.slice(0, visibleFindingCount).map((finding) => <button className={`chapter-inline-finding ${finding.removable ? "removing" : "diagnostic"}`} key={finding.id} disabled={dirty || !!busy || reading || loading} onClick={() => jumpToFinding({ ...finding, chapter_id: page.id, chapter_index: page.index, chapter_title: chapterLabel(page) })}><span>{finding.scope === "heading" ? "章节名 · " : ""}{finding.label}</span><code>{/^[\p{Cf}\p{Cc}\s]*$/u.test(finding.text) ? "〔隐藏字符〕" : Array.from(finding.text).slice(0, 16).join("")}</code>{finding.scope !== "heading" && (finding.start < (edit?.start || 0) || finding.end > (edit?.end || 0)) ? <small>第{Math.floor(finding.start / PAGE) + 1}段</small> : null}</button>)}{findings.length > visibleFindingCount && <button className="chapter-more-findings" onClick={() => setVisibleFindingCount((count) => count + 8)}>更多标记 {findings.length - visibleFindingCount}</button>}</div>}
         <div className="chapter-notice"><Notice error>{error}</Notice></div>
         <article className={`chapter-reader-scroll ${reading ? "pending" : ""}`} aria-label={chapter ? chapterLabel(chapter) : "章节正文"}>
           {edit && page ? <ChapterTextEditor key={`${page.id}:${edit.start}`} ref={editorRef} value={edit.body} highlights={annotations} readOnly={!!chapter?.gap_range || !!busy || reading || loading || page.id !== chapter?.id || edit.versionId !== version.id} placeholder={chapter?.gap_range ? "缺章范围过大，请先调整章节编号，或手动添加指定章节。" : missing ? "在这里补充本章正文" : ""} onChange={(body) => setEdit((draft) => draft ? { ...draft, body } : null)} /> : !loading ? <Empty icon={FilePlus2} title="尚无章节" description="上传全文或添加第一章。" /> : <div className="chapter-reader-skeleton"><i /><i /><i /><i /><i /></div>}
