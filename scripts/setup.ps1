@@ -39,8 +39,10 @@ function Test-SupportedPython {
 
 Push-Location -LiteralPath $ProjectRoot
 try {
-    $nodeCommand = Get-Command 'node.exe' -CommandType Application -ErrorAction SilentlyContinue
-    $npmCommand = Get-Command 'npm.cmd' -CommandType Application -ErrorAction SilentlyContinue
+    # Windows PATH can resolve the same executable from multiple locations.
+    # Select a scalar ApplicationInfo before passing its Source to string args.
+    $nodeCommand = Get-Command 'node.exe' -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    $npmCommand = Get-Command 'npm.cmd' -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $nodeCommand -or -not $npmCommand) {
         throw 'Node.js and npm are required. Install Node.js 22 or 24, reopen the terminal, and run setup.cmd again.'
     }
@@ -59,7 +61,7 @@ try {
     }
     else {
         $pythonCandidate = $null
-        $pyCommand = Get-Command 'py.exe' -CommandType Application -ErrorAction SilentlyContinue
+        $pyCommand = Get-Command 'py.exe' -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
         if ($pyCommand) {
             foreach ($version in @('-3.12', '-3.11', '-3.13')) {
                 if (Test-SupportedPython -Executable $pyCommand.Source -Prefix @($version)) {
@@ -70,7 +72,7 @@ try {
         }
         if (-not $pythonCandidate) {
             foreach ($name in @('python.exe', 'python3.exe')) {
-                $candidateCommand = Get-Command $name -CommandType Application -ErrorAction SilentlyContinue
+                $candidateCommand = Get-Command $name -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
                 if ($candidateCommand -and (Test-SupportedPython -Executable $candidateCommand.Source)) {
                     $pythonCandidate = @{ Executable = $candidateCommand.Source; Prefix = @() }
                     break
