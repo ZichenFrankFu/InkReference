@@ -251,7 +251,9 @@ def test_fixed_frontend_commands_do_not_run_package_scripts(repair, monkeypatch)
     preview = repair.preview(json.dumps(plan(repair, path="frontend/src/App.tsx", before="Fixture", after="Repaired")))
     final = wait(repair, repair.apply(preview["preview_id"])["operation_id"])
     assert final["status"] == "succeeded" and final["frontend_rebuilt"]
-    assert len(commands) == 2 and commands[0][1].endswith("typescript/bin/tsc") and commands[1][1].endswith("vite/bin/vite.js")
+    assert len(commands) == 2
+    assert Path(commands[0][1]).parts[-3:] == ("typescript", "bin", "tsc")
+    assert Path(commands[1][1]).parts[-3:] == ("vite", "bin", "vite.js")
     assert all("shell" not in command for command in commands)
     assert not sentinel.exists()
     assert (repair.root / "frontend/dist/index.html").read_text() == "<main>rebuilt</main>"
