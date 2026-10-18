@@ -128,7 +128,9 @@ def test_schema3_migration_archives_and_explicit_v8_export(tmp_path):
     from pathlib import Path
     fixture_dir = Path(__file__).parent/"fixtures"
     store = DataStore(tmp_path/"old.db")
-    old = [(table+".csv",(fixture_dir/(table+".csv")).read_bytes()) for table in TABLES]
+    # Exercise CRLF explicitly on every host, including embedded CSV newlines.
+    old = [(table+".csv", (fixture_dir/(table+".csv")).read_bytes().replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")) for table in TABLES]
+    input_bytes = dict(old)
     batch = parse_files(old);assert not preview_import(store,batch)["errors"];commit_import(store,batch)
     # Simulate a persisted v3 database: v4 tables did not exist in this state.
     with store.connect() as connection:
@@ -139,8 +141,8 @@ def test_schema3_migration_archives_and_explicit_v8_export(tmp_path):
     raw = export_legacy_zip(migrated)
     with zipfile.ZipFile(io.BytesIO(raw)) as archive:
         for table,name in [("works","works_library_v8.csv"),("characters","character_database_v8.csv"),("cliches","cliche_database_v8.csv")]:
-            expected = list(csv.DictReader(io.StringIO((fixture_dir/(table+".csv")).read_text(encoding="utf-8-sig"))))
-            actual = list(csv.DictReader(io.StringIO(archive.read(name).decode("utf-8-sig"))))
+            expected = list(csv.DictReader(io.StringIO(input_bytes[table+".csv"].decode("utf-8-sig"), newline="")))
+            actual = list(csv.DictReader(io.StringIO(archive.read(name).decode("utf-8-sig"), newline="")))
             assert actual == expected
     target = DataStore(tmp_path/"fresh.db")
     new = parse_library_files([("all.db",export_library(migrated,"db"))])
