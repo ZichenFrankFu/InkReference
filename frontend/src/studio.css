@@ -4495,9 +4495,9 @@ button:disabled {
   color: #354e3f;
 }
 .model-destination.remote {
-  background: #fbf5e9;
-  border-color: #e5d9be;
-  color: #645133;
+  background: #f0f5f4;
+  border-color: #d6e2de;
+  color: #354e48;
 }
 .model-destination > div {
   display: flex;
@@ -4531,16 +4531,6 @@ button:disabled {
   font-size: 12px;
   line-height: 1.8;
   margin: 0;
-}
-.model-destination .check-line {
-  align-items: flex-start;
-  line-height: 1.8;
-  margin-top: 15px;
-  font-size: 12px;
-}
-.model-destination .check-line input {
-  margin-top: 4px;
-  flex-shrink: 0;
 }
 .job-destination {
   display: flex;

@@ -8,23 +8,26 @@ from __future__ import annotations
 import html
 import importlib
 import json
+import os
+import shlex
 import sys
 import threading
 import time
 import urllib.error
 import urllib.request
 from urllib.parse import urlsplit
+from pathlib import Path
 
 STARTUP_TIMEOUT = 30.0
 SHUTDOWN_TIMEOUT = 4.0
 HTTP_TIMEOUT = 0.5
 POLL_INTERVAL = 0.15
-BROWSER_HINT = r".\scripts\open.ps1 -EnvironmentName InkReference -Browser"
+BROWSER_HINT = r".\scripts\open.ps1 -Browser"
 
 LOADING_HTML = """<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>InkReference</title>
 <style>html,body{height:100%;margin:0}body{display:grid;place-items:center;background:#f4f2ec;
-color:#243934;font-family:'Segoe UI','Microsoft YaHei UI',sans-serif}.card{width:min(440px,74vw);
+color:#243934;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Microsoft YaHei UI',sans-serif}.card{width:min(440px,74vw);
 padding:48px;border-radius:24px;background:#fffdfa;box-shadow:0 16px 64px #233c3210}
 .mark{display:grid;place-items:center;width:48px;height:48px;border-radius:14px;background:#275d50;
 color:white;font:700 28px Georgia,serif}.name{font-size:13px;letter-spacing:2px;color:#668078;margin:24px 0 10px}
@@ -34,7 +37,7 @@ h1{font-size:25px;font-weight:600;line-height:1.5;margin:0 0 12px}p{font-size:14
 @keyframes move{0%{transform:translateX(-110%)}100%{transform:translateX(390%)}}
 @media(prefers-reduced-motion:reduce){.bar{animation:none;margin-left:32%}}</style></head>
 <body><main class="card"><div class="mark">I</div><div class="name">INKREFERENCE</div>
-<h1>正在准备你的素材库</h1><p>整理灵感，连接故事。<br>界面准备好后会自动打开。</p>
+<h1>正在打开素材库</h1><p>正在启动本地服务</p>
 <div class="track" role="progressbar" aria-label="正在启动" aria-valuetext="启动中">
 <div class="bar"></div></div></main></body></html>"""
 
@@ -42,17 +45,42 @@ h1{font-size:25px;font-weight:600;line-height:1.5;margin:0 0 12px}p{font-size:14
 def _browser_hint(url: str | None = None) -> str:
     if getattr(sys, "frozen", False):
         port = urlsplit(url or "http://127.0.0.1:8000").port or 8000
-        executable = sys.executable.replace("'", "''")
-        return f"& '{executable}' --no-open --port {port}\n然后在浏览器打开 {url or 'http://127.0.0.1:8000'}"
-    return BROWSER_HINT
+        executable = (
+            "& '" + sys.executable.replace("'", "''") + "'"
+            if sys.platform == "win32" else shlex.quote(sys.executable)
+        )
+        return f"{executable} --no-open --port {port}\n然后在浏览器打开 {url or 'http://127.0.0.1:8000'}"
+    return BROWSER_HINT if sys.platform == "win32" else "./scripts/open.sh --browser"
+
+
+def default_log_dir(configured_data_dir: str | None = None) -> Path:
+    """Use writable OS locations, outside the installed application bundle."""
+    configured = configured_data_dir or os.environ.get("INKREFERENCE_DATA_DIR")
+    if configured:
+        return Path(configured).expanduser() / "logs"
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Logs" / "InkReference"
+    if sys.platform == "win32":
+        base = Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local")))
+        return base / "InkReference" / "logs"
+    base = Path(os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local" / "state")))
+    return base / "InkReference" / "logs"
+
+
+def _renderer_hint() -> str:
+    if sys.platform == "win32":
+        return "请检查 Microsoft Edge WebView2 Runtime。"
+    if sys.platform == "darwin":
+        return "请检查 macOS WebKit 和桌面依赖。"
+    return "请检查桌面渲染依赖。"
 
 
 def _error_html(message: str, url: str | None = None) -> str:
     return LOADING_HTML.replace(
-        "正在准备你的素材库", "暂时无法打开桌面窗口"
+        "正在打开素材库", "暂时无法打开桌面窗口"
     ).replace(
-        "整理灵感，连接故事。<br>界面准备好后会自动打开。",
-        html.escape(message) + "<br>关闭窗口后，可从 PowerShell 使用浏览器入口：<br><code>"
+        "正在启动本地服务",
+        html.escape(message) + "<br>关闭窗口后，可使用浏览器入口：<br><code>"
         + html.escape(_browser_hint(url)).replace("\n", "<br>") + "</code>",
     ).replace('class="track"', 'class="track" style="display:none"')
 
@@ -155,12 +183,12 @@ def run_desktop(server, listener, url: str) -> int:
         window.events.closed += on_closed
         worker = threading.Thread(target=serve, name="inkreference-http", daemon=True)
         worker.start()
-        kwargs = {"gui": "edgechromium"} if sys.platform == "win32" else {}
+        kwargs = {"gui": "edgechromium"} if sys.platform == "win32" else {"gui": "cocoa"} if sys.platform == "darwin" else {}
         webview.start(load_when_ready, **kwargs)
         if not ready.is_set() and not window_closed.is_set() and not failures:
-            record_failure("桌面界面在就绪前停止。请检查 WebView2 Runtime。")
+            record_failure("桌面界面在就绪前停止。" + _renderer_hint())
     except Exception as exc:
-        record_failure(f"原生窗口不可用：{exc}。Windows 需要 Microsoft Edge WebView2 Runtime。")
+        record_failure(f"原生窗口不可用：{exc}。" + _renderer_hint())
     finally:
         stop.set()
         server.should_exit = True

@@ -134,7 +134,7 @@ def test_model_draft_discovery_and_credential_clear_are_gui_ready(client):
     assert cleared.status_code == 200 and not cleared.json()["key_available"]
 
 
-def test_remote_models_and_jobs_require_separate_explicit_consent(client):
+def test_remote_tests_are_direct_and_job_confirmation_is_reused_on_resume(client):
     requests = []
     def handle(request):
         requests.append(request)
@@ -142,8 +142,9 @@ def test_remote_models_and_jobs_require_separate_explicit_consent(client):
     client.app.state.runtime.studio.models.transport = httpx.MockTransport(handle)
     profile = create_model(client, base_url="https://provider.example/v1", connection_mode="remote", api_key="remote-private-113")
     path = PREFIX + f"/models/{profile['id']}/test"
-    assert client.post(path, json={}).status_code == 428
-    assert not requests
+    assert client.post(path, json={}).status_code == 200
+    assert len(requests) == 1
+    requests.clear()
     document = upload_document(client)
     body = {"document_id": document["id"], "version_id": document["latest_version_id"], "profile_id": profile["id"], "start": False}
     assert client.post(PREFIX + "/jobs", json=body).status_code == 428
@@ -152,11 +153,9 @@ def test_remote_models_and_jobs_require_separate_explicit_consent(client):
     created = client.post(PREFIX + "/jobs", json={**body, "remote_consent": True, "expected_model_fingerprint": profile["target_fingerprint"]})
     assert created.status_code == 201
     job_path = PREFIX + f"/jobs/{created.json()['id']}"
-    assert client.post(job_path + "/start", json={}).status_code == 428
     assert client.post(job_path + "/cancel", json={}).status_code == 200
-    assert client.post(job_path + "/resume", json={}).status_code == 428
     assert not requests
-    assert client.post(job_path + "/resume", json={"remote_consent": True}).status_code == 200
+    assert client.post(job_path + "/resume", json={}).status_code == 200
     assert wait_for_job(client, created.json()["id"])["status"] == "needs_review"
     assert len(requests) == 1
 

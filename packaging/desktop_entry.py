@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 import sys
-from pathlib import Path
 
 
 def _ensure_streams(argv: list[str]) -> None:
@@ -17,8 +16,8 @@ def _ensure_streams(argv: list[str]) -> None:
         index = argv.index("--data-dir") + 1
         if index < len(argv):
             configured = argv[index]
-    base = Path(configured).expanduser() if configured else Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local"))) / "InkReference"
-    log_dir = base / "logs"
+    from inkreference.desktop import default_log_dir
+    log_dir = default_log_dir(configured)
     log_dir.mkdir(parents=True, exist_ok=True)
     stream = (log_dir / "desktop.log").open("a", encoding="utf-8", buffering=1)
     if sys.stdout is None:

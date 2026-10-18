@@ -9,7 +9,7 @@ import {
   RefreshCw,
   Save,
   Search,
-  ShieldCheck,
+  Server,
   SlidersHorizontal,
   Square,
 } from "lucide-react";
@@ -22,6 +22,7 @@ import {
   type DocumentMeta,
   type EvidenceItem,
 } from "./studio";
+import { isRemoteModel, modelEndpoint } from "./model-security";
 import {
   Busy,
   Empty,
@@ -79,8 +80,6 @@ export default function Jobs({ initialId, navigate }: Props) {
   const [evidenceBusy, setEvidenceBusy] = useState(false);
   const [query, setQuery] = useState("");
   const [pendingId, setPendingId] = useState<string | null>(null);
-  const [resumeOpen, setResumeOpen] = useState(false);
-  const [remoteConsent, setRemoteConsent] = useState(false);
   const dirty =
     !!draft &&
     !!selected &&
@@ -165,14 +164,12 @@ export default function Jobs({ initialId, navigate }: Props) {
   }, []);
   const action = async (kind: "resume" | "cancel") => {
     if (!selected) return;
-    if (kind === "resume" && remote && !remoteConsent) return;
     setBusy(kind);
     setError("");
     try {
-      const run = await send<Run>(`/jobs/${selected.id}/${kind}`, kind === "resume" ? { remote_consent: remote && remoteConsent } : {});
+      const run = await send<Run>(`/jobs/${selected.id}/${kind}`, {});
       setSelected(run);
       setDraft(run.results);
-      setResumeOpen(false);
       await load();
     } catch (e) {
       setError(messageOf(e));
@@ -271,15 +268,8 @@ export default function Jobs({ initialId, navigate }: Props) {
       selected.document_id
     : "";
   const modelSnapshot = ((selected?.snapshots || {}) as { model?: { connection_mode?: "local" | "remote"; base_url?: string; model?: string } }).model;
-  const destination = (() => { try { return new URL(modelSnapshot?.base_url || "").origin; } catch { return modelSnapshot?.base_url || "未知地址"; } })();
-  const remote = modelSnapshot?.connection_mode ? modelSnapshot.connection_mode === "remote" : (() => {
-    try { const host = new URL(modelSnapshot?.base_url || "").hostname; return !(["localhost", "[::1]", "::1"].includes(host) || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host)); } catch { return true; }
-  })();
-  const startResume = () => {
-    setRemoteConsent(false);
-    if (remote) setResumeOpen(true);
-    else void action("resume");
-  };
+  const destination = modelEndpoint(modelSnapshot?.base_url);
+  const remote = isRemoteModel(modelSnapshot);
   return (
     <main className="studio-main">
       <PageTitle
@@ -301,6 +291,7 @@ export default function Jobs({ initialId, navigate }: Props) {
         {error || message}
       </Notice>
       {busy === "load" && !selected && <Busy label="正在读取任务详情" compact />}
+      {(busy === "resume" || busy === "cancel") && <Busy label={busy === "resume" ? "正在继续分析" : "正在取消运行"} compact />}
       {evidenceBusy && <Busy label="正在读取原文证据" compact />}
       <div className="jobs-layout">
         <aside className="surface jobs-index">
@@ -394,7 +385,7 @@ export default function Jobs({ initialId, navigate }: Props) {
                     ) ? (
                     <button
                       className="button primary"
-                      onClick={startResume}
+                      onClick={() => void action("resume")}
                       disabled={!!busy}
                     >
                       <Play size={15} />
@@ -410,7 +401,7 @@ export default function Jobs({ initialId, navigate }: Props) {
                   </button>
                 </div>
               </div>
-              {modelSnapshot && <div className="job-destination"><ShieldCheck size={14} /><span>{remote ? "远程 API" : "本机模型"}</span><strong>{destination}</strong><button className="text-button" onClick={() => navigate("models")}>模型设置</button></div>}
+              {modelSnapshot && <div className="job-destination"><Server size={14} /><span>{remote ? "远程 API" : "本机模型"}</span><strong>{destination}</strong><button className="text-button" onClick={() => navigate("models")}>模型设置</button></div>}
               <div className="job-progress-section">
                 <Progress
                   completed={selected.completed}
@@ -768,16 +759,6 @@ export default function Jobs({ initialId, navigate }: Props) {
               确认入库
             </button>
           </div>
-        </Modal>
-      )}
-      {resumeOpen && selected && (
-        <Modal title="继续远程分析" onClose={() => setResumeOpen(false)} busy={busy === "resume"}>
-          <div className="modal-body">
-            <div className="model-destination remote"><div><ShieldCheck size={18} /><strong>使用此任务固定的模型配置</strong></div><dl><dt>目标地址</dt><dd>{destination}</dd><dt>模型</dt><dd>{modelSnapshot?.model || selected.profile_id}</dd></dl><p>继续运行会向此服务发送尚未完成的全文分块、分析提示词与 Skill，由该 API 提供商处理。</p><label className="check-line"><input type="checkbox" checked={remoteConsent} onChange={(e) => setRemoteConsent(e.target.checked)} />我确认本次继续运行可以向上述服务发送内容</label></div>
-            <Notice error>{error}</Notice>
-            {busy === "resume" && <Busy label="正在恢复远程分析" />}
-          </div>
-          <div className="modal-footer"><button className="button secondary" onClick={() => setResumeOpen(false)} disabled={!!busy}>取消</button><button className="button primary" disabled={!remoteConsent || !!busy} onClick={() => void action("resume")}>确认并继续</button></div>
         </Modal>
       )}
       {pendingId && (

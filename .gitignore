@@ -133,6 +133,8 @@ installer/output/
 *.appx
 *.appxbundle
 *.dmg
+*.pkg
+*.app/
 *.AppImage
 
 # Editors and Windows/macOS temporary files.

@@ -70,3 +70,9 @@ uvicorn==0.54.0
 websockets==16.1.1
 xxhash==4.0.1
 zstandard==0.25.0
+pyobjc-core==12.2.2; sys_platform == "darwin"
+pyobjc-framework-Cocoa==12.2.2; sys_platform == "darwin"
+pyobjc-framework-Quartz==12.2.2; sys_platform == "darwin"
+pyobjc-framework-WebKit==12.2.2; sys_platform == "darwin"
+pyobjc-framework-Security==12.2.2; sys_platform == "darwin"
+pyobjc-framework-UniformTypeIdentifiers==12.2.2; sys_platform == "darwin"

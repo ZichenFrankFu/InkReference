@@ -550,11 +550,6 @@ class ModelService:
             result["response_format"] = requested
         return result
 
-    @staticmethod
-    def _check_remote(config: dict[str, Any], allow_remote: bool) -> None:
-        if config["connection_mode"] == "remote" and allow_remote is not True:
-            raise DataError(428, "请先确认向该远程服务发送连接测试或模型列表请求")
-
     def _draft(self, values: dict[str, Any], *, discovery: bool = False) -> tuple[dict[str, Any], str | None]:
         allowed = _CONFIG_FIELDS | _PUBLIC_FIELDS | {"api_key", "use_saved_key", "remote_consent"}
         if not isinstance(values, dict) or set(values) - allowed:
@@ -591,12 +586,10 @@ class ModelService:
     def test_profile(self, profile_id: str, *, allow_remote: bool = False) -> dict[str, Any]:
         """One explicitly requested synthetic generation; no document is read."""
         config = self.snapshot(profile_id)
-        self._check_remote(config, allow_remote)
         return self._test_connection(config, self._key(profile_id, config))
 
     def test_draft(self, values: dict[str, Any], *, allow_remote: bool = False) -> dict[str, Any]:
         config, key = self._draft(values)
-        self._check_remote(config, allow_remote or values.get("remote_consent") is True)
         return self._test_connection(config, key)
 
     def _test_connection(self, config: dict[str, Any], key: str | None) -> dict[str, Any]:
@@ -608,7 +601,6 @@ class ModelService:
     def discover_models(self, values: dict[str, Any], *, allow_remote: bool = False) -> dict[str, Any]:
         """Fetch names only after an explicit action; no generation or body text."""
         config, key = self._draft(values, discovery=True)
-        self._check_remote(config, allow_remote or values.get("remote_consent") is True)
         if config["provider"] == "ollama":
             path = "/tags" if config["base_url"].endswith("/api") else "/api/tags"
         else:

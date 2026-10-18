@@ -299,16 +299,14 @@ def test_local_classification_rejects_lan_dns_and_ambiguous_hosts(tmp_path, url)
         profile(ModelService(tmp_path), base_url=url, connection_mode="local")
 
 
-def test_remote_requires_https_and_explicit_test_consent(tmp_path):
+def test_remote_requires_https_and_explicit_test_action_is_sufficient(tmp_path):
     requests = []
     service = ModelService(tmp_path, transport=httpx.MockTransport(lambda req: requests.append(req) or completion("OK")))
     with pytest.raises(DataError):
         profile(service, connection_mode="remote", base_url="http://api.example/v1")
     configured = profile(service, connection_mode="remote", base_url="https://api.example/v1", api_key="remote-secret")
-    with pytest.raises(DataError):
-        service.test_profile(configured["id"])
     assert requests == []
-    result = service.test_profile(configured["id"], allow_remote=True)
+    result = service.test_profile(configured["id"])
     assert result["ok"] and result["duration_ms"] >= 0
     assert json.loads(requests[0].content)["messages"] == [{"role": "user", "content": "仅回复 OK"}]
 
@@ -386,14 +384,17 @@ def test_model_discovery_uses_get_without_text_or_generation(tmp_path, provider,
     assert service.list_usage() == [] and service.list_profiles() == []
 
 
-def test_remote_discovery_and_draft_generation_require_consent_even_with_key(tmp_path):
+def test_explicit_remote_discovery_and_draft_tests_need_no_extra_confirmation(tmp_path):
     requests = []
-    service = ModelService(tmp_path, transport=httpx.MockTransport(lambda req: requests.append(req)))
+    def handle(request):
+        requests.append(request)
+        return httpx.Response(200, json={"data": [{"id": "test"}]}) if request.method == "GET" else completion("OK")
+    service = ModelService(tmp_path, transport=httpx.MockTransport(handle))
     draft = {"provider": "openai_compatible", "connection_mode": "remote", "base_url": "https://api.example/v1", "model": "test", "api_key": "keep-private"}
     for action in [service.test_draft, service.discover_models]:
-        with pytest.raises(DataError):
-            action(draft)
-    assert requests == [] and service.list_usage() == []
+        action(draft)
+    assert [request.method for request in requests] == ["POST", "GET"]
+    assert len(service.list_usage()) == 1 and service.list_profiles() == []
 
 
 def test_discovery_does_not_follow_redirect_or_leak_raw_provider_error(tmp_path):

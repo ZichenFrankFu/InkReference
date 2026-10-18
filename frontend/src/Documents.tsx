@@ -9,12 +9,13 @@ import {
   Plus,
   RefreshCw,
   Search,
-  ShieldCheck,
+  Server,
   SlidersHorizontal,
   Upload,
 } from "lucide-react";
 import { download } from "./api";
 import Conversions from "./Conversions";
+import { isRemoteModel, modelEndpoint } from "./model-security";
 import {
   studio,
   send,
@@ -73,7 +74,6 @@ export default function Documents({ navigate, onJob }: Props) {
   const [profile, setProfile] = useState("");
   const [workflow, setWorkflow] = useState("");
   const [query, setQuery] = useState("");
-  const [remoteConsent, setRemoteConsent] = useState(false);
   const [discardClean, setDiscardClean] = useState(false);
   const [pendingDocument, setPendingDocument] = useState<{ id: string; vid?: string } | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
@@ -86,10 +86,8 @@ export default function Documents({ navigate, onJob }: Props) {
   const cleanDirtyRef = useRef(cleanDirty);
   cleanDirtyRef.current = cleanDirty;
   const selectedProfile = profiles.find((p) => p.id === profile);
-  const remote = !!selectedProfile && (selectedProfile.connection_mode
-    ? selectedProfile.connection_mode === "remote"
-    : !isLoopback(selectedProfile.base_url));
-  const target = endpointLabel(selectedProfile?.base_url);
+  const remote = isRemoteModel(selectedProfile);
+  const target = modelEndpoint(selectedProfile?.base_url);
   const load = useCallback(async () => {
     setLoading(true);
     try {
@@ -211,7 +209,7 @@ export default function Documents({ navigate, onJob }: Props) {
   };
   const begin = async () => {
     if (!selected || !version) return;
-    if (remote && (!remoteConsent || !selectedProfile?.target_fingerprint)) return;
+    if (remote && !selectedProfile?.target_fingerprint) return;
     setBusy("start");
     setError("");
     try {
@@ -223,7 +221,7 @@ export default function Documents({ navigate, onJob }: Props) {
         workflow_version: w?.version || "1.0.0",
         profile_id: profile,
         start: true,
-        remote_consent: remote && remoteConsent,
+        remote_consent: remote,
         expected_model_fingerprint: selectedProfile?.target_fingerprint,
       });
       setStartOpen(false);
@@ -248,7 +246,6 @@ export default function Documents({ navigate, onJob }: Props) {
       setWorkflows(ws);
       setProfile((current) => ps.some((p) => p.id === current) ? current : ps[0]?.id || "");
       setWorkflow(ws[0] ? `${ws[0].id}@${ws[0].version}` : "");
-      setRemoteConsent(false);
       setStartOpen(true);
     } catch (e) {
       setError(messageOf(e));
@@ -273,7 +270,6 @@ export default function Documents({ navigate, onJob }: Props) {
           const next = normalizeList(result);
           setProfiles(next);
           setProfile((current) => next.some((p) => p.id === current) ? current : next[0]?.id || "");
-          setRemoteConsent(false);
         })
         .catch((e) => setError(messageOf(e)));
     };
@@ -410,6 +406,7 @@ export default function Documents({ navigate, onJob }: Props) {
             {error || message}
           </Notice>
           {busy === "version" && !selected && <Busy label="正在读取全文版本" compact />}
+          {busy === "config" && !startOpen && <Busy label="正在读取分析配置" compact />}
           <div className="document-layout">
             <aside className="surface document-index">
               <div className="surface-heading">
@@ -1012,7 +1009,7 @@ export default function Documents({ navigate, onJob }: Props) {
             <SelectField
               label="工作流版本"
               value={workflow}
-              onChange={(id) => { setWorkflow(id); setRemoteConsent(false); }}
+              onChange={setWorkflow}
             >
               {workflows.map((w) => (
                 <option
@@ -1023,7 +1020,7 @@ export default function Documents({ navigate, onJob }: Props) {
                 </option>
               ))}
             </SelectField>
-            <SelectField label="模型配置" value={profile} onChange={(id) => { setProfile(id); setRemoteConsent(false); }}>
+            <SelectField label="模型配置" value={profile} onChange={setProfile}>
               {!profiles.length && <option value="">尚未配置模型</option>}
               {profiles.map((p) => (
                 <option value={p.id} key={p.id}>
@@ -1037,13 +1034,12 @@ export default function Documents({ navigate, onJob }: Props) {
             <button className="text-button" disabled={!!busy} onClick={() => void startDialog()}><RefreshCw size={14} />刷新模型配置</button>
             {selectedProfile && (
               <div className={`model-destination ${remote ? "remote" : "local"}`}>
-                <div><ShieldCheck size={18} /><strong>{remote ? "发送到商业 / 远程 API" : "连接本机模型服务"}</strong></div>
+                <div><Server size={18} /><strong>{remote ? "使用远程 API 分析" : "使用本机模型分析"}</strong></div>
                 <dl><dt>目标地址</dt><dd>{target}</dd><dt>模型</dt><dd>{selectedProfile.model}</dd></dl>
                 {remote ? <>
-                  <p>本任务将向此服务发送全文分块、分析提示词与 Skill，由该 API 提供商处理。</p>
-                  <label className="check-line"><input type="checkbox" checked={remoteConsent} disabled={!selectedProfile.target_fingerprint} onChange={(e) => setRemoteConsent(e.target.checked)} />我确认本次任务可以向上述服务发送内容</label>
-                  {!selectedProfile.target_fingerprint && <p>请刷新模型配置后，重新确认目标服务。</p>}
-                </> : <p>全文分块与提示词将发送到上面的本机地址。</p>}
+                  <p>点击“发送并运行”将向此服务发送全文分块、提示词与 Skill。</p>
+                  {!selectedProfile.target_fingerprint && <p>请刷新模型配置。</p>}
+                </> : null}
               </div>
             )}
             <Notice error>{error}</Notice>
@@ -1060,10 +1056,10 @@ export default function Documents({ navigate, onJob }: Props) {
             </button>
             <button
               className="button primary"
-              disabled={!profile || !workflow || !!busy || (remote && (!remoteConsent || !selectedProfile?.target_fingerprint))}
+              disabled={!profile || !workflow || !!busy || (remote && !selectedProfile?.target_fingerprint)}
               onClick={() => void begin()}
             >
-              创建并运行
+              {remote ? "发送并运行" : "创建并运行"}
               <ArrowRight size={15} />
             </button>
           </div>
@@ -1085,13 +1081,4 @@ export default function Documents({ navigate, onJob }: Props) {
       )}
     </main>
   );
-}
-function isLoopback(value: string) {
-  try { const host = new URL(value).hostname; return ["localhost", "[::1]", "::1"].includes(host) || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host); }
-  catch { return false; }
-}
-function endpointLabel(value?: string) {
-  if (!value) return "尚未配置";
-  try { return new URL(value).origin; }
-  catch { return value; }
 }

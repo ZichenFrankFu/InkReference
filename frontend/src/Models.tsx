@@ -5,6 +5,7 @@ import {
   ShieldCheck, SlidersHorizontal, Trash2, Wallet, Zap,
 } from "lucide-react";
 import { studio, send, normalizeList, type ModelProfile, type List } from "./studio";
+import { isLoopbackEndpoint, isRemoteModel, modelEndpoint } from "./model-security";
 import { Busy, Empty, Metric, Modal, Notice, PageTitle, SelectField, dateLabel, messageOf } from "./ui";
 import "./model-settings.css";
 
@@ -34,7 +35,7 @@ type Security = { vault_available: boolean; vault_backend?: string; vault_reason
 type TestResult = { ok: boolean; model?: string; message: string; duration_ms?: number; call_id?: string };
 const cleanProfile = (profile: ModelProfile): ModelProfile => ({
   ...blank, ...profile, api_key: "",
-  connection_mode: profile.connection_mode || (profile.base_url.startsWith("https:") ? "remote" : "local"),
+  connection_mode: isRemoteModel(profile) ? "remote" : "local",
   credential_mode: profile.credential_mode || (profile.key_env ? "environment" : "session"),
 });
 const profileValue = (profile: ModelProfile | null) => profile ? JSON.stringify({
@@ -45,19 +46,13 @@ const profileValue = (profile: ModelProfile | null) => profile ? JSON.stringify(
   input_price_per_million: profile.input_price_per_million, output_price_per_million: profile.output_price_per_million,
   currency: profile.currency, max_tokens_parameter: profile.max_tokens_parameter || "max_tokens",
 }) : "";
-const endpoint = (value: string) => {
-  try { const u = new URL(value); return `${u.protocol}//${u.host}${u.pathname.replace(/\/$/, "")}`; }
-  catch { return "请输入有效的服务地址"; }
-};
 const validation = (profile: ModelProfile, modelRequired = true) => {
   if (!profile.name.trim()) return "请填写配置名称。";
   if (modelRequired && !profile.model.trim()) return "请填写模型 ID，或先读取模型列表。";
   try {
     const u = new URL(profile.base_url);
     if (!["http:", "https:"].includes(u.protocol) || u.username || u.password || u.search || u.hash) return "服务地址不能包含密钥、账号、查询参数或片段。";
-    const host = u.hostname.toLowerCase();
-    const loopback = host === "localhost" || host === "[::1]" || /^127(?:\.\d{1,3}){3}$/.test(host);
-    if (profile.connection_mode === "local" && !loopback) return "本地模式仅接受 localhost 或回环 IP 地址。远程服务请切换至商业 API。";
+    if (profile.connection_mode === "local" && !isLoopbackEndpoint(profile.base_url)) return "本地模式仅接受 localhost 或回环 IP 地址。远程服务请切换至商业 API。";
     if (profile.connection_mode === "remote" && u.protocol !== "https:") return "商业 API 必须使用 HTTPS。";
   } catch { return "请填写完整的 HTTP(S) 服务地址。"; }
   if (profile.credential_mode === "environment" && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(profile.key_env || "")) return "请填写有效的密钥环境变量名称。";
@@ -125,7 +120,6 @@ export default function Models() {
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [confirmClear, setConfirmClear] = useState(false);
   const [pending, setPending] = useState<{ run: () => void } | null>(null);
-  const [remoteAction, setRemoteAction] = useState<"test" | "discover" | null>(null);
   const [testResult, setTestResult] = useState<TestResult | null>(null);
   const [discovered, setDiscovered] = useState<string[]>([]);
   const [showKey, setShowKey] = useState(false);
@@ -229,15 +223,14 @@ export default function Models() {
     } catch (e) { setError(messageOf(e)); return false; }
     finally { setBusy(""); }
   };
-  const perform = async (action: "test" | "discover", consent = false) => {
+  const perform = async (action: "test" | "discover") => {
     if (!draft) return;
     const problem = validation(draft, action === "test");
     if (problem) { setError(problem); return; }
-    if (draft.connection_mode === "remote" && !consent) { setRemoteAction(action); return; }
-    setRemoteAction(null); setBusy(action); setError(""); setMessage(""); setTestResult(null);
+    setBusy(action); setError(""); setMessage(""); setTestResult(null);
     try {
       const data = { ...payload(), ...(canUseSaved && !draft.api_key ? { use_saved_key: draft.id } : {}),
-        ...(consent ? { remote_consent: true } : {}) };
+        remote_consent: isRemoteModel(draft) };
       if (action === "test") setTestResult(await send<TestResult>("/models/test-draft", data));
       else {
         const result = await send<{ models: { id: string }[] }>("/models/discover", data);
@@ -297,7 +290,6 @@ export default function Models() {
               </button>
             ))}
             <button className="connection-add" disabled={!!busy} onClick={() => create()}><Plus size={16} />新建连接</button>
-            <div className="connection-local-security"><ShieldCheck size={17} /><span>凭据保留在本机<br />连接仅由主动操作发起</span></div>
           </aside>
           <section className="surface connection-editor">
             {!draft ? (
@@ -327,7 +319,7 @@ export default function Models() {
                     <div className="connection-section">
                       <label className="studio-field" htmlFor={`${fieldPrefix}-name`}><span>配置名称</span><input id={`${fieldPrefix}-name`} required maxLength={200} value={draft.name} placeholder="例如：本地 Qwen" onChange={(e) => update("name", e.target.value)} /></label>
                       <label className="studio-field" htmlFor={`${fieldPrefix}-url`}><span>服务地址 <small>{draft.provider === "ollama" ? "Ollama API" : "OpenAI 兼容 · Chat Completions"}</small></span><input id={`${fieldPrefix}-url`} type="url" required value={draft.base_url} onChange={(e) => update("base_url", e.target.value)} spellCheck={false} autoCapitalize="off" placeholder={draft.connection_mode === "local" ? "http://127.0.0.1:1234/v1" : "https://api.example.com/v1"} /></label>
-                      <div className="connection-destination" data-mode={draft.connection_mode}>{draft.connection_mode === "local" ? <Cpu size={15} /> : <Globe size={15} />}<span>{draft.connection_mode === "local" ? "本机回环地址" : "远程请求目的地"}<strong>{endpoint(draft.base_url)}</strong></span></div>
+                      <div className="connection-destination" data-mode={draft.connection_mode}>{draft.connection_mode === "local" ? <Cpu size={15} /> : <Globe size={15} />}<span>{draft.connection_mode === "local" ? "本机服务" : "API 服务"}<strong>{modelEndpoint(draft.base_url, true)}</strong></span></div>
                       <div className="connection-model-field">
                         <label className="studio-field" htmlFor={`${fieldPrefix}-model`}><span>模型 ID</span><input id={`${fieldPrefix}-model`} required value={draft.model} onChange={(e) => update("model", e.target.value)} placeholder={draft.provider === "ollama" ? "例如 qwen3:8b" : "填写服务提供的模型 ID"} spellCheck={false} autoCapitalize="off" /></label>
                         <button className="button secondary" type="button" onClick={() => void perform("discover")}><RefreshCw size={15} />读取模型列表</button>
@@ -339,7 +331,7 @@ export default function Models() {
                       <div className="credential-choices" role="group" aria-label="凭据保存方式">
                         {([ ["session", "仅本次运行", "关闭服务后清除"], ["vault", "系统密钥库", "在本机安全保存"], ["environment", "环境变量", "读取已有配置"] ] as const).map(([mode, title, detail]) => <button type="button" key={mode} disabled={mode === "vault" && !security?.vault_available} aria-pressed={draft.credential_mode === mode} title={mode === "vault" && !security?.vault_available ? security?.vault_reason || "系统密钥库不可用" : undefined} className={draft.credential_mode === mode ? "active" : ""} onClick={() => { update("credential_mode", mode); update("api_key", ""); setShowKey(false); }}><strong>{title}</strong><small>{detail}</small></button>)}
                       </div>
-                      {!security?.vault_available && <p className="connection-hint"><LockKeyhole size={13} />{security?.vault_reason || "当前系统未提供可用的安全密钥库。"}</p>}
+                      {draft.credential_mode === "vault" && !security?.vault_available && <p className="connection-hint"><LockKeyhole size={13} />系统密钥库不可用，请选择其他凭据方式。</p>}
                       {draft.credential_mode === "environment" ? <label className="studio-field"><span>密钥环境变量名称</span><input value={draft.key_env || ""} onChange={(e) => update("key_env", e.target.value)} placeholder={activePreset?.keyEnv || "例如 OPENAI_API_KEY"} spellCheck={false} autoCapitalize="off" /></label> : <div className="studio-field"><label className="connection-label" htmlFor={`${fieldPrefix}-key`}>API Key <small>{draft.connection_mode === "local" ? "服务要求鉴权时填写" : "填写服务商颁发的密钥"}</small></label><span className="connection-password"><input id={`${fieldPrefix}-key`} aria-label="API Key" type={showKey ? "text" : "password"} value={draft.api_key || ""} onChange={(e) => update("api_key", e.target.value)} autoComplete="new-password" spellCheck={false} autoCapitalize="off" placeholder={canUseSaved ? "已配置；留空继续使用，输入可替换" : "输入 API Key"} /><button type="button" className="icon-button" onClick={() => setShowKey(!showKey)} aria-label={showKey ? "隐藏 API Key" : "显示 API Key"} aria-pressed={showKey}>{showKey ? <EyeOff size={17} /> : <Eye size={17} />}</button></span></div>}
                       {!isNew && (saved?.has_session_key || saved?.has_vault_key || saved?.key_env) && <button type="button" className="connection-clear" disabled={dirty} title={dirty ? "请先保存或取消修改" : undefined} onClick={() => setConfirmClear(true)}><Trash2 size={13} />清除已存凭据</button>}
                     </section>
@@ -354,9 +346,9 @@ export default function Models() {
                   </fieldset>
                   <div className="connection-feedback" aria-live="polite">
                     {testResult && <Notice success={testResult.ok} error={!testResult.ok}><strong>{testResult.message || (testResult.ok ? "连接成功" : "连接失败")}</strong>{testResult.ok && <span>{testResult.model || draft.model}{testResult.duration_ms !== undefined ? ` · ${(testResult.duration_ms / 1000).toFixed(2)} 秒` : ""}</span>}</Notice>}
-                    {busy && busy !== "usage" && <Busy label={{ save: "正在安全保存配置", test: "正在测试当前配置", discover: "正在读取服务模型列表", delete: "正在删除配置", clear: "正在清除已存凭据" }[busy] || "正在处理"} />}
+                    {busy && busy !== "usage" && <Busy label={{ save: "正在保存配置", test: "正在测试当前配置", discover: "正在读取服务模型列表", delete: "正在删除配置", clear: "正在清除已存凭据" }[busy] || "正在处理"} />}
                   </div>
-                  <footer className="connection-footer"><span>{dirty ? "修改尚未保存" : "配置保存在本机"}</span><div>{dirty && <button className="button secondary" type="button" disabled={!!busy} onClick={() => guarded(() => activate(saved ? cleanProfile(saved) : null))}>取消修改</button>}<button className="button secondary" type="button" disabled={!!busy} onClick={() => void perform("test")}><Zap size={15} />测试连接</button><button className="button primary" type="submit" disabled={!!busy || (!dirty && !isNew)}><Save size={15} />保存配置</button></div></footer>
+                  <footer className="connection-footer">{dirty && <span>修改尚未保存</span>}<div>{dirty && <button className="button secondary" type="button" disabled={!!busy} onClick={() => guarded(() => activate(saved ? cleanProfile(saved) : null))}>取消修改</button>}<button className="button secondary" type="button" disabled={!!busy} onClick={() => void perform("test")}><Zap size={15} />测试连接</button><button className="button primary" type="submit" disabled={!!busy || (!dirty && !isNew)}><Save size={15} />保存配置</button></div></footer>
                 </form>
               </>
             )}
@@ -509,7 +501,6 @@ export default function Models() {
       )}
 
       {pending && <Modal title="保留未保存的修改？" onClose={() => setPending(null)} busy={busy === "save"}><div className="modal-body"><p>当前模型配置有修改，选择保存后继续，或放弃这些修改。</p><Notice error>{error}</Notice>{busy === "save" && <Busy label="正在保存配置" />}</div><div className="modal-footer"><button className="button secondary" disabled={!!busy} onClick={() => setPending(null)}>继续编辑</button><button className="button secondary" disabled={!!busy} onClick={() => { const action = pending.run; setPending(null); action(); }}>放弃修改</button><button className="button primary" disabled={!!busy} onClick={async () => { const action = pending.run; if (await save()) { setPending(null); action(); } }}>保存后继续</button></div></Modal>}
-      {remoteAction && draft && <Modal title={remoteAction === "test" ? "测试远程模型" : "读取远程模型列表"} onClose={() => setRemoteAction(null)}><div className="modal-body connection-remote-confirm"><Globe size={26} /><p>{remoteAction === "test" ? "将向以下服务发送固定测试消息，可能产生少量 Token 费用。" : "将向以下服务请求可用模型列表。"}</p><strong>{endpoint(draft.base_url)}</strong><p className="connection-hint">此次操作不包含书稿正文。</p></div><div className="modal-footer"><button className="button secondary" onClick={() => setRemoteAction(null)}>取消</button><button className="button primary" onClick={() => void perform(remoteAction, true)}>确认发送</button></div></Modal>}
       {confirmDelete && <Modal title="删除模型配置" onClose={() => setConfirmDelete(false)} busy={busy === "delete"}><div className="modal-body"><p>删除“{draft?.name}”及其已存凭据，历史调用记录保留。</p><Notice error>{error}</Notice>{busy === "delete" && <Busy label="正在删除配置" />}</div><div className="modal-footer"><button className="button secondary" disabled={!!busy} onClick={() => setConfirmDelete(false)}>取消</button><button className="button destructive" disabled={!!busy} onClick={() => void remove()}>确认删除</button></div></Modal>}
       {confirmClear && <Modal title="清除已存凭据" onClose={() => setConfirmClear(false)} busy={busy === "clear"}><div className="modal-body"><p>清除该连接的会话密钥、系统密钥库凭据和环境变量引用，系统环境变量保持原样。</p><Notice error>{error}</Notice>{busy === "clear" && <Busy label="正在清除已存凭据" />}</div><div className="modal-footer"><button className="button secondary" disabled={!!busy} onClick={() => setConfirmClear(false)}>取消</button><button className="button destructive" disabled={!!busy} onClick={() => void clearCredentials()}>确认清除</button></div></Modal>}
     </main>
