@@ -107,6 +107,7 @@ try {
         $source = Join-Path $ProjectRoot $name
         if (Test-Path -LiteralPath $source -PathType Leaf) { Copy-Item -LiteralPath $source -Destination $appDirectory -Force }
     }
+    Copy-Item -LiteralPath (Join-Path $ProjectRoot 'third_party') -Destination $appDirectory -Recurse -Force
     Show-Phase 'Creating the portable ZIP...'
     $zip = Join-Path $OutputDirectory 'InkReference-windows-x64.zip'
     Compress-Archive -LiteralPath $appDirectory -DestinationPath $zip -CompressionLevel Optimal -Force

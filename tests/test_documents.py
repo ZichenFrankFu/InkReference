@@ -42,7 +42,7 @@ def assert_complete(version):
     "前置文本\n第一章 初见\n" + "正文。" * 12000 + "\n第二章 尾声\n全文尾标。",
     "没有标题。" * 1700 + "尾部不可丢失。",
     "1\n00:00:01,000 --> 00:00:03,000\n字幕原文。\n\n2\n00:00:04,000 --> 00:00:05,000\n尾标。",
-])
+], ids=["long_chapter", "no_headings", "subtitles"])
 def test_upload_original_and_complete_segmentation_survive_reopen(store, source):
     raw = codecs.BOM_UTF8 + source.replace("\n", "\r\n").encode("utf-8")
     document = store.upload("完整.txt", raw, title="测试")

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import copy
 
 import pytest
 
@@ -129,4 +130,31 @@ def test_missing_linked_work_is_reviewable_and_creates_no_fallback_work(services
     with pytest.raises(DataError) as caught:
         materializer(run)
     assert caught.value.status_code == 404
+    assert library_snapshot(store) == before
+
+
+def test_lookup_returns_committed_results_and_changed_replay_fails_closed(services):
+    store, documents, materializer = services
+    run = analysis(documents)
+    assert materializer.lookup(run["id"]) is None
+    mapping = materializer(run)
+    committed = materializer.lookup(run["id"])
+    assert committed["materialization"] == mapping
+    assert committed["results"] == run["results"]
+    assert committed["document_id"] == run["document_id"]
+    assert committed["version_id"] == run["version_id"]
+    before = library_snapshot(store)
+    changed = copy.deepcopy(run)
+    changed["results"]["summary"] = "未实际写入主库的新摘要"
+    with pytest.raises(DataError) as rejected:
+        materializer(changed)
+    assert rejected.value.status_code == 409
+    assert "另一审核版本" in str(rejected.value)
+    assert library_snapshot(store) == before
+    # Identity is part of the commit; a copied run ID cannot target a new version.
+    changed = copy.deepcopy(run)
+    changed["version_id"] = "another-version"
+    with pytest.raises(DataError) as rejected:
+        materializer(changed)
+    assert rejected.value.status_code == 409
     assert library_snapshot(store) == before

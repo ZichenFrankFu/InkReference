@@ -135,12 +135,29 @@ class WorkflowRunner:
 
     def _recover_interrupted(self) -> None:
         with self._registry_lock, self._db(write=True) as db:
-            for row in db.execute("SELECT id,status FROM run_jobs WHERE status IN ('running','cancelling','approving')").fetchall():
+            for row in db.execute("SELECT * FROM run_jobs WHERE status IN ('running','cancelling','approving')").fetchall():
                 approval = self._approval_locks.get(self._key(row["id"]))
                 if self._key(row["id"]) in self._owners or (approval is not None and approval.locked()):
                     continue
+                if row["status"] == "approving":
+                    lookup = getattr(self.materializer, "lookup", None)
+                    if callable(lookup):
+                        try:
+                            committed = lookup(row["id"])
+                            if committed is not None:
+                                if committed["document_id"] != row["document_id"] or committed["version_id"] != row["version_id"]:
+                                    raise DataError(409, "主库提交与任务固定全文版本不一致")
+                                self._update_job(db, row["id"], status="approved", stage="approved", cancel_requested=0, error=None,
+                                                 results_json=_dump(committed["results"]), materialization_json=_dump(committed["materialization"]), revision=row["revision"] + 1)
+                                self._event(db, row["id"], "approval_recovered", "已核对主库提交并恢复已入库版本，没有重复写入素材")
+                                continue
+                        except Exception as exc:
+                            self._update_job(db, row["id"], status="needs_review", stage="approval_recovery_failed", cancel_requested=0, error=f"无法核对上次入库记录：{exc}")
+                            self._event(db, row["id"], "approval_recovery_failed", f"无法核对上次入库记录：{exc}")
+                            continue
                 status = "needs_review" if row["status"] == "approving" else "paused"
-                self._update_job(db, row["id"], status=status, stage="interrupted", cancel_requested=0, error="上次运行已中断，请手动继续；中断请求的提供商用量可能尚未返回")
+                error = "上次入库确认已中断，主库尚无提交记录，请核对后重新确认" if row["status"] == "approving" else "上次运行已中断，请手动继续；中断请求的提供商用量可能尚未返回"
+                self._update_job(db, row["id"], status=status, stage="interrupted", cancel_requested=0, error=error)
                 db.execute("UPDATE run_chunks SET status='pending' WHERE run_id=? AND status='running'", (row["id"],))
                 db.execute("UPDATE run_attempts SET status='interrupted',error='进程关闭前未收到最终响应',updated_at=? WHERE run_id=? AND status='requesting'", (_now(), row["id"]))
                 self._event(db, row["id"], "interrupted", "已恢复本地进度，等待用户操作，不会自动调用模型")

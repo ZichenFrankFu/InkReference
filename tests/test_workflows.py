@@ -12,7 +12,9 @@ from pathlib import Path
 import pytest
 
 from inkreference.database import DataError
+from inkreference.database import DataStore
 from inkreference.documents import DocumentStore
+from inkreference.materialization import Materializer
 from inkreference.skills import SkillStore
 from inkreference.workflow_definitions import DEFAULT_WORKFLOW, WorkflowStore
 from inkreference.workflows import WorkflowRunner
@@ -381,3 +383,59 @@ def test_shutdown_exposes_inflight_thread_and_prevents_later_model_calls(tmp_pat
     assert final["status"] == "paused"
     assert len(models.calls) == 1  # no request for the next chunk during shutdown
     assert runner.active_threads() == []
+
+
+def test_recover_approval_after_main_commit_restores_exact_committed_review(tmp_path):
+    runner, run, models, documents, workflows = setup_runner(tmp_path, text="林甲把一封旧信交给林乙。")
+    store = DataStore(tmp_path / "inkreference.sqlite3")
+    materializer = Materializer(store, documents)
+    ready = runner.execute(run["id"])
+    reviewed = copy.deepcopy(ready["results"])
+    reviewed["summary"] = "实际提交的人工审核摘要"
+    saved = runner.edit_result(run["id"], reviewed, ready["revision"])
+
+    class ProcessCrash(BaseException):
+        pass
+
+    def commit_then_crash(run):
+        materializer(run)
+        raise ProcessCrash("主库已commit，workbench尚未确认")
+
+    runner.materializer = commit_then_crash
+    with pytest.raises(ProcessCrash):
+        runner.approve(run["id"], saved["revision"])
+    assert runner.get_run(run["id"])["status"] == "approving"
+    committed = materializer.lookup(run["id"])
+    before = store.stats()
+    # A restarted application reads the durable main-library commit instead of
+    # exposing an editable needs_review state for already-committed facts.
+    restarted = WorkflowRunner(tmp_path, documents=documents, models=models, workflows=workflows, materializer=materializer)
+    recovered = restarted.get_run(run["id"])
+    assert recovered["status"] == "approved"
+    assert recovered["results"] == committed["results"] == reviewed
+    assert recovered["materialization"] == committed["materialization"]
+    assert recovered["revision"] == saved["revision"] + 1
+    assert any(event["stage"] == "approval_recovered" for event in recovered["events"])
+    with pytest.raises(DataError):
+        restarted.edit_result(run["id"], {**reviewed, "summary": "后来未提交的摘要"}, recovered["revision"])
+    assert restarted.approve(run["id"], saved["revision"])["results"] == reviewed
+    assert store.stats() == before
+    assert len(models.calls) == 1
+
+
+def test_recover_approval_without_main_commit_remains_reviewable(tmp_path):
+    runner, run, models, documents, workflows = setup_runner(tmp_path, text="尚未完成提交的原文。")
+    store = DataStore(tmp_path / "inkreference.sqlite3")
+    materializer = Materializer(store, documents)
+    ready = runner.execute(run["id"])
+    with runner._db(write=True) as db:
+        db.execute("UPDATE run_jobs SET status='approving',stage='approving' WHERE id=?", (run["id"],))
+    restarted = WorkflowRunner(tmp_path, documents=documents, models=models, workflows=workflows, materializer=materializer)
+    recovered = restarted.get_run(run["id"])
+    assert recovered["status"] == "needs_review"
+    assert "尚无提交" in recovered["error"]
+    assert materializer.lookup(run["id"]) is None
+    assert store.stats()["works"] == 0
+    approved = restarted.approve(run["id"], recovered["revision"])
+    assert approved["status"] == "approved"
+    assert store.stats()["works"] == 1 and len(models.calls) == 1

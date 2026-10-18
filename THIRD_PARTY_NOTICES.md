@@ -28,6 +28,8 @@ Adaptations retain only declarative prompts/schema, remove global model routing 
 
 No whole application platform is vendored. Installed packages retain their own distributions and licenses. Versions are recorded in `requirements-lock.txt`, `requirements-mineru.txt` and `frontend/package-lock.json`.
 
+Frontend runtime license notices are retained in `third_party/frontend-LICENSES.txt`. Windows packages include the `third_party` directory alongside this notice; Python distribution metadata is collected by the package build.
+
 | Project | Direct use | License/source |
 |---|---|---|
 | LangGraph / SQLite checkpoint | Real StateGraph, interrupts and persistent checkpoints | MIT, <https://github.com/langchain-ai/langgraph> |
