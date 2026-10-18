@@ -193,7 +193,28 @@ class IngestionStore:
         if self._closed or self._cancellations[identifier].is_set():
             raise _Cancelled()
 
+    def _finish_cancellation(self, identifier: str, meta: dict[str, Any] | None) -> None:
+        if self._closed:
+            return  # shutdown owns final state; late callbacks cannot write.
+        keys = [f"ing:{identifier}"]
+        conversion_id = meta.get("conversion_id") if meta else None
+        if conversion_id:
+            keys.append(f"conv:{conversion_id}")
+        committed = next((result for key in keys if (result := self.documents.ingestion_result(key)) is not None), None)
+        if committed is not None:
+            self._update(identifier, status="completed", stage="completed", progress=1, completed=1, total=1,
+                         document_id=committed["document_id"], version_id=committed["version_id"], error=None)
+            return
+        # A native retry can start after the initial cancellation read. Reap
+        # that work as well, so a cancelled upload owns no live conversion.
+        if conversion_id:
+            conversion = self.conversions.get(conversion_id)
+            if conversion["status"] in {"queued", "running"}:
+                self.conversions.cancel(conversion_id)
+        self._update(identifier, status="cancelled", stage="cancelled", progress=None, error=None)
+
     def _run(self, identifier: str) -> None:
+        meta = None
         try:
             meta = self.get(identifier)
             options, key = meta["options"], f"ing:{identifier}"
@@ -218,7 +239,13 @@ class IngestionStore:
                     conversion = self.conversions.get(conversion_id)
                     if conversion["status"] == "completed":
                         break
-                    if conversion["status"] in {"failed", "cancelled", "interrupted"}:
+                    if conversion["status"] == "cancelled":
+                        raise _Cancelled()
+                    if conversion["status"] in {"failed", "interrupted"}:
+                        # cancel() sets our event before cancelling conversion.
+                        # That can occur after the loop's first check and before
+                        # this read; preserve the user's cancellation outcome.
+                        self._check_cancelled(identifier)
                         raise DataError(422, conversion["error"] or "格式转换未完成，请重试")
                     self._cancellations[identifier].wait(0.1)
                 self._check_cancelled(identifier)
@@ -244,9 +271,11 @@ class IngestionStore:
             self._update(identifier, status="completed", stage="completed", progress=1, completed=1, total=1,
                          document_id=committed["document_id"], version_id=committed["version_id"], error=None)
         except _Cancelled:
-            self._update(identifier, status="interrupted" if self._closed else "cancelled",
-                         stage="interrupted" if self._closed else "cancelled", progress=None, error=None)
+            self._finish_cancellation(identifier, meta)
         except Exception as error:
+            if self._closed or self._cancellations[identifier].is_set():
+                self._finish_cancellation(identifier, meta)
+                return
             detail = error.detail if isinstance(error, DataError) else f"{type(error).__name__}：{error}"
             if isinstance(detail, dict):
                 detail = detail.get("message", _json(detail))

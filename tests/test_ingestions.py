@@ -359,3 +359,81 @@ def test_late_closed_worker_cannot_overwrite_retried_attempt(tmp_path, monkeypat
     assert len(documents.list_documents()) == 1
     assert current.active_threads() == []
     assert conversions.active_threads() == []
+
+
+def test_conversion_cancel_between_loop_check_and_read_is_cancelled(tmp_path, monkeypatch):
+    documents, conversions, ingestion = stores(tmp_path)
+    release = threading.Event()
+    job = ingestion.create("等待.pdf", b"%PDF-synthetic")
+    original_get = conversions.get
+    reads = [0]
+    injected = [False]
+
+    def delayed_conversion(*args):
+        assert release.wait(3)
+        return "# 第一章 初遇\n正文。"
+
+    def read_then_cancel(identifier):
+        if threading.current_thread().name.startswith("ingestion-"):
+            reads[0] += 1
+            # Reads one/two are initial lookup and start()'s return value. Read
+            # three follows the ingestion loop's first cancellation check.
+            if reads[0] == 3 and not injected[0]:
+                injected[0] = True
+                ingestion.cancel(job["id"])
+        return original_get(identifier)
+
+    monkeypatch.setattr(conversions, "_pdf_markdown", delayed_conversion)
+    monkeypatch.setattr(conversions, "get", read_then_cancel)
+    ingestion.start(job["id"])
+    try:
+        done = finish(ingestion, job)
+        assert injected[0]
+        assert done["status"] == "cancelled", done
+        assert documents.list_documents() == []
+    finally:
+        release.set()
+        for worker in conversions.active_threads():
+            worker.join(timeout=2)
+
+
+def test_conversion_cancel_after_queued_read_before_start_is_cancelled(tmp_path, monkeypatch):
+    documents, conversions, ingestion = stores(tmp_path)
+    job = ingestion.create("等待.pdf", b"%PDF-synthetic")
+    start = conversions.start
+    injected = [False]
+
+    def start_after_cancel(identifier):
+        injected[0] = True
+        ingestion.cancel(job["id"])
+        return start(identifier)  # The native job has become cancelled: 409.
+
+    monkeypatch.setattr(conversions, "start", start_after_cancel)
+    ingestion.start(job["id"])
+    done = finish(ingestion, job)
+    assert injected[0]
+    assert done["status"] == "cancelled", done
+    assert documents.list_documents() == []
+    assert conversions.active_threads() == []
+
+
+@pytest.mark.parametrize("kind", ["txt", "pdf"])
+def test_committed_version_wins_cancel_and_link_exception(tmp_path, monkeypatch, kind):
+    documents, conversions, ingestion = stores(tmp_path)
+    if kind == "pdf":
+        monkeypatch.setattr(conversions, "_pdf_markdown", lambda *args: "# 第一章 初遇\n正文。")
+    job = ingestion.create("原稿." + kind, b"%PDF-synthetic" if kind == "pdf" else "第一章 初遇\n正文。".encode())
+    upload = documents.upload
+
+    def commit_then_cancel_and_fail(*args, **kwargs):
+        upload(*args, **kwargs)
+        ingestion.cancel(job["id"])
+        raise RuntimeError("synthetic link failure after durable document commit")
+
+    monkeypatch.setattr(documents, "upload", commit_then_cancel_and_fail)
+    ingestion.start(job["id"])
+    done = finish(ingestion, job)
+    assert done["status"] == "completed", done
+    assert done["document_id"] is not None and done["version_id"] is not None
+    assert len(documents.list_documents()) == 1
+    assert documents.get_version(done["document_id"], done["version_id"])["text"].endswith("正文。")
