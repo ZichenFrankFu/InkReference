@@ -23,6 +23,7 @@ import {
   type EvidenceItem,
 } from "./studio";
 import { isRemoteModel, modelEndpoint } from "./model-security";
+import ReferenceAnalysis from "./ReferenceAnalysis";
 import {
   Busy,
   Empty,
@@ -61,6 +62,8 @@ const stageNames: Record<string, string> = {
   complete: "已完成",
 };
 export default function Jobs({ initialId, navigate }: Props) {
+  const [mode, setMode] = useState<"reference" | "tasks">(initialId ? "tasks" : "reference");
+  const [referenceDirty, setReferenceDirty] = useState(false);
   const [items, setItems] = useState<Run[]>([]);
   const [docs, setDocs] = useState<DocumentMeta[]>([]);
   const [selected, setSelected] = useState<Run | null>(null);
@@ -140,6 +143,7 @@ export default function Jobs({ initialId, navigate }: Props) {
   }, []);
   useEffect(() => {
     if (initialId) {
+      setMode("tasks");
       void choose(initialId);
       void load();
     }
@@ -270,21 +274,16 @@ export default function Jobs({ initialId, navigate }: Props) {
   const modelSnapshot = ((selected?.snapshots || {}) as { model?: { connection_mode?: "local" | "remote"; base_url?: string; model?: string } }).model;
   const destination = modelEndpoint(modelSnapshot?.base_url);
   const remote = isRemoteModel(modelSnapshot);
+  const modeControl = <div className="reference-mode-switch" role="tablist" aria-label="分析工作台"><button role="tab" aria-selected={mode === "reference"} className={mode === "reference" ? "active" : ""} onClick={() => setMode("reference")}>作品分析</button><button role="tab" aria-selected={mode === "tasks"} className={mode === "tasks" ? "active" : ""} disabled={referenceDirty} title={referenceDirty ? "请先保存或取消当前编辑" : undefined} onClick={() => setMode("tasks")}>提取任务与素材审核</button></div>;
+  if (mode === "reference") return <main className="studio-main"><PageTitle kicker="" title="参考作品分析" action={modeControl} /><ReferenceAnalysis docs={docs} runs={items} loading={loading} navigate={navigate} onRun={run => { setMode("tasks"); void choose(run.id); }} onRefresh={load} onDirtyChange={setReferenceDirty} /></main>;
   return (
     <main className="studio-main">
       <PageTitle
         kicker=""
         title="分析与审核"
-        description="每次提取都有来源，每份素材经过确认。"
+        description=""
         action={
-          <button
-            className="button secondary"
-            onClick={() => navigate("documents")}
-          >
-            <FileText size={16} />
-            从全文创建任务
-            <ArrowRight size={15} />
-          </button>
+          modeControl
         }
       />
       <Notice error={!!error} success={!error && !!message}>

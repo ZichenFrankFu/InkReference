@@ -28,6 +28,7 @@ from urllib.parse import unquote, urlsplit
 from xml.etree import ElementTree as ET
 
 from .database import DataError
+from .chapter_preprocessing import AUTHOR_KEYWORDS, annotate_chapters, chapter_proposals, validate_settings
 from .text_processing import analyze_text, chunk_text, diagnose_text
 
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024
@@ -36,8 +37,13 @@ MAX_MEMBER_BYTES = 20 * 1024 * 1024
 MAX_ARCHIVE_MEMBERS = 2000
 SUPPORTED_FORMATS = {".txt", ".md", ".srt", ".docx", ".epub"}
 ENCODING_CHOICES = ["utf-8", "gb18030", "utf-16-le", "utf-16-be", "big5"]
+# Use the stored exact codepoint count, rather than SQLite length(text), which
+# stops at a literal NUL. This does not fetch original BLOBs or full version text.
+_CURRENT_CHARACTERS_SQL = ("COALESCE((SELECT CAST(json_extract(payload_json,'$.coverage.characters') AS INTEGER) "
+                           "FROM doc_versions WHERE id=doc_documents.latest_version_id),length(source_text))")
 _META_COLUMNS = ("id,filename,title,work_id,format,encoding,original_sha256,latest_version_id,created_at,"
-                 "length(original) AS original_bytes,length(source_text) AS source_characters")
+                 "length(original) AS original_bytes,length(source_text) AS source_characters,"
+                 + _CURRENT_CHARACTERS_SQL + " AS current_characters")
 
 
 def _sha(raw: bytes) -> str:
@@ -290,7 +296,7 @@ def _epub_text(raw: bytes) -> str:
 def _options(options: Any) -> dict[str, Any]:
     if not isinstance(options, dict):
         raise DataError(422, "清洗选项必须为对象")
-    unknown = set(options) - {"remove_random_ids", "chunk_chars", "fallback_chars"}
+    unknown = set(options) - {"remove_random_ids", "chunk_chars", "fallback_chars", "heading_formats", "custom_formats", "author_keywords", "garble_rules"}
     if unknown:
         raise DataError(422, f"未知清洗选项：{'、'.join(sorted(unknown))}")
     result = {"remove_random_ids": False, "chunk_chars": 3000, "fallback_chars": 3000, **options}
@@ -299,12 +305,20 @@ def _options(options: Any) -> dict[str, Any]:
     for key in ("chunk_chars", "fallback_chars"):
         if isinstance(result[key], bool) or not isinstance(result[key], int) or not 1 <= result[key] <= 100000:
             raise DataError(422, f"{key} 必须为 1 至 100000 的整数")
-    return result
+    return validate_settings(result)
 
 
-def _prepare(source: str, previous: str, options: dict[str, Any]) -> dict[str, Any]:
-    result = analyze_text(source, remove_random_ids=options["remove_random_ids"],
-                          fallback_chars=options["fallback_chars"])
+def _prepare(source: str, previous: str, options: dict[str, Any], *, normalize: bool = True) -> dict[str, Any]:
+    if normalize:
+        result = analyze_text(source, remove_random_ids=options["remove_random_ids"],
+                              fallback_chars=options["fallback_chars"],
+                              heading_formats=options.get("heading_formats"), custom_formats=options.get("custom_formats"))
+    else:
+        from .text_processing import split_chapters
+        result = {"cleaned_text": source, "cleaned_sha256": _sha(source.encode("utf-8")),
+                  "diagnostics": diagnose_text(source), "transformations": [],
+                  "chapter_analysis": split_chapters(source, fallback_chars=options["fallback_chars"],
+                       heading_formats=options.get("heading_formats"), custom_formats=options.get("custom_formats"))}
     text = result["cleaned_text"]
     chapters = result["chapter_analysis"]["chapters"]
     chunks = []
@@ -315,6 +329,7 @@ def _prepare(source: str, previous: str, options: dict[str, Any]) -> dict[str, A
                            "end": chapter["start"] + chunk["end"],
                            "id": f"{chapter['id']}-chunk-{index + 1}", "chapter_id": chapter["id"],
                            "chapter_index": chapter_index})
+    gaps = annotate_chapters(chapters, options)
     reconstructed = "".join(chunk["text"] for chunk in chunks)
     coverage = {**result["chapter_analysis"]["coverage"],
                 "chunks_complete": reconstructed == text,
@@ -331,6 +346,8 @@ def _prepare(source: str, previous: str, options: dict[str, Any]) -> dict[str, A
             "diff": diff[:200000], "diff_truncated": len(diff) > 200000,
             "coverage": coverage, "pattern": result["chapter_analysis"]["pattern"],
             "fallback_used": result["chapter_analysis"]["fallback_used"],
+            "heading_formats": result["chapter_analysis"]["heading_formats"],
+            "candidates": result["chapter_analysis"]["candidates"], "gaps": gaps,
             "options": options}
 
 
@@ -356,6 +373,17 @@ class DocumentStore:
                     payload_json TEXT NOT NULL, created_at TEXT NOT NULL,
                     UNIQUE(document_id, version_number)
                 );
+                CREATE TABLE IF NOT EXISTS doc_sources (
+                    id TEXT PRIMARY KEY, document_id TEXT NOT NULL REFERENCES doc_documents(id),
+                    filename TEXT NOT NULL, format TEXT NOT NULL, encoding TEXT NOT NULL,
+                    original BLOB NOT NULL, original_sha256 TEXT NOT NULL,
+                    source_text TEXT NOT NULL, version_id TEXT NOT NULL REFERENCES doc_versions(id),
+                    created_at TEXT NOT NULL
+                );
+                CREATE TRIGGER IF NOT EXISTS doc_source_immutable
+                BEFORE UPDATE ON doc_sources
+                BEGIN SELECT RAISE(ABORT, 'document source is immutable'); END;
+                CREATE INDEX IF NOT EXISTS doc_sources_document ON doc_sources(document_id,created_at);
                 CREATE INDEX IF NOT EXISTS doc_versions_document ON doc_versions(document_id,version_number);
                 CREATE TABLE IF NOT EXISTS doc_ingestions (
                     key TEXT PRIMARY KEY, document_id TEXT NOT NULL REFERENCES doc_documents(id)
@@ -384,7 +412,7 @@ class DocumentStore:
 
     @staticmethod
     def _document(connection: sqlite3.Connection, identifier: str) -> sqlite3.Row:
-        row = connection.execute("SELECT * FROM doc_documents WHERE id=?", (identifier,)).fetchone()
+        row = connection.execute(f"SELECT *, {_CURRENT_CHARACTERS_SQL} AS current_characters FROM doc_documents WHERE id=?", (identifier,)).fetchone()
         if row is None:
             raise DataError(404, "全文文档不存在")
         return row
@@ -394,7 +422,8 @@ class DocumentStore:
         return {key: row[key] for key in ("id", "filename", "title", "work_id", "format", "encoding",
                                           "original_sha256", "latest_version_id", "created_at")} | {
             "original_bytes": row["original_bytes"] if "original_bytes" in row.keys() else len(row["original"]),
-            "source_characters": row["source_characters"] if "source_characters" in row.keys() else len(row["source_text"])}
+            "source_characters": row["source_characters"] if "source_characters" in row.keys() else len(row["source_text"]),
+            "current_characters": row["current_characters"]}
 
     def list_documents(self) -> list[dict[str, Any]]:
         with self._connection() as connection:
@@ -444,6 +473,21 @@ class DocumentStore:
             connection.execute("UPDATE doc_documents SET latest_version_id=? WHERE id=?", (version["id"], identifier))
             if idempotency_key is not None:
                 connection.execute("INSERT INTO doc_ingestions VALUES (?,?)", (idempotency_key, identifier))
+            return self._meta(self._document(connection, identifier))
+
+    def create_collection(self, title: str) -> dict[str, Any]:
+        """Create an empty reference collection without inventing an uploaded file."""
+        if not isinstance(title, str) or not title.strip() or len(title) > 200 or re.search(r"[\x00-\x1f]", title):
+            raise DataError(422, "集合名称需为 1 至 200 字")
+        identifier, now = uuid.uuid4().hex, _now()
+        title = title.strip()
+        prepared = _prepare("", "", _options({}), normalize=False)
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute("INSERT INTO doc_documents VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                               (identifier, title, title, None, "collection", "utf-8", b"", _sha(b""), "", None, now))
+            version = self._insert_version(connection, identifier, None, 1, "", prepared)
+            connection.execute("UPDATE doc_documents SET latest_version_id=? WHERE id=?", (version["id"], identifier))
             return self._meta(self._document(connection, identifier))
 
     @staticmethod
@@ -506,9 +550,282 @@ class DocumentStore:
             if document["latest_version_id"] != base_version_id:
                 raise DataError(409, "全文已有新版本，请刷新后再保存")
             version = self._insert_version(connection, document_id, base_version_id,
-                                           base["version_number"] + 1, document["source_text"], prepared)
+                                           base["version_number"] + 1, base["source_text"], prepared)
             connection.execute("UPDATE doc_documents SET latest_version_id=? WHERE id=?", (version["id"], document_id))
             return version
+
+    def create_literal_version(self, document_id: str, base_version_id: str, text: str) -> dict[str, Any]:
+        """Pin assembled reference entries without applying document cleaning.
+
+        Source/append provenance remains the existing immutable upload chain;
+        the assembled text is explicitly recorded as a reference-source version.
+        """
+        self._valid_text(text)
+        base = self.get_version(document_id, base_version_id)
+        prepared = _prepare(text, base["text"], self._version_options(base), normalize=False)
+        return self._commit_prepared(document_id, base, prepared,
+                                     change={"stage": "reference_source", "count": 1})
+
+    def _commit_prepared(self, document_id: str, base: dict[str, Any], prepared: dict[str, Any],
+                         *, change: dict[str, Any] | None = None, source: str | None = None) -> dict[str, Any]:
+        if change:
+            prepared["changes"].insert(0, change)
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            document = self._document(connection, document_id)
+            if document["latest_version_id"] != base["id"]:
+                raise DataError(409, "全文已有新版本，请刷新后再保存")
+            version = self._insert_version(connection, document_id, base["id"], base["version_number"] + 1,
+                                           base["source_text"] if source is None else source, prepared)
+            connection.execute("UPDATE doc_documents SET latest_version_id=? WHERE id=?", (version["id"], document_id))
+            return version
+
+    @staticmethod
+    def _chapter(version: dict[str, Any], chapter_id: str) -> dict[str, Any]:
+        for chapter in version["chapters"]:
+            if chapter["id"] == chapter_id:
+                return chapter
+        raise DataError(404, "章节不存在")
+
+    @staticmethod
+    def _version_options(base: dict[str, Any], **changes: Any) -> dict[str, Any]:
+        return _options({**base.get("options", {}), **changes})
+
+    def chapter_index(self, document_id: str, version_id: str | None = None) -> dict[str, Any]:
+        version = self.get_version(document_id, version_id)
+        options = self._version_options(version)
+        chapters = [dict(chapter) for chapter in version["chapters"]]
+        gaps = annotate_chapters(chapters, options)
+        return {"document_id": document_id, "version_id": version["id"], "pattern": version.get("pattern"),
+                "heading_formats": version.get("heading_formats", []), "candidates": version.get("candidates", []),
+                "gaps": gaps, "options": options, "author_keyword_defaults": AUTHOR_KEYWORDS,
+                "chapters": [{k: v for k, v in chapter.items() if k not in {"text", "content"}} for chapter in chapters]}
+
+    def get_chapter(self, document_id: str, version_id: str, chapter_id: str,
+                    start: int = 0, limit: int = 20000) -> dict[str, Any]:
+        if isinstance(start, bool) or not isinstance(start, int) or start < 0 or isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100000:
+            raise DataError(422, "章节分页范围无效")
+        version = self.get_version(document_id, version_id)
+        chapter = dict(self._chapter(version, chapter_id))
+        text = chapter["text"]
+        body_offset = chapter["body_start"] - chapter["start"]
+        metadata = {k: v for k, v in chapter.items() if k not in {"text", "content"}}
+        return {**metadata, "chapter": metadata, "document_id": document_id, "version_id": version["id"],
+                "text": text[start:start + limit], "start": start, "end": min(start + limit, len(text)),
+                "total": len(text), "body_offset": body_offset,
+                "body_text": text[body_offset:] if len(text) - body_offset <= 200000 else None,
+                "proposals": chapter_proposals(chapter, self._version_options(version)),
+                "diagnostics": diagnose_text(text), "offset_unit": "unicode_codepoints"}
+
+    def edit_chapter(self, document_id: str, base_version_id: str, chapter_id: str, body_text: str) -> dict[str, Any]:
+        self._valid_text(body_text)
+        base = self.get_version(document_id, base_version_id)
+        chapter = self._chapter(base, chapter_id)
+        # Only the addressed chapter body changes. All headings, prefix,
+        # trailing chapters and whitespace outside this span remain exact.
+        if chapter["raw_marker"] and body_text and not body_text.startswith("\n"):
+            body_text = "\n" + body_text
+        if chapter["end"] < len(base["text"]) and not body_text.endswith("\n"):
+            body_text += "\n"
+        updated = base["text"][:chapter["body_start"]] + body_text + base["text"][chapter["end"]:]
+        prepared = _prepare(updated, base["text"], self._version_options(base), normalize=False)
+        return self._commit_prepared(document_id, base, prepared, change={"stage": "chapter_edit", "chapter_id": chapter_id, "count": 1})
+
+    @staticmethod
+    def _valid_text(text: Any) -> None:
+        if not isinstance(text, str):
+            raise DataError(422, "章节正文必须为字符串")
+        try:
+            text.encode("utf-8", errors="strict")
+        except UnicodeError:
+            raise DataError(422, "文本包含无效 Unicode 字符") from None
+
+    def resegment(self, document_id: str, base_version_id: str,
+                  heading_formats: list[str], custom_formats: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+        base = self.get_version(document_id, base_version_id)
+        options = self._version_options(base, heading_formats=heading_formats,
+                                        custom_formats=custom_formats if custom_formats is not None else base["options"].get("custom_formats", []))
+        from .text_processing import heading_patterns
+        available = {name for name, _ in heading_patterns(options["custom_formats"])}
+        if set(heading_formats) - available:
+            raise DataError(422, "选中的章节格式不存在")
+        prepared = _prepare(base["text"], base["text"], options, normalize=False)
+        return self._commit_prepared(document_id, base, prepared, change={"stage": "chapter_resegment", "count": len(prepared["chapters"])})
+
+    def update_preprocess_settings(self, document_id: str, base_version_id: str,
+                                   author_keywords: list[str] | None = None,
+                                   garble_rules: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+        base = self.get_version(document_id, base_version_id)
+        changes = {}
+        if author_keywords is not None:
+            changes["author_keywords"] = author_keywords
+        if garble_rules is not None:
+            changes["garble_rules"] = garble_rules
+        prepared = _prepare(base["text"], base["text"], self._version_options(base, **changes), normalize=False)
+        return self._commit_prepared(document_id, base, prepared, change={"stage": "preprocess_settings", "count": 1})
+
+    def apply_chapter_cleaning(self, document_id: str, base_version_id: str,
+                               selections: list[dict[str, Any]]) -> dict[str, Any]:
+        if not isinstance(selections, list) or not selections:
+            raise DataError(422, "请选择要清理的标注")
+        base = self.get_version(document_id, base_version_id)
+        options = self._version_options(base)
+        ranges = []
+        seen_chapters = set()
+        removed = []
+        for selection in selections:
+            if not isinstance(selection, dict) or not isinstance(selection.get("chapter_id"), str):
+                raise DataError(422, "清理选择无效")
+            chapter_id = selection["chapter_id"]
+            if chapter_id in seen_chapters:
+                raise DataError(422, "清理章节不能重复")
+            seen_chapters.add(chapter_id)
+            chapter = self._chapter(base, chapter_id)
+            ids = selection.get("proposal_ids")
+            if not isinstance(ids, list) or any(not isinstance(identifier, str) for identifier in ids) or len(ids) != len(set(ids)):
+                raise DataError(422, "清理标注选择无效")
+            proposals = {proposal["id"]: proposal for proposal in chapter_proposals(chapter, options) if proposal["removable"]}
+            if set(ids) - set(proposals):
+                raise DataError(409, "清理标注已变化，请刷新后重试")
+            for identifier in ids:
+                proposal = proposals[identifier]
+                ranges.append((chapter["start"] + proposal["start"], chapter["start"] + proposal["end"]))
+                removed.append({"chapter_id": chapter_id, "proposal_id": identifier, "kind": proposal["kind"],
+                                "characters": proposal["end"] - proposal["start"]})
+        if not ranges:
+            raise DataError(422, "尚未选择要清理的内容")
+        updated = base["text"]
+        for start, end in sorted(ranges, reverse=True):
+            updated = updated[:start] + updated[end:]
+        prepared = _prepare(updated, base["text"], options, normalize=False)
+        return self._commit_prepared(document_id, base, prepared,
+                                     change={"stage": "reviewed_chapter_cleaning", "count": len(removed), "removed": removed})
+
+    def rename_chapter(self, document_id: str, base_version_id: str, chapter_id: str, title: str) -> dict[str, Any]:
+        self._valid_text(title)
+        if not title.strip() or len(title) > 100 or "\n" in title or "\r" in title:
+            raise DataError(422, "章节标题需为 1 至 100 字的单行文本")
+        base = self.get_version(document_id, base_version_id)
+        chapter = self._chapter(base, chapter_id)
+        marker = chapter["raw_marker"]
+        if not marker:
+            raise DataError(422, "该段落没有章节标题，请使用新增章节")
+        # Preserve the numeral/punctuation prefix and replace title only.
+        old_title = chapter["title"]
+        if old_title and marker.rstrip().endswith(old_title):
+            new_marker = marker[:marker.rfind(old_title)] + title.strip()
+        else:
+            new_marker = marker.rstrip() + " " + title.strip()
+        updated = base["text"][:chapter["start"]] + new_marker + base["text"][chapter["body_start"]:]
+        prepared = _prepare(updated, base["text"], self._version_options(base), normalize=False)
+        return self._commit_prepared(document_id, base, prepared, change={"stage": "chapter_rename", "chapter_id": chapter_id, "count": 1})
+
+    def insert_chapter(self, document_id: str, base_version_id: str, after_chapter_id: str | None,
+                       heading: str, body_text: str) -> dict[str, Any]:
+        self._valid_text(heading)
+        self._valid_text(body_text)
+        if not heading.strip() or len(heading) > 160 or "\n" in heading or "\r" in heading:
+            raise DataError(422, "新章节标题需为单行文本")
+        base = self.get_version(document_id, base_version_id)
+        offset = self._chapter(base, after_chapter_id)["end"] if after_chapter_id is not None else 0
+        prefix, suffix = base["text"][:offset], base["text"][offset:]
+        inserted = ("\n" if prefix and not prefix.endswith("\n") else "") + heading.strip() + "\n" + body_text
+        if suffix and not inserted.endswith("\n"):
+            inserted += "\n"
+        updated = prefix + inserted + suffix
+        prepared = _prepare(updated, base["text"], self._version_options(base), normalize=False)
+        heading_start = offset + (1 if prefix and not prefix.endswith("\n") else 0)
+        recognized = any(chapter["start"] == heading_start and chapter["raw_marker"].strip() == heading.strip()
+                         for chapter in prepared["chapters"])
+        if not recognized:
+            raise DataError(422, "新标题未匹配当前章节格式，请使用例如「第一章 标题」，或先调整章节格式")
+        return self._commit_prepared(document_id, base, prepared, change={"stage": "chapter_insert", "count": 1, "after_chapter_id": after_chapter_id})
+
+    def delete_chapters(self, document_id: str, base_version_id: str, chapter_ids: list[str]) -> dict[str, Any]:
+        if not isinstance(chapter_ids, list) or not chapter_ids or any(not isinstance(identifier, str) for identifier in chapter_ids):
+            raise DataError(422, "请选择要删除的章节")
+        if len(chapter_ids) != len(set(chapter_ids)):
+            raise DataError(422, "删除章节不能重复")
+        base = self.get_version(document_id, base_version_id)
+        ranges = [(self._chapter(base, identifier)["start"], self._chapter(base, identifier)["end"]) for identifier in chapter_ids]
+        updated = base["text"]
+        for start, end in sorted(ranges, reverse=True):
+            updated = updated[:start] + updated[end:]
+        prepared = _prepare(updated, base["text"], self._version_options(base), normalize=False)
+        return self._commit_prepared(document_id, base, prepared, change={"stage": "chapter_delete", "chapter_ids": chapter_ids, "count": len(chapter_ids)})
+
+    def restore_version(self, document_id: str, base_version_id: str, target_version_id: str) -> dict[str, Any]:
+        base = self.get_version(document_id, base_version_id)
+        target = self.get_version(document_id, target_version_id)
+        prepared = _prepare(target["text"], base["text"], self._version_options(target), normalize=False)
+        return self._commit_prepared(document_id, base, prepared, source=target["source_text"],
+                                     change={"stage": "restore_version", "target_version_id": target_version_id, "count": 1})
+
+    def append(self, document_id: str, base_version_id: str, filename: str, raw: bytes,
+               encoding: str = "auto") -> dict[str, Any]:
+        # Parse with the same strict upload path without mutating document metadata.
+        if not isinstance(filename, str) or not filename or len(filename) > 255 or re.search(r"[\x00-\x1f]", filename):
+            raise DataError(422, "文件名无效")
+        filename = filename.replace("\\", "/").rsplit("/", 1)[-1]
+        suffix = Path(filename).suffix.lower()
+        if suffix not in SUPPORTED_FORMATS or not isinstance(raw, bytes) or not raw:
+            raise DataError(422, "请上传非空 TXT、MD、SRT、DOCX 或 EPUB 文件")
+        if len(raw) > MAX_UPLOAD_BYTES:
+            raise DataError(413, "文件超过 50 MiB 限制")
+        if suffix == ".docx":
+            source, used_encoding = _docx_text(raw), "xml"
+        elif suffix == ".epub":
+            source, used_encoding = _epub_text(raw), "xml"
+        else:
+            source, used_encoding = _decode(raw, encoding)
+        base = self.get_version(document_id, base_version_id)
+        from .text_processing import clean_text
+        new_text = clean_text(source)["cleaned_text"]
+        separator = "" if not base["text"] or base["text"].endswith("\n") else "\n"
+        updated = base["text"] + separator + new_text
+        combined_source = base["source_text"] + ("" if not base["source_text"] or base["source_text"].endswith("\n") else "\n") + source
+        prepared = _prepare(updated, base["text"], self._version_options(base), normalize=False)
+        source_id = uuid.uuid4().hex
+        prepared["changes"].insert(0, {"stage": "append_source", "source_id": source_id,
+                                       "filename": filename, "count": 1, "appended_characters": len(new_text)})
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            document = self._document(connection, document_id)
+            if document["latest_version_id"] != base_version_id:
+                raise DataError(409, "全文已有新版本，请刷新后再接续")
+            version = self._insert_version(connection, document_id, base_version_id, base["version_number"] + 1,
+                                           combined_source, prepared)
+            connection.execute("INSERT INTO doc_sources VALUES (?,?,?,?,?,?,?,?,?,?)",
+                               (source_id, document_id, filename, suffix[1:], used_encoding, raw, _sha(raw),
+                                source, version["id"], _now()))
+            connection.execute("UPDATE doc_documents SET latest_version_id=? WHERE id=?", (version["id"], document_id))
+            return version
+
+    def list_sources(self, document_id: str) -> list[dict[str, Any]]:
+        with self._connection() as connection:
+            document = self._document(connection, document_id)
+            originals = [{"id": "original", "filename": document["filename"], "format": document["format"],
+                          "encoding": document["encoding"], "original_sha256": document["original_sha256"],
+                          "original_bytes": len(document["original"]), "created_at": document["created_at"],
+                          "version_id": None}]
+            originals.extend(dict(row) for row in connection.execute(
+                "SELECT id,filename,format,encoding,original_sha256,length(original) AS original_bytes,version_id,created_at "
+                "FROM doc_sources WHERE document_id=? ORDER BY created_at,id", (document_id,)))
+            return originals
+
+    def get_source_original(self, document_id: str, source_id: str) -> tuple[bytes, str]:
+        if source_id == "original":
+            return self.get_original(document_id)
+        with self._connection() as connection:
+            self._document(connection, document_id)
+            row = connection.execute("SELECT original,original_sha256,filename FROM doc_sources WHERE document_id=? AND id=?",
+                                     (document_id, source_id)).fetchone()
+            if row is None:
+                raise DataError(404, "接续原件不存在")
+            raw = bytes(row["original"])
+            if _sha(raw) != row["original_sha256"]:
+                raise DataError(500, "接续原件校验失败")
+            return raw, row["filename"]
 
     def get_original(self, document_id: str) -> tuple[bytes, str]:
         with self._connection() as connection:

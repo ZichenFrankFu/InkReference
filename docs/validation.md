@@ -1,5 +1,16 @@
 # Verification record
 
+## Reference-database parity and blue chapter workbench (2026-10-18)
+
+- Reviewed InkOctoBot commit `51c82b6f01f6a5b5210e1bae9302be257b3b8083`, including the seven narrative tabs, five setting-collection tabs, chapter preprocessing and independent extraction sections. The actual feature map and remaining differences are recorded in [reference-parity.md](reference-parity.md).
+- Latest local regression: **399 passed, 1 skipped** on Linux / Python 3.12. The skip requires the actual Windows Credential Locker. TypeScript type checking and the production Vite build passed. These local results are not Windows/macOS runtime evidence; platform results are linked from the PR's Actions checks.
+- Real Chromium against the production frontend and local API: **18 chapter-workbench checks passed**, with no JavaScript page errors or model calls. Checks covered import and automatic headings, amber/violet issue labels, cached chapter changes with **0 px layout movement**, inline red removal toggles, selected cleaning, undo, body editing and unsaved-edit protection, rename/insert/delete, two-file append, original byte downloads, historical restore, invalid heading/regex atomicity, volume rule/manual/paste validation, 390 px layout and 210,000-codepoint coverage.
+- The analysis browser flow also exercised the actual seven narrative tabs, credential-free manual tasks, prompt/pasted JSON, independent section commits, editing an uncommitted section after another section was approved, work-level plot/character/setting editing, and whole-book/per-chunk style views. Tests use invented text and a local synthetic HTTP provider where model responses are needed; they do not establish commercial-model extraction quality.
+- The original three private CSVs again preserved all fields and record order: 536 works, 1,213 characters, 138 cliches, 1,155 relations; repeated import skipped 1,887 records and changed none. Original inputs were not modified. The upstream four text-preservation comparisons also passed without model calls.
+- New integrity checks cover exact Unicode proposal offsets, immutable append sources, chapter/version conflicts, custom regex timeouts, literal collection snapshots (including entities and CRLF), four-section TXT round trips, transactional rejection, independent approval ledgers, and history restoration of active contributions/manual overrides. Sources, screenshots and runtime databases remain untracked.
+
+Older sections below record earlier batches and their narrower verification scope.
+
 ## Local checks completed
 
 - Python 3.12: 79 tests passed, covering transactional CSV imports, rollback, CRUD, revision conflicts, API validation, text preservation, export behavior and real launcher HTTP responses after TCP clients disconnect.

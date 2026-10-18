@@ -18,6 +18,7 @@ dependencies = [
   "markdownify>=1.2,<2",
   "markdown-it-py>=4,<5",
   "keyring>=25.7,<26",
+  "regex>=2024,<2027",
 ]
 
 [project.optional-dependencies]

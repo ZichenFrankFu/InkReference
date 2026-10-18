@@ -102,7 +102,7 @@ export default function App() {
         </button>
         <div className="workspace-label">
           <span className="local-dot" />
-          <span>个人工作区</span>
+          <span>本地工作区</span>
           <HardDrive size={13} />
         </div>
         <div className="nav-caption">创作工作台</div>
@@ -125,11 +125,13 @@ export default function App() {
           <button
             className={`nav-item ${section === "backup" ? "active" : ""}`}
             onClick={() => nav("backup")}
+            title={collapsed ? "备份与恢复" : undefined}
+            aria-current={section === "backup" ? "page" : undefined}
           >
             <FolderArchive size={18} />
             <span>备份与恢复</span>
           </button>
-          <button className="sidebar-settings" onClick={() => setHelp(true)}>
+          <button className="sidebar-settings" onClick={() => setHelp(true)} title={collapsed ? "关于工作区" : undefined}>
             <Settings2 size={16} />
             <span>关于工作区</span>
             <span>本地</span>
@@ -150,6 +152,7 @@ export default function App() {
               className="icon-button desktop-collapse"
               onClick={() => setCollapsed((v) => !v)}
               aria-label={collapsed ? "展开侧栏" : "收起侧栏"}
+              aria-expanded={!collapsed}
             >
               <PanelLeftClose size={17} />
             </button>
@@ -180,7 +183,7 @@ export default function App() {
               hidden={section !== page}
               className="workspace-page"
             >
-              <Suspense fallback={<Busy label="正在打开工作区" />}>
+              <Suspense fallback={<div className="workspace-loading"><Busy label="正在打开工作区" /></div>}>
                 {page === "models" && modelReturn && <div className="mobile-return-bar"><button className="text-button" onClick={() => nav(modelReturn)}>返回{sections.find((s) => s.id === modelReturn)?.label || "备份与恢复"}</button></div>}
                 {page === "library" ? (
                   <Library />

@@ -24,6 +24,24 @@ The same MIT upstream commit `51c82b6f01f6a5b5210e1bae9302be257b3b8083` supplies
 
 Adaptations retain only declarative prompts/schema, remove global model routing and BaseSkill execution, avoid forced date inference, and unify summary/characters/events/cliches with exact contiguous evidence. Raw inputs remain data. The engine validates source spans and requires explicit human approval before materialization. The upstream MIT notice remains in `third_party/inkoctobot-LICENSE.txt`.
 
+## InkOctoBot reference-tab parity
+
+The reference database UI and the actual backend handlers were re-audited at the same exact MIT commit `51c82b6f01f6a5b5210e1bae9302be257b3b8083`. The concrete page/function inventory is retained in [`docs/reference-parity.md`](docs/reference-parity.md); historical comments and unused endpoints are distinguished from rendered controls.
+
+| Upstream source | Adaptation in InkReference |
+|---|---|
+| `reference_pipeline/chapter_parser.py`: author-note keywords, `detect_aside_paragraphs`, dialogue/tail/fence guards, length-outlier and chapter-gap rules, chapter templates | `backend/inkreference/chapter_preprocessing.py`, `text_processing.py`: reviewable chapter diagnostics and exact codepoint deletion proposals; customizable declarative patterns; immutable versions rather than in-place rewriting |
+| `reference_pipeline/volume_detector.py`: explicit volume-marker detection | `backend/inkreference/volumes.py`: version-pinned plans, rule suggestions, validated model/pasted/manual ranges with complete chapter coverage |
+| `ui/frontend/src/components/reference/referenceMerge.ts`: character and setting merges, per-chunk section ledger, character-weighted style aggregation and chapter signals | `backend/inkreference/reference_analysis.py`: server-side merging, transactional independent approvals, revisions and idempotent contributions; existing edited scalar facts take precedence |
+| `reference_pipeline/nlp_stats.py`: `compute_nlp_style` sentence, vocabulary and punctuation statistics | `backend/inkreference/reference_analysis.py`: local deterministic metrics, computed alongside model/pasted semantic signals; the tokenizer-free implementation explicitly uses Unicode characters |
+| `ui/frontend/src/components/reference/AnalysisEditors.tsx`, `CharactersAndSettingsExtraction.tsx`, `PureSettingPanel.tsx`: chronicle hierarchy, rich character/setting fields, style/rhythm and pure-setting data shapes | `backend/inkreference/reference_analysis.py`, `skills.py`: compatible rich reference sections alongside the existing evidence-grounded material extraction |
+
+The frontend is redesigned in `ReferenceAnalysis.tsx`, `ReferenceExtraction.tsx`, `ReferenceEditors.tsx`, `ReferenceDocumentPanels.tsx` and `ChapterWorkbench.tsx` rather than bundling the upstream frontend. `ReferenceLibraryPage.tsx`, `FilesPanel.tsx`, `PreprocessPanel.tsx` and `UnifiedExtractionPanel.tsx` provide the audited business-flow references: continuation uploads, chapter CRUD, inline review, independent extraction sections, and whole-work/segment browsing. The upstream multi-JSON nontransactional writes, auto-commit batch path, aggressive pasted-JSON repair and inferred absolute dates are not required for feature compatibility. The rich built-in Skill/Workflow uses version 1.1.0 and preserves the prior 1.0.0 declarations for existing snapshots. User data and the upstream global settings/model router are not copied.
+
+Pure-setting TXT interchange is a new UTF-8 serialization that preserves all four collections, multiline/marker content and unknown fields; the upstream line-oriented TXT parser is not copied. Analysis history additionally snapshots active section contributions and manual overrides, so restoring a view does not leave a contradictory approval ledger behind. Semantic style judgments remain model-produced/manual data; local Unicode statistics are not represented as an NLP or LLM quality evaluation.
+
+Copyright remains Copyright (c) 2026 ZichenFrankFu. The complete MIT permission and warranty notice is preserved in [`third_party/inkoctobot-LICENSE.txt`](third_party/inkoctobot-LICENSE.txt) and included by the desktop packaging configuration.
+
 ## Dependency reuse in the workbench
 
 No whole application platform is vendored. Installed packages retain their own distributions and licenses. Versions are recorded in `requirements-lock.txt`, `requirements-mineru.txt` and `frontend/package-lock.json`.

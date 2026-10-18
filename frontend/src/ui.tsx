@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, type ReactNode } from "react";
+import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import {
   AlertCircle,
   CheckCircle2,
@@ -11,12 +11,30 @@ export const messageOf = (e: unknown) =>
 export function Busy({
   label = "正在处理",
   compact = false,
+  inline = false,
+  delay = 160,
 }: {
   label?: string;
   compact?: boolean;
+  inline?: boolean;
+  delay?: number;
 }) {
+  const [visible, setVisible] = useState(delay === 0);
+  useEffect(() => {
+    if (delay === 0) {
+      setVisible(true);
+      return;
+    }
+    const timer = window.setTimeout(() => setVisible(true), delay);
+    return () => window.clearTimeout(timer);
+  }, [delay]);
   return (
-    <div className={`busy-state ${compact ? "compact" : ""}`} role="status">
+    <div
+      className={`busy-state ${compact ? "compact" : ""} ${inline ? "busy-inline" : "busy-floating"} ${visible ? "busy-visible" : "busy-pending"}`}
+      role="status"
+      aria-live="polite"
+      aria-atomic="true"
+    >
       <span>
         <LoaderCircle className="spin" size={16} />
         {label}

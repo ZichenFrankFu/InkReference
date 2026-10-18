@@ -18,6 +18,8 @@ from .models import ModelService
 from .projects import MAX_BACKUP_BYTES, ProjectStore
 from .skills import SkillStore
 from .workflow_definitions import WorkflowStore
+from .volumes import VolumeStore, detect_volumes, parse_volume_paste
+from .reference_analysis import ReferenceAnalysisStore
 
 
 class NewVersion(BaseModel):
@@ -31,10 +33,11 @@ class NewRun(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     document_id: str = Field(min_length=1, max_length=200)
     version_id: str = Field(min_length=1, max_length=200)
-    profile_id: str = Field(min_length=1, max_length=100)
+    profile_id: str | None = Field(default=None, min_length=1, max_length=100)
     workflow_id: str = "default"
-    workflow_version: str = "1.0.0"
+    workflow_version: str = "1.1.0"
     start: bool = True
+    manual: bool = False
     remote_consent: bool = False
     expected_model_fingerprint: str | None = Field(default=None, min_length=64, max_length=64)
 
@@ -53,11 +56,100 @@ class Review(Revision):
     results: dict[str, Any]
 
 
+class ChapterEdit(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    base_version_id: str = Field(min_length=1, max_length=200)
+    chapter_id: str = Field(min_length=1, max_length=200)
+    body_text: str
+
+
+class ChapterAction(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    base_version_id: str = Field(min_length=1, max_length=200)
+    chapter_id: str | None = None
+    chapter_ids: list[str] = Field(default_factory=list)
+    after_chapter_id: str | None = None
+    title: str = ""
+    heading: str = ""
+    body_text: str = ""
+    target_version_id: str | None = None
+    heading_formats: list[str] = Field(default_factory=list)
+    custom_formats: list[dict[str, Any]] = Field(default_factory=list)
+    author_keywords: list[str] | None = None
+    garble_rules: list[dict[str, Any]] | None = None
+    selections: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class VolumePlan(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    expected_revision: StrictInt = Field(ge=0)
+    volumes: list[dict[str, Any]]
+
+
+class PastedContent(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    content: str = Field(max_length=2_000_000)
+
+
+class ReferenceRevision(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    expected_revision: StrictInt = Field(ge=0)
+
+
+class ReferenceSection(ReferenceRevision):
+    data: Any
+
+
+class ReferenceConfiguration(ReferenceRevision):
+    structure_type: str
+
+
+class NewCollection(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    title: str = Field(min_length=1, max_length=200)
+
+
+class ChunkPaste(Revision):
+    content: str = Field(max_length=2_000_000)
+
+
+class ChunkCommit(ReferenceRevision):
+    sections: list[str]
+
+
+class ModelAction(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    profile_id: str = Field(min_length=1, max_length=100)
+    remote_consent: bool = False
+    expected_model_fingerprint: str | None = Field(default=None, min_length=64, max_length=64)
+
+
+class ReferenceTransform(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    kind: str
+    profile_id: str | None = None
+    payload: dict[str, Any] = Field(default_factory=dict)
+    remote_consent: bool = False
+    expected_model_fingerprint: str | None = Field(default=None, min_length=64, max_length=64)
+
+
+class ReferenceRestore(ReferenceRevision):
+    target_revision: StrictInt = Field(ge=0)
+
+
+class ReferenceImport(ReferenceRevision):
+    text: str = Field(max_length=8_000_000)
+    mode: str = "merge"
+    title: str = Field(default="导入文本", min_length=1, max_length=200)
+
+
 class Studio:
     def __init__(self, runtime):
         from .workflows import WorkflowRunner
         self.lock = threading.RLock()
         self.documents = DocumentStore(runtime.data_dir)
+        self.volumes = VolumeStore(runtime.data_dir, self.documents)
+        self.reference = ReferenceAnalysisStore(runtime.data_dir, documents=self.documents)
         self.models = ModelService(runtime.data_dir)
         self.skills = SkillStore(runtime.data_dir)
         self.workflows = WorkflowStore(runtime.data_dir)
@@ -161,6 +253,103 @@ def install_studio_routes(application, runtime):
         raw, filename = runtime.studio.documents.get_original(document_id)
         return _file_response(raw, filename, "application/octet-stream")
 
+    @router.get("/documents/{document_id}/sources")
+    def document_sources(document_id: str):
+        return {"items": runtime.studio.documents.list_sources(document_id)}
+
+    @router.get("/documents/{document_id}/sources/{source_id}/download")
+    def document_source(document_id: str, source_id: str):
+        raw, filename = runtime.studio.documents.get_source_original(document_id, source_id)
+        return _file_response(raw, filename, "application/octet-stream")
+
+    @router.post("/documents/{document_id}/append", status_code=201)
+    async def append_document(document_id: str, file: Annotated[UploadFile, File()],
+                              base_version_id: Annotated[str, Form()], encoding: Annotated[str, Form()] = "auto"):
+        raw = await _upload(file, MAX_UPLOAD_BYTES)
+        def save():
+            with runtime.studio.lock:
+                return runtime.studio.documents.append(document_id, base_version_id, file.filename or "append.txt", raw, encoding=encoding)
+        return await run_in_threadpool(save)
+
+    @router.get("/documents/{document_id}/versions/{version_id}/chapters")
+    def chapter_index(document_id: str, version_id: str):
+        return runtime.studio.documents.chapter_index(document_id, version_id)
+
+    @router.get("/documents/{document_id}/versions/{version_id}/chapters/{chapter_id}")
+    def chapter(document_id: str, version_id: str, chapter_id: str,
+                start: Annotated[int, Query(ge=0)] = 0, limit: Annotated[int, Query(ge=1, le=100000)] = 20000):
+        return runtime.studio.documents.get_chapter(document_id, version_id, chapter_id, start=start, limit=limit)
+
+    @router.post("/documents/{document_id}/chapters/edit", status_code=201)
+    def edit_chapter(document_id: str, body: ChapterEdit):
+        with runtime.studio.lock:
+            return runtime.studio.documents.edit_chapter(document_id, body.base_version_id, body.chapter_id, body.body_text)
+
+    @router.post("/documents/{document_id}/chapters/resegment", status_code=201)
+    def resegment(document_id: str, body: ChapterAction):
+        with runtime.studio.lock:
+            return runtime.studio.documents.resegment(document_id, body.base_version_id, body.heading_formats, body.custom_formats)
+
+    @router.post("/documents/{document_id}/chapters/clean", status_code=201)
+    def clean_chapters(document_id: str, body: ChapterAction):
+        with runtime.studio.lock:
+            return runtime.studio.documents.apply_chapter_cleaning(document_id, body.base_version_id, body.selections)
+
+    @router.post("/documents/{document_id}/chapters/rename", status_code=201)
+    def rename_chapter(document_id: str, body: ChapterAction):
+        with runtime.studio.lock:
+            return runtime.studio.documents.rename_chapter(document_id, body.base_version_id, body.chapter_id, body.title)
+
+    @router.post("/documents/{document_id}/chapters/insert", status_code=201)
+    def insert_chapter(document_id: str, body: ChapterAction):
+        with runtime.studio.lock:
+            return runtime.studio.documents.insert_chapter(document_id, body.base_version_id, body.after_chapter_id, body.heading, body.body_text)
+
+    @router.post("/documents/{document_id}/chapters/delete", status_code=201)
+    def delete_chapters(document_id: str, body: ChapterAction):
+        with runtime.studio.lock:
+            return runtime.studio.documents.delete_chapters(document_id, body.base_version_id, body.chapter_ids)
+
+    @router.post("/documents/{document_id}/chapters/restore", status_code=201)
+    def restore_version(document_id: str, body: ChapterAction):
+        if not body.target_version_id:
+            raise DataError(422, "请选择要恢复的全文版本。")
+        with runtime.studio.lock:
+            return runtime.studio.documents.restore_version(document_id, body.base_version_id, body.target_version_id)
+
+    @router.post("/documents/{document_id}/chapters/settings", status_code=201)
+    def chapter_settings(document_id: str, body: ChapterAction):
+        with runtime.studio.lock:
+            return runtime.studio.documents.update_preprocess_settings(document_id, body.base_version_id, author_keywords=body.author_keywords, garble_rules=body.garble_rules)
+
+    @router.get("/documents/{document_id}/versions/{version_id}/volumes")
+    def volumes(document_id: str, version_id: str):
+        return runtime.studio.volumes.get(document_id, version_id)
+
+    @router.put("/documents/{document_id}/versions/{version_id}/volumes")
+    def save_volumes(document_id: str, version_id: str, body: VolumePlan):
+        with runtime.studio.lock:
+            return runtime.studio.volumes.save(document_id, version_id, body.volumes, body.expected_revision)
+
+    @router.get("/documents/{document_id}/versions/{version_id}/volumes/prompt")
+    def volume_prompt(document_id: str, version_id: str):
+        return runtime.studio.volumes.prompt(document_id, version_id)
+
+    @router.post("/documents/{document_id}/versions/{version_id}/volumes/detect")
+    def detect_volume_plan(document_id: str, version_id: str):
+        version = runtime.studio.documents.get_version(document_id, version_id)
+        return {"volumes": detect_volumes(version["chapters"]), "method": "chapter_markers"}
+
+    @router.post("/documents/{document_id}/versions/{version_id}/volumes/paste")
+    def paste_volume_plan(document_id: str, version_id: str, body: PastedContent):
+        count = len(runtime.studio.documents.get_version(document_id, version_id)["chapters"])
+        return {"volumes": parse_volume_paste(body.content, count)}
+
+    @router.post("/documents/{document_id}/versions/{version_id}/volumes/model")
+    def model_volume_plan(document_id: str, version_id: str, body: ModelAction):
+        # ModelService captures the request in the same usage ledger as extraction.
+        return runtime.studio.volumes.model_detect(document_id, version_id, runtime.studio.models, **body.model_dump())
+
     @router.get("/documents/{document_id}/versions/{version_id}/download")
     def cleaned(document_id: str, version_id: str):
         result = runtime.studio.documents.get_version(document_id, version_id)
@@ -170,15 +359,92 @@ def install_studio_routes(application, runtime):
     def jobs():
         return {"items": runtime.studio.runner.list_runs()}
 
+    @router.get("/documents/{document_id}/reference")
+    def reference(document_id: str):
+        return runtime.studio.reference.get(document_id)
+
+    @router.post("/reference-collections", status_code=201)
+    def new_collection(body: NewCollection):
+        with runtime.studio.lock:
+            document = runtime.studio.documents.create_collection(body.title)
+            runtime.studio.reference.configure(document["id"], "setting_collection", 0)
+            return document
+
+    @router.post("/documents/{document_id}/reference/prepare-source", status_code=201)
+    def prepare_reference_source(document_id: str, body: ReferenceRevision):
+        with runtime.studio.lock:
+            source = runtime.studio.reference.build_source(document_id, body.expected_revision)
+            if source["structure_type"] != "setting_collection":
+                raise DataError(422, "只有纯设定资料集需要准备条目正文。")
+            document = runtime.studio.documents.get_document(document_id)
+            base = runtime.studio.documents.get_version(document_id)
+            text = source["text"]
+            if base["text"] == text:
+                return {"document": document, "version": base, "reference_revision": source["reference_revision"]}
+            version = runtime.studio.documents.create_literal_version(document_id, base["id"], text)
+            return {"document": runtime.studio.documents.get_document(document_id), "version": version,
+                    "reference_revision": source["reference_revision"]}
+
+    @router.get("/documents/{document_id}/reference/export")
+    def export_reference_entries(document_id: str):
+        return _file_response(runtime.studio.reference.export_collection(document_id), "InkReference-collection.txt", "text/plain; charset=utf-8")
+
+    @router.post("/documents/{document_id}/reference/import")
+    def import_reference_entries(document_id: str, body: ReferenceImport):
+        with runtime.studio.lock:
+            return runtime.studio.reference.import_collection(document_id, body.text, body.expected_revision, mode=body.mode, title=body.title)
+
+    @router.get("/documents/{document_id}/reference/history")
+    def reference_history(document_id: str):
+        return {"items": runtime.studio.reference.list_history(document_id)}
+
+    @router.post("/documents/{document_id}/reference/restore")
+    def restore_reference(document_id: str, body: ReferenceRestore):
+        with runtime.studio.lock:
+            return runtime.studio.reference.restore(document_id, body.target_revision, body.expected_revision)
+
+    @router.put("/documents/{document_id}/reference")
+    def configure_reference(document_id: str, body: ReferenceConfiguration):
+        with runtime.studio.lock:
+            return runtime.studio.reference.configure(document_id, body.structure_type, body.expected_revision)
+
+    @router.post("/documents/{document_id}/reference/transform")
+    def transform_reference(document_id: str, body: ReferenceTransform):
+        return runtime.studio.runner.reference_transform(document_id, **body.model_dump())
+
+    @router.put("/documents/{document_id}/reference/{section}")
+    def save_reference_section(document_id: str, section: str, body: ReferenceSection):
+        with runtime.studio.lock:
+            return runtime.studio.reference.save_section(document_id, section, body.data, body.expected_revision)
+
     @router.post("/jobs", status_code=201)
     def create_job(body: NewRun):
         with runtime.studio.lock:
-            result = runtime.studio.runner.create_run(body.document_id, body.version_id, workflow_id=body.workflow_id, workflow_version=body.workflow_version, profile_id=body.profile_id, remote_consent=body.remote_consent, expected_model_fingerprint=body.expected_model_fingerprint)
-            return runtime.studio.runner.start(result["id"], remote_consent=body.remote_consent) if body.start else result
+            result = runtime.studio.runner.create_run(body.document_id, body.version_id, workflow_id=body.workflow_id, workflow_version=body.workflow_version, profile_id=body.profile_id, remote_consent=body.remote_consent, expected_model_fingerprint=body.expected_model_fingerprint, manual=body.manual)
+            return runtime.studio.runner.start(result["id"], remote_consent=body.remote_consent) if body.start and not body.manual else result
 
     @router.get("/jobs/{run_id}")
     def job(run_id: str):
         return runtime.studio.runner.get_run(run_id)
+
+    @router.get("/jobs/{run_id}/chunks/{chunk_id}/prompt")
+    def chunk_prompt(run_id: str, chunk_id: str):
+        return runtime.studio.runner.chunk_prompt(run_id, chunk_id)
+
+    @router.post("/jobs/{run_id}/chunks/{chunk_id}/paste")
+    def paste_chunk(run_id: str, chunk_id: str, body: ChunkPaste):
+        with runtime.studio.lock:
+            return runtime.studio.runner.paste_chunk(run_id, chunk_id, body.content, body.expected_revision)
+
+    @router.post("/jobs/{run_id}/chunks/{chunk_id}/start")
+    def start_chunk(run_id: str, chunk_id: str, body: ConnectionConsent = ConnectionConsent()):
+        with runtime.studio.lock:
+            return runtime.studio.runner.start_chunk(run_id, chunk_id, remote_consent=body.remote_consent)
+
+    @router.post("/jobs/{run_id}/chunks/{chunk_id}/commit")
+    def commit_chunk(run_id: str, chunk_id: str, body: ChunkCommit):
+        with runtime.studio.lock:
+            return runtime.studio.reference.commit_candidate(runtime.studio.runner.get_run(run_id), chunk_id, body.sections, body.expected_revision)
 
     @router.post("/jobs/{run_id}/resume")
     def resume_job(run_id: str, body: ConnectionConsent = ConnectionConsent()):
