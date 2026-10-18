@@ -23,9 +23,11 @@ from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
+from langsmith.run_helpers import tracing_context
 
 from .database import DataError
 from .skills import build_prompt, validate_result
+from .local_security import require_remote_consent, remote_model, target_fingerprint
 
 KINDS = ("characters", "events", "cliches")
 RESUMABLE = {"paused", "failed", "cancelled"}
@@ -203,7 +205,8 @@ class WorkflowRunner:
 
     def create_run(self, document_id: str, version_id: str | None = None,
                    workflow_id: str = "default", workflow_version: str = "1.0.0",
-                   profile_id: str | None = None) -> dict[str, Any]:
+                   profile_id: str | None = None, *, remote_consent: bool = False,
+                   expected_model_fingerprint: str | None = None) -> dict[str, Any]:
         if not profile_id:
             raise DataError(422, "请选择模型配置后创建任务")
         document = self.documents.get_document(document_id)
@@ -214,7 +217,14 @@ class WorkflowRunner:
         workflow = self.workflows.get(workflow_id, workflow_version)
         skill = self.skills.get(workflow["skill_id"], workflow["skill_version"])
         model = self.models.snapshot(profile_id)
+        require_remote_consent(model, remote_consent)
+        if remote_model(model) and not expected_model_fingerprint:
+            raise DataError(428, "请刷新模型配置，并确认当前远程目标后重新创建任务。")
+        if expected_model_fingerprint is not None and expected_model_fingerprint != target_fingerprint(model):
+            raise DataError(409, "模型服务地址或模型已更改，请刷新配置并重新确认；未发送正文。")
         snapshots = {"workflow": workflow, "skill": skill, "model": model,
+                     "privacy": {"remote_consent": remote_model(model) and remote_consent,
+                                 "target_base_url": model.get("base_url"), "target_model": model.get("model")},
                      "document": {"id": document_id, "version_id": version["id"], "title": document.get("title", ""), "work_id": document.get("work_id"), "filename": document.get("filename", ""), "sha256": _hash(text), "characters": len(text)}}
         # Copy through JSON to detach caller-owned definitions and exclude runtime objects.
         snapshots = json.loads(_dump(snapshots))
@@ -267,9 +277,11 @@ class WorkflowRunner:
         with self._db() as db:
             return [self._render(db, row) for row in db.execute("SELECT * FROM run_jobs ORDER BY created_at DESC,id").fetchall()]
 
-    def _claim(self, run_id: str, *, resume: bool) -> None:
+    def _claim(self, run_id: str, *, resume: bool, remote_consent: bool = False) -> None:
         with self._db(write=True) as db:
             row = self._job(db, run_id)
+            model = json.loads(row["snapshots_json"])["model"]
+            require_remote_consent(model, remote_consent)
             allowed = RESUMABLE if resume else {"queued"}
             if row["status"] not in allowed:
                 raise DataError(409, "当前任务状态不能继续" if resume else "只有等待中的任务可以启动")
@@ -277,28 +289,30 @@ class WorkflowRunner:
             if resume:
                 db.execute("UPDATE run_chunks SET round_attempts=0,status=CASE WHEN status='completed' THEN status ELSE 'pending' END WHERE run_id=?", (run_id,))
             self._event(db, run_id, "resuming" if resume else "starting", "用户已继续任务；成功块保留" if resume else "用户已启动模型提取")
+            if remote_model(model):
+                self._event(db, run_id, "remote_authorized", "用户已确认向固定远程模型发送当前任务的全文分块")
 
-    def _launch(self, run_id: str, *, resume: bool) -> dict[str, Any]:
+    def _launch(self, run_id: str, *, resume: bool, remote_consent: bool = False) -> dict[str, Any]:
         key = self._key(run_id)
         with self._registry_lock:
             if self._closing:
                 raise DataError(409, "应用正在关闭，不能启动新的模型调用")
             if key in self._owners:
                 raise DataError(409, "任务已在运行，请勿重复启动")
-            self._claim(run_id, resume=resume)
+            self._claim(run_id, resume=resume, remote_consent=remote_consent)
             self._owners.add(key)
             worker = threading.Thread(target=self._execute_owned, args=(run_id,), name=f"inkreference-run-{run_id[:8]}", daemon=True)
             self._workers[key] = worker
             worker.start()
         return self.get_run(run_id)
 
-    def start(self, run_id: str) -> dict[str, Any]:
-        return self._launch(run_id, resume=False)
+    def start(self, run_id: str, *, remote_consent: bool = False) -> dict[str, Any]:
+        return self._launch(run_id, resume=False, remote_consent=remote_consent)
 
-    def resume(self, run_id: str) -> dict[str, Any]:
-        return self._launch(run_id, resume=True)
+    def resume(self, run_id: str, *, remote_consent: bool = False) -> dict[str, Any]:
+        return self._launch(run_id, resume=True, remote_consent=remote_consent)
 
-    def execute(self, run_id: str) -> dict[str, Any]:
+    def execute(self, run_id: str, *, remote_consent: bool = False) -> dict[str, Any]:
         """Synchronous explicit user execution, useful for integration and tests."""
         key = self._key(run_id)
         with self._registry_lock:
@@ -307,7 +321,7 @@ class WorkflowRunner:
             if key in self._owners:
                 raise DataError(409, "任务已在运行")
             current = self.get_run(run_id)
-            self._claim(run_id, resume=current["status"] in RESUMABLE)
+            self._claim(run_id, resume=current["status"] in RESUMABLE, remote_consent=remote_consent)
             self._owners.add(key)
             self._workers[key] = threading.current_thread()
         self._execute_owned(run_id)
@@ -368,7 +382,9 @@ class WorkflowRunner:
             self._audit_plan(run)
             # No pickle fallback or arbitrary constructor imports from a restored checkpoint.
             serde = JsonPlusSerializer(pickle_fallback=False, allowed_json_modules=[], allowed_msgpack_modules=[])
-            with contextlib.closing(sqlite3.connect(self.checkpoint_path, check_same_thread=False, timeout=30)) as connection:
+            # Ignore inherited tracing settings: source text/checkpoints must not
+            # be uploaded to an observability service by LangGraph callbacks.
+            with tracing_context(enabled=False, parent=False), contextlib.closing(sqlite3.connect(self.checkpoint_path, check_same_thread=False, timeout=30)) as connection:
                 saver = SqliteSaver(connection, serde=serde)
                 graph = self._graph(saver)
                 config = {"configurable": {"thread_id": run_id}, "recursion_limit": max(100, run["total"] * (run["snapshots"]["workflow"]["retry_limit"] + 5) * 5)}

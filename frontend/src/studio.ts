@@ -7,6 +7,8 @@ export type ModelProfile = {
   id: string;
   name: string;
   provider: "openai_compatible" | "ollama";
+  connection_mode: "local" | "remote";
+  credential_mode: "session" | "vault" | "environment";
   base_url: string;
   model: string;
   context_window: number;
@@ -15,7 +17,11 @@ export type ModelProfile = {
   key_env?: string;
   api_key?: string;
   has_session_key?: boolean;
+  has_vault_key?: boolean;
   key_available?: boolean;
+  credential_status?: "available" | "missing" | "vault_unavailable";
+  target_fingerprint?: string;
+  max_tokens_parameter?: "max_tokens" | "max_completion_tokens";
   input_price_per_million?: number | null;
   output_price_per_million?: number | null;
   currency: string;

@@ -439,3 +439,42 @@ def test_recover_approval_without_main_commit_remains_reviewable(tmp_path):
     approved = restarted.approve(run["id"], recovered["revision"])
     assert approved["status"] == "approved"
     assert store.stats()["works"] == 1 and len(models.calls) == 1
+
+
+def test_remote_creation_and_every_execution_require_explicit_consent(tmp_path):
+    from inkreference.local_security import target_fingerprint
+    runner, local, models, documents, workflows = setup_runner(tmp_path)
+    models.profile.update(connection_mode="remote", base_url="https://provider.example/v1")
+    with pytest.raises(DataError) as blocked:
+        runner.create_run(local["document_id"], local["version_id"], "test", "1.0.0", "mock-profile")
+    assert blocked.value.status_code == 428 and len(runner.list_runs()) == 1
+    remote = runner.create_run(local["document_id"], local["version_id"], "test", "1.0.0", "mock-profile", remote_consent=True, expected_model_fingerprint=target_fingerprint(models.profile))
+    assert remote["snapshots"]["privacy"]["target_base_url"] == "https://provider.example/v1"
+    for action in (runner.start, runner.execute):
+        with pytest.raises(DataError) as blocked:
+            action(remote["id"])
+        assert blocked.value.status_code == 428
+    runner.cancel(remote["id"])
+    with pytest.raises(DataError) as blocked:
+        runner.resume(remote["id"])
+    assert blocked.value.status_code == 428 and not models.calls
+    finished = runner.execute(remote["id"], remote_consent=True)
+    assert finished["status"] == "needs_review"
+    assert any(event["stage"] == "remote_authorized" for event in finished["events"])
+
+
+def test_inherited_langsmith_tracing_never_uploads_source(tmp_path, monkeypatch):
+    from langsmith.run_helpers import get_tracing_context
+    from langsmith.run_trees import RunTree
+    posts = []
+    monkeypatch.setenv("LANGSMITH_TRACING", "true")
+    monkeypatch.setenv("LANGCHAIN_TRACING_V2", "true")
+    monkeypatch.setenv("LANGSMITH_API_KEY", "synthetic-never-send")
+    monkeypatch.setattr(RunTree, "post", lambda *a, **k: posts.append("post"))
+    monkeypatch.setattr(RunTree, "patch", lambda *a, **k: posts.append("patch"))
+    def reply(call, count):
+        assert get_tracing_context()["enabled"] is False
+        return valid_result(call["text"])
+    runner, run, models, _, _ = setup_runner(tmp_path, handler=reply)
+    assert runner.execute(run["id"])["status"] == "needs_review"
+    assert models.calls and posts == []

@@ -8,6 +8,9 @@ import {
   Play,
   RefreshCw,
   Save,
+  Search,
+  ShieldCheck,
+  SlidersHorizontal,
   Square,
 } from "lucide-react";
 import {
@@ -74,15 +77,21 @@ export default function Jobs({ initialId, navigate }: Props) {
     text: string;
   } | null>(null);
   const [evidenceBusy, setEvidenceBusy] = useState(false);
+  const [query, setQuery] = useState("");
+  const [pendingId, setPendingId] = useState<string | null>(null);
+  const [resumeOpen, setResumeOpen] = useState(false);
+  const [remoteConsent, setRemoteConsent] = useState(false);
   const dirty =
     !!draft &&
     !!selected &&
     JSON.stringify(draft) !== JSON.stringify(selected.results);
   const selectedRef = useRef(selected);
+  const selectionRequest = useRef(0);
   selectedRef.current = selected;
   const dirtyRef = useRef(dirty);
   dirtyRef.current = dirty;
   const load = useCallback(async () => {
+    setLoading(true);
     try {
       const [r, d] = await Promise.all([
         studio<List<Run>>("/jobs"),
@@ -96,23 +105,40 @@ export default function Jobs({ initialId, navigate }: Props) {
       setLoading(false);
     }
   }, []);
-  const choose = useCallback(async (id: string) => {
+  const choose = useCallback(async (id: string, discard = false) => {
+    if (dirtyRef.current && selectedRef.current?.id !== id && !discard) {
+      setPendingId(id);
+      return;
+    }
+    if (dirtyRef.current && selectedRef.current?.id === id && !discard) return;
     setBusy("load");
+    const ticket = ++selectionRequest.current;
     setError("");
     try {
       const run = await studio<Run>(`/jobs/${id}`);
+      if (ticket !== selectionRequest.current) return;
       setSelected(run);
       setDraft(run.results);
       setTab("summary");
     } catch (e) {
-      setError(messageOf(e));
+      if (ticket === selectionRequest.current) setError(messageOf(e));
     } finally {
-      setBusy("");
+      if (ticket === selectionRequest.current) setBusy("");
     }
   }, []);
   useEffect(() => {
     void load();
+    const refresh = () => { setLoading(true); void load(); };
+    window.addEventListener("inkreference:jobs-refresh", refresh);
+    return () => window.removeEventListener("inkreference:jobs-refresh", refresh);
   }, [load]);
+  useEffect(() => {
+    const beforeUnload = (event: BeforeUnloadEvent) => {
+      if (dirtyRef.current) event.preventDefault();
+    };
+    window.addEventListener("beforeunload", beforeUnload);
+    return () => window.removeEventListener("beforeunload", beforeUnload);
+  }, []);
   useEffect(() => {
     if (initialId) {
       void choose(initialId);
@@ -125,6 +151,7 @@ export default function Jobs({ initialId, navigate }: Props) {
       if (run && ["queued", "running", "cancelling"].includes(run.status)) {
         void studio<Run>(`/jobs/${run.id}`)
           .then((next) => {
+            if (selectedRef.current?.id !== next.id) return;
             setSelected(next);
             if (!dirtyRef.current) setDraft(next.results);
             setItems((items) =>
@@ -138,12 +165,14 @@ export default function Jobs({ initialId, navigate }: Props) {
   }, []);
   const action = async (kind: "resume" | "cancel") => {
     if (!selected) return;
+    if (kind === "resume" && remote && !remoteConsent) return;
     setBusy(kind);
     setError("");
     try {
-      const run = await send<Run>(`/jobs/${selected.id}/${kind}`, {});
+      const run = await send<Run>(`/jobs/${selected.id}/${kind}`, kind === "resume" ? { remote_consent: remote && remoteConsent } : {});
       setSelected(run);
       setDraft(run.results);
+      setResumeOpen(false);
       await load();
     } catch (e) {
       setError(messageOf(e));
@@ -151,7 +180,7 @@ export default function Jobs({ initialId, navigate }: Props) {
       setBusy("");
     }
   };
-  const save = async () => {
+  const save = async (switchTo?: string) => {
     if (!selected || !draft) return;
     setBusy("save");
     setError("");
@@ -164,6 +193,11 @@ export default function Jobs({ initialId, navigate }: Props) {
       setSelected(run);
       setDraft(run.results);
       setMessage("审核修改已保存。");
+      if (switchTo) {
+        dirtyRef.current = false;
+        setPendingId(null);
+        await choose(switchTo, true);
+      }
     } catch (e) {
       setError(messageOf(e));
     } finally {
@@ -236,10 +270,20 @@ export default function Jobs({ initialId, navigate }: Props) {
     ? docs.find((d) => d.id === selected.document_id)?.title ||
       selected.document_id
     : "";
+  const modelSnapshot = ((selected?.snapshots || {}) as { model?: { connection_mode?: "local" | "remote"; base_url?: string; model?: string } }).model;
+  const destination = (() => { try { return new URL(modelSnapshot?.base_url || "").origin; } catch { return modelSnapshot?.base_url || "未知地址"; } })();
+  const remote = modelSnapshot?.connection_mode ? modelSnapshot.connection_mode === "remote" : (() => {
+    try { const host = new URL(modelSnapshot?.base_url || "").hostname; return !(["localhost", "[::1]", "::1"].includes(host) || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host)); } catch { return true; }
+  })();
+  const startResume = () => {
+    setRemoteConsent(false);
+    if (remote) setResumeOpen(true);
+    else void action("resume");
+  };
   return (
     <main className="studio-main">
       <PageTitle
-        kicker="ANALYSIS & REVIEW"
+        kicker=""
         title="分析与审核"
         description="每次提取都有来源，每份素材经过确认。"
         action={
@@ -256,6 +300,7 @@ export default function Jobs({ initialId, navigate }: Props) {
       <Notice error={!!error} success={!error && !!message}>
         {error || message}
       </Notice>
+      {busy === "load" && !selected && <Busy label="正在读取任务详情" compact />}
       {evidenceBusy && <Busy label="正在读取原文证据" compact />}
       <div className="jobs-layout">
         <aside className="surface jobs-index">
@@ -270,12 +315,13 @@ export default function Jobs({ initialId, navigate }: Props) {
               <RefreshCw size={15} />
             </button>
           </div>
+          {!!items.length && <label className="index-search"><Search size={15} /><input aria-label="搜索分析任务" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="搜索作品或任务" /></label>}
           {loading ? (
             <Busy label="正在读取任务" />
           ) : !items.length ? (
             <div className="index-empty">还没有分析任务</div>
           ) : (
-            items.map((run) => (
+            items.filter((run) => `${docs.find((d) => d.id === run.document_id)?.title || ""} ${run.id} ${run.status}`.toLocaleLowerCase().includes(query.toLocaleLowerCase())).map((run) => (
               <button
                 key={run.id}
                 className={`job-list-item ${selected?.id === run.id ? "active" : ""}`}
@@ -306,16 +352,17 @@ export default function Jobs({ initialId, navigate }: Props) {
           {!selected ? (
             <Empty
               icon={FileSearch}
-              title="让全文成为可用的参考"
-              description="选择任务查看运行进度、原文证据和提取候选。"
+              title="开始第一次全文分析"
+              description="配置模型后，从全文库选择作品创建任务。"
               action={
-                <button
+                <div className="empty-actions"><button
                   className="button primary"
                   onClick={() => navigate("documents")}
                 >
                   前往全文
                   <ArrowRight size={15} />
                 </button>
+                <button className="text-button" onClick={() => navigate("models")}><SlidersHorizontal size={15} />配置本地模型或 API</button></div>
               }
             />
           ) : (
@@ -329,7 +376,7 @@ export default function Jobs({ initialId, navigate }: Props) {
                     <span>
                       {selected.workflow_id} · v{selected.workflow_version}
                     </span>
-                    <span>{selected.profile_id}</span>
+                    <span>{modelSnapshot?.model || selected.profile_id}</span>
                   </div>
                 </div>
                 <div className="inline-actions">
@@ -347,7 +394,7 @@ export default function Jobs({ initialId, navigate }: Props) {
                     ) ? (
                     <button
                       className="button primary"
-                      onClick={() => void action("resume")}
+                      onClick={startResume}
                       disabled={!!busy}
                     >
                       <Play size={15} />
@@ -363,6 +410,7 @@ export default function Jobs({ initialId, navigate }: Props) {
                   </button>
                 </div>
               </div>
+              {modelSnapshot && <div className="job-destination"><ShieldCheck size={14} /><span>{remote ? "远程 API" : "本机模型"}</span><strong>{destination}</strong><button className="text-button" onClick={() => navigate("models")}>模型设置</button></div>}
               <div className="job-progress-section">
                 <Progress
                   completed={selected.completed}
@@ -720,6 +768,22 @@ export default function Jobs({ initialId, navigate }: Props) {
               确认入库
             </button>
           </div>
+        </Modal>
+      )}
+      {resumeOpen && selected && (
+        <Modal title="继续远程分析" onClose={() => setResumeOpen(false)} busy={busy === "resume"}>
+          <div className="modal-body">
+            <div className="model-destination remote"><div><ShieldCheck size={18} /><strong>使用此任务固定的模型配置</strong></div><dl><dt>目标地址</dt><dd>{destination}</dd><dt>模型</dt><dd>{modelSnapshot?.model || selected.profile_id}</dd></dl><p>继续运行会向此服务发送尚未完成的全文分块、分析提示词与 Skill，由该 API 提供商处理。</p><label className="check-line"><input type="checkbox" checked={remoteConsent} onChange={(e) => setRemoteConsent(e.target.checked)} />我确认本次继续运行可以向上述服务发送内容</label></div>
+            <Notice error>{error}</Notice>
+            {busy === "resume" && <Busy label="正在恢复远程分析" />}
+          </div>
+          <div className="modal-footer"><button className="button secondary" onClick={() => setResumeOpen(false)} disabled={!!busy}>取消</button><button className="button primary" disabled={!remoteConsent || !!busy} onClick={() => void action("resume")}>确认并继续</button></div>
+        </Modal>
+      )}
+      {pendingId && (
+        <Modal title="有未保存的审核修改" onClose={() => setPendingId(null)} busy={busy === "save"}>
+          <div className="modal-body"><p>切换任务前，请保存或放弃当前修改。</p><Notice error>{error}</Notice>{busy === "save" && <Busy label="正在保存审核修改" />}</div>
+          <div className="modal-footer"><button className="button secondary" onClick={() => setPendingId(null)} disabled={!!busy}>继续审核</button><button className="button danger" disabled={!!busy} onClick={() => { const id = pendingId; setPendingId(null); void choose(id, true); }}>放弃并切换</button><button className="button primary" disabled={!!busy} onClick={() => void save(pendingId)}>保存并切换</button></div>
         </Modal>
       )}
       {evidence && (

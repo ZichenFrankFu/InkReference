@@ -88,6 +88,7 @@ try {
         '--add-data', ($frontendDirectory + ':frontend/dist'),
         '--collect-all', 'inkreference', '--collect-all', 'webview',
         '--collect-all', 'pythonnet', '--collect-all', 'clr_loader',
+        '--collect-all', 'keyring', '--hidden-import', 'keyring.backends.Windows',
         '--collect-all', 'langgraph', '--collect-all', 'langgraph.checkpoint.sqlite',
         '--hidden-import', 'inkreference.api', '--hidden-import', 'uvicorn.logging',
         '--hidden-import', 'uvicorn.loops.asyncio', '--hidden-import', 'uvicorn.lifespan.on',

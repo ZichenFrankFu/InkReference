@@ -70,3 +70,13 @@ conda run --no-capture-output -n InkReference python scripts/verify_mineru.py
 ```
 
 If MinerU runs in a separate environment, set `INKREFERENCE_MINERU_PYTHON` to its Python executable and ensure ReportLab is available in the environment running this verification script (MinerU's installed dependencies include it). This generates invented pages in a temporary directory, makes no model API calls and requests no inference weights.
+
+## Model configuration and local privacy revision
+
+- Python 3.12: **314 passed, 1 skipped**. The skipped test writes, reads and deletes a newly generated credential through actual Windows Credential Locker and runs on Windows CI. Linux checks exercise a synthetic vault plus fail-closed native-backend selection.
+- Regression coverage includes literal loopback versus HTTPS targets, endpoint-bound credentials, safe draft tests and model discovery, no secret in application databases/usage/backup, credential clearing, blocked redirects/environment proxies, Host/Origin/Fetch Metadata isolation, no-cache/CSP and validation errors that omit rejected secret inputs.
+- A real API race test changes the endpoint or model in another simulated tab after consent was shown. The stale target fingerprint produces 409, zero model requests and zero new tasks. Missing remote confirmation produces 428. Resume uses the immutable target snapshot and asks again.
+- LangGraph execution explicitly disables LangSmith tracing even when inherited tracing environment variables are enabled. The regression checks that model execution sees tracing disabled and creates no trace posts.
+- Headless Chromium against the production frontend and real FastAPI/SQLite services passed **13 checks**: CSV import; unsaved draft test; explicit model discovery; GUI model save; provider HTTP/usage; document import; LangGraph/evidence/approval; workflow canvas; real MinerU conversion; TXT download; backup; 390px backup and model-settings layouts. No page errors. The local HTTP model returns clearly synthetic content; no commercial model was called.
+- Separate mocked-interface browser checks passed 10 model-settings cases and 9 navigation/consent/draft cases. These distinguish GUI behavior from backend security enforcement.
+- Windows packaging includes the explicit native keyring backend. Its CI smoke additionally saves and deletes an invented credential through the frozen EXE API. Native desktop interaction, real commercial-model quality and OCR remain separate acceptance items.

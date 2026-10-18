@@ -35,6 +35,13 @@ class NewRun(BaseModel):
     workflow_id: str = "default"
     workflow_version: str = "1.0.0"
     start: bool = True
+    remote_consent: bool = False
+    expected_model_fingerprint: str | None = Field(default=None, min_length=64, max_length=64)
+
+
+class ConnectionConsent(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    remote_consent: bool = False
 
 
 class Revision(BaseModel):
@@ -166,22 +173,22 @@ def install_studio_routes(application, runtime):
     @router.post("/jobs", status_code=201)
     def create_job(body: NewRun):
         with runtime.studio.lock:
-            result = runtime.studio.runner.create_run(body.document_id, body.version_id, workflow_id=body.workflow_id, workflow_version=body.workflow_version, profile_id=body.profile_id)
-            return runtime.studio.runner.start(result["id"]) if body.start else result
+            result = runtime.studio.runner.create_run(body.document_id, body.version_id, workflow_id=body.workflow_id, workflow_version=body.workflow_version, profile_id=body.profile_id, remote_consent=body.remote_consent, expected_model_fingerprint=body.expected_model_fingerprint)
+            return runtime.studio.runner.start(result["id"], remote_consent=body.remote_consent) if body.start else result
 
     @router.get("/jobs/{run_id}")
     def job(run_id: str):
         return runtime.studio.runner.get_run(run_id)
 
     @router.post("/jobs/{run_id}/resume")
-    def resume_job(run_id: str):
+    def resume_job(run_id: str, body: ConnectionConsent = ConnectionConsent()):
         with runtime.studio.lock:
-            return runtime.studio.runner.resume(run_id)
+            return runtime.studio.runner.resume(run_id, remote_consent=body.remote_consent)
 
     @router.post("/jobs/{run_id}/start")
-    def start_job(run_id: str):
+    def start_job(run_id: str, body: ConnectionConsent = ConnectionConsent()):
         with runtime.studio.lock:
-            return runtime.studio.runner.start(run_id)
+            return runtime.studio.runner.start(run_id, remote_consent=body.remote_consent)
 
     @router.post("/jobs/{run_id}/cancel")
     def cancel_job(run_id: str):
@@ -201,6 +208,20 @@ def install_studio_routes(application, runtime):
     def models():
         return {"items": runtime.studio.models.list_profiles()}
 
+    @router.get("/models/security")
+    def model_security():
+        return runtime.studio.models.security_status()
+
+    @router.post("/models/test-draft")
+    def test_model_draft(body: dict[str, Any]):
+        with runtime.studio.lock:
+            return runtime.studio.models.test_draft(body)
+
+    @router.post("/models/discover")
+    def discover_models(body: dict[str, Any]):
+        with runtime.studio.lock:
+            return runtime.studio.models.discover_models(body)
+
     @router.post("/models", status_code=201)
     def new_model(body: dict[str, Any]):
         with runtime.studio.lock:
@@ -216,10 +237,15 @@ def install_studio_routes(application, runtime):
         with runtime.studio.lock:
             return runtime.studio.models.delete_profile(profile_id)
 
-    @router.post("/models/{profile_id}/test")
-    def test_model(profile_id: str):
+    @router.delete("/models/{profile_id}/credentials")
+    def clear_model_credentials(profile_id: str):
         with runtime.studio.lock:
-            return runtime.studio.models.test_profile(profile_id)
+            return runtime.studio.models.clear_credentials(profile_id)
+
+    @router.post("/models/{profile_id}/test")
+    def test_model(profile_id: str, body: ConnectionConsent = ConnectionConsent()):
+        with runtime.studio.lock:
+            return runtime.studio.models.test_profile(profile_id, allow_remote=body.remote_consent)
 
     @router.get("/usage")
     def usage(run_id: str | None = None):

@@ -36,6 +36,7 @@ Frontend runtime license notices are retained in `third_party/frontend-LICENSES.
 | React Flow | Workflow canvas navigation, node dragging and layout | MIT, <https://github.com/xyflow/xyflow> |
 | pywebview | Optional native desktop window | BSD-3-Clause, <https://github.com/r0x0r/pywebview> |
 | HTTPX | Model protocols, timeouts and test transports | BSD-3-Clause, <https://github.com/encode/httpx> |
+| keyring | Explicit native OS credential backends; no plaintext or third-party fallback | MIT, <https://github.com/jaraco/keyring> |
 | markdownify | EPUB HTML to Markdown | MIT, <https://github.com/matthewwithanm/python-markdownify> |
 | markdown-it-py | Markdown token parsing for plain TXT output | MIT, <https://github.com/executablebooks/markdown-it-py> |
 | MinerU 4.0.12 | Optional PDF parsing SDK, isolated trusted Python process | Apache-2.0 **with additional upstream terms**, <https://github.com/opendatalab/MinerU/blob/master/LICENSE.md> |

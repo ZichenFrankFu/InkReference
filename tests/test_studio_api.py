@@ -29,7 +29,7 @@ EXTRACTION = {
 
 @pytest.fixture
 def client(tmp_path):
-    with TestClient(create_app(tmp_path / "data", tmp_path / "no-dist")) as session:
+    with TestClient(create_app(tmp_path / "data", tmp_path / "no-dist"), base_url="http://127.0.0.1") as session:
         yield session
 
 
@@ -114,6 +114,68 @@ def test_model_session_secret_never_returned_and_connection_test_is_real_transpo
     assert "studio-session-secret-888" not in usage_response.text
 
 
+def test_model_draft_discovery_and_credential_clear_are_gui_ready(client):
+    requests = []
+    def handle(request):
+        requests.append(request)
+        if request.method == "GET":
+            return httpx.Response(200, json={"data": [{"id": "synthetic-discovered"}]})
+        return httpx.Response(200, json={"choices": [{"message": {"content": "OK"}, "finish_reason": "stop"}]})
+    client.app.state.runtime.studio.models.transport = httpx.MockTransport(handle)
+    body = {"name": "草稿", "provider": "openai_compatible", "connection_mode": "local", "base_url": "http://127.0.0.1:1234/v1", "model": "synthetic", "api_key": "draft-private-918"}
+    assert "vault_available" in client.get(PREFIX + "/models/security").json()
+    assert client.post(PREFIX + "/models/test-draft", json=body).json()["ok"] is True
+    assert items(client.get(PREFIX + "/models")) == []
+    discovered = client.post(PREFIX + "/models/discover", json={**body, "model": ""})
+    assert discovered.status_code == 200 and discovered.json()["models"] == [{"id": "synthetic-discovered"}]
+    assert all(request.headers.get("Authorization") == "Bearer draft-private-918" for request in requests)
+    saved = create_model(client, api_key="clear-private-225")
+    cleared = client.delete(PREFIX + f"/models/{saved['id']}/credentials")
+    assert cleared.status_code == 200 and not cleared.json()["key_available"]
+
+
+def test_remote_models_and_jobs_require_separate_explicit_consent(client):
+    requests = []
+    def handle(request):
+        requests.append(request)
+        return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(EXTRACTION, ensure_ascii=False)}, "finish_reason": "stop"}]})
+    client.app.state.runtime.studio.models.transport = httpx.MockTransport(handle)
+    profile = create_model(client, base_url="https://provider.example/v1", connection_mode="remote", api_key="remote-private-113")
+    path = PREFIX + f"/models/{profile['id']}/test"
+    assert client.post(path, json={}).status_code == 428
+    assert not requests
+    document = upload_document(client)
+    body = {"document_id": document["id"], "version_id": document["latest_version_id"], "profile_id": profile["id"], "start": False}
+    assert client.post(PREFIX + "/jobs", json=body).status_code == 428
+    assert not items(client.get(PREFIX + "/jobs"))
+    assert client.post(PREFIX + "/jobs", json={**body, "remote_consent": True}).status_code == 428
+    created = client.post(PREFIX + "/jobs", json={**body, "remote_consent": True, "expected_model_fingerprint": profile["target_fingerprint"]})
+    assert created.status_code == 201
+    job_path = PREFIX + f"/jobs/{created.json()['id']}"
+    assert client.post(job_path + "/start", json={}).status_code == 428
+    assert client.post(job_path + "/cancel", json={}).status_code == 200
+    assert client.post(job_path + "/resume", json={}).status_code == 428
+    assert not requests
+    assert client.post(job_path + "/resume", json={"remote_consent": True}).status_code == 200
+    assert wait_for_job(client, created.json()["id"])["status"] == "needs_review"
+    assert len(requests) == 1
+
+
+@pytest.mark.parametrize("changed", [{"base_url": "https://changed-without-reconfirm.example/v1"}, {"model": "changed-model"}], ids=["endpoint", "model"])
+def test_remote_confirmation_is_bound_to_displayed_target_and_model(client, changed):
+    requests = []
+    client.app.state.runtime.studio.models.transport = httpx.MockTransport(lambda request: requests.append(request) or httpx.Response(500))
+    shown = create_model(client, base_url="https://shown-provider.example/v1", connection_mode="remote")
+    document = upload_document(client)
+    # Another tab changes the profile after this tab displays the consent panel.
+    updated = client.put(PREFIX + f"/models/{shown['id']}", json=changed)
+    assert updated.status_code == 200
+    request_body = {"document_id": document["id"], "version_id": document["latest_version_id"], "profile_id": shown["id"], "remote_consent": True, "expected_model_fingerprint": shown["target_fingerprint"]}
+    response = client.post(PREFIX + "/jobs", json=request_body)
+    assert response.status_code == 409
+    assert not requests and items(client.get(PREFIX + "/jobs")) == []
+
+
 def test_builtin_definitions_and_json_skill_upload(client):
     skills = items(client.get(PREFIX + "/skills"))
     workflows = items(client.get(PREFIX + "/workflows"))
@@ -196,7 +258,7 @@ def test_project_backup_restores_document_custom_skill_workflow_layout_and_profi
     assert restored.json()["restored"] is True
     assert restored.json()["restart_required"] is True
     destination = restored.json()["data_dir"]
-    with TestClient(create_app(destination, tmp_path / "no-restored-dist")) as reopened:
+    with TestClient(create_app(destination, tmp_path / "no-restored-dist"), base_url="http://127.0.0.1") as reopened:
         assert items(reopened.get(PREFIX + "/documents"))[0]["id"] == document["id"]
         assert reopened.get(PREFIX + f"/documents/{document['id']}/original/download").content == SOURCE.encode("utf-8-sig")
         assert any(item["id"] == "backup-skill" for item in items(reopened.get(PREFIX + "/skills")))

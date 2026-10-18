@@ -43,7 +43,7 @@ def multipart_fixture():
 @pytest.fixture
 def client(tmp_path):
     application = create_app(data_dir=tmp_path / "data", static_dir=tmp_path / "absent-dist")
-    with TestClient(application) as session:
+    with TestClient(application, base_url="http://127.0.0.1") as session:
         yield session
 
 
@@ -208,14 +208,15 @@ def test_mutations_reject_foreign_browser_origin(client):
     for origin in ["https://malicious.example", "null", "http://testserver.attacker.example", "http://localhost:5173/path", "http://localhost:bad"]:
         assert client.post("/api/records/works", json=payload, headers={"Origin": origin}).status_code == 403
     assert client.get("/api/stats").json()["works"] == 0
-    assert client.post("/api/records/works", json=payload, headers={"Origin": "http://localhost:5173"}).status_code == 201
-    assert client.patch("/api/records/works/W001", json={"values": {"作者": "同源修改"}, "expected_revision": 1}, headers={"Origin": "http://testserver"}).status_code == 200
+    assert client.post("/api/records/works", json=payload, headers={"Origin": "http://localhost:5173"}).status_code == 403
+    assert client.post("/api/records/works", json=payload).status_code == 201
+    assert client.patch("/api/records/works/W001", json={"values": {"作者": "同源修改"}, "expected_revision": 1}, headers={"Origin": "http://127.0.0.1"}).status_code == 200
 
 
 def test_static_build_is_served_without_exposing_api_typos(tmp_path):
     dist = tmp_path / "dist"
     dist.mkdir()
     (dist / "index.html").write_text("<html>synthetic frontend</html>", encoding="utf-8")
-    with TestClient(create_app(tmp_path / "data", dist)) as session:
+    with TestClient(create_app(tmp_path / "data", dist), base_url="http://127.0.0.1") as session:
         assert "synthetic frontend" in session.get("/").text
         assert session.get("/api/misspelled").status_code == 404

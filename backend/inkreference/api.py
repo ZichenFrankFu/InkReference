@@ -19,10 +19,10 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Literal
-from urllib.parse import urlsplit
 
 from fastapi import FastAPI, File, Query, Request, UploadFile
 from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr
@@ -32,6 +32,7 @@ from . import __version__
 from .csvio import commit_import, export_table, export_zip, parse_files, preview_import
 from .database import DataError, DataStore
 from .workspace_lock import workspace_lock
+from .local_security import SECURITY_HEADERS, allowed_origin, trusted_host
 
 TableName = Literal["works", "characters", "cliches"]
 MAX_FILE_BYTES = 32 * 1024 * 1024
@@ -143,21 +144,7 @@ def _save_sources(runtime: Runtime, batch_id: str, files: list[tuple[str, bytes]
 
 
 def _origin_allowed(request: Request, origin: str) -> bool:
-    """Protect mutating browser requests while retaining the local Vite dev UI."""
-    try:
-        parsed = urlsplit(origin)
-        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-            return False
-        if parsed.username or parsed.password or parsed.path or parsed.query or parsed.fragment:
-            return False
-        own = urlsplit(str(request.base_url))
-        port = parsed.port or (443 if parsed.scheme == "https" else 80)
-        own_port = own.port or (443 if own.scheme == "https" else 80)
-        if (parsed.scheme, parsed.hostname, port) == (own.scheme, own.hostname, own_port):
-            return True
-        return parsed.scheme == "http" and parsed.hostname in {"localhost", "127.0.0.1", "::1"} and port == 5173
-    except ValueError:
-        return False
+    return allowed_origin(origin, str(request.base_url).rstrip("/"))
 
 
 def create_app(data_dir: str | Path | None = None, static_dir: str | Path | None = None) -> FastAPI:
@@ -179,19 +166,35 @@ def create_app(data_dir: str | Path | None = None, static_dir: str | Path | None
                     await run_in_threadpool(runtime._studio.runner.shutdown)
                 runtime.pending.clear()
 
-    application = FastAPI(title="InkReference", version=__version__, lifespan=lifespan)
+    application = FastAPI(title="InkReference", version=__version__, lifespan=lifespan, docs_url=None, redoc_url=None)
     application.state.runtime = runtime
 
     @application.exception_handler(DataError)
     async def handle_data_error(_: Request, exc: DataError):
         return JSONResponse(status_code=exc.status_code, content={"detail": jsonable_encoder(exc.detail)})
 
+    @application.exception_handler(RequestValidationError)
+    async def handle_validation_error(_: Request, exc: RequestValidationError):
+        # FastAPI's default error includes rejected input, which can be a key.
+        errors = [{"loc": item["loc"], "msg": item["msg"], "type": item["type"]} for item in exc.errors()]
+        return JSONResponse(status_code=422, content={"detail": jsonable_encoder(errors)})
+
     @application.middleware("http")
     async def local_mutation_guard(request: Request, call_next):
-        if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
-            origin = request.headers.get("origin")
-            if origin is not None and not _origin_allowed(request, origin):
-                return JSONResponse(status_code=403, content={"detail": "仅允许当前应用或本机开发界面修改数据。"})
+        def protected(response):
+            response.headers.update(SECURITY_HEADERS)
+            if request.url.path.startswith("/api/") or "text/html" in response.headers.get("content-type", ""):
+                response.headers["Cache-Control"] = "no-store"
+            return response
+
+        hosts = request.headers.getlist("host")
+        if len(hosts) != 1 or not trusted_host(hosts[0]):
+            return protected(JSONResponse(status_code=400, content={"detail": "仅允许本机工作区地址。"}))
+        origin = request.headers.get("origin")
+        if origin is not None and not _origin_allowed(request, origin):
+            return protected(JSONResponse(status_code=403, content={"detail": "已阻止来自其他网站的访问。"}))
+        if request.headers.get("sec-fetch-site") == "cross-site":
+            return protected(JSONResponse(status_code=403, content={"detail": "已阻止跨站访问本机工作区。"}))
         # Avoid accepting an obviously oversized multipart request before parsing.
         # Actual per-file and batch byte limits are checked while reading uploads.
         if request.url.path == "/api/import/preview":
@@ -199,10 +202,10 @@ def create_app(data_dir: str | Path | None = None, static_dir: str | Path | None
             if content_length:
                 try:
                     if int(content_length) > MAX_BATCH_BYTES + 1024 * 1024:
-                        return JSONResponse(status_code=413, content={"detail": "一次导入的 CSV 总大小不能超过 128 MB。"})
+                        return protected(JSONResponse(status_code=413, content={"detail": "一次导入的 CSV 总大小不能超过 128 MB。"}))
                 except ValueError:
-                    return JSONResponse(status_code=400, content={"detail": "无效的请求长度。"})
-        return await call_next(request)
+                    return protected(JSONResponse(status_code=400, content={"detail": "无效的请求长度。"}))
+        return protected(await call_next(request))
 
     @application.get("/api/health")
     def health():
@@ -344,7 +347,7 @@ def create_app(data_dir: str | Path | None = None, static_dir: str | Path | None
             <body style="font-family:system-ui;max-width:720px;margin:72px auto;padding:24px">
             <h1>InkReference 后端已启动</h1><p>请先在项目的 frontend 目录构建界面：</p>
             <pre>npm install\nnpm run build</pre><p>构建完成后重启服务。开发时可运行 npm run dev。</p>
-            <p><a href="/docs">API 文档</a> · <a href="/api/health">服务状态</a></p></body></html>"""
+            <p><a href="/api/health">服务状态</a></p></body></html>"""
 
     return application
 

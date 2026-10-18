@@ -1,13 +1,15 @@
 """Configured model transports and an honest, durable per-request usage ledger.
 
-No endpoint is contacted implicitly. API keys live in environment variables or
-this service's memory; neither profile snapshots nor usage rows contain keys or
-prompt/response text. HTTPX supplies transport, timeouts and mock injection.
+No endpoint is contacted implicitly. API keys live in environment variables,
+this service's memory or an explicitly selected native OS credential store;
+profile snapshots and usage rows contain no keys or prompt/response text.
+HTTPX supplies transport, timeouts and mock injection.
 """
 
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import math
 import os
@@ -26,13 +28,15 @@ from urllib.parse import urlsplit
 import httpx
 
 from .database import DataError
+from .local_security import target_fingerprint
+from .credentials import CredentialVault
 
 _CONFIG_FIELDS = {
     "id", "name", "provider", "base_url", "model", "context_window",
     "max_output_tokens", "timeout_seconds", "key_env", "input_price_per_million",
-    "output_price_per_million", "currency", "max_tokens_parameter",
+    "output_price_per_million", "currency", "max_tokens_parameter", "connection_mode", "credential_mode",
 }
-_PUBLIC_FIELDS = {"has_session_key", "key_available", "updated_at"}
+_PUBLIC_FIELDS = {"has_session_key", "has_vault_key", "key_available", "credential_status", "updated_at", "target_fingerprint"}
 
 
 def _now() -> str:
@@ -61,6 +65,25 @@ def _text(value: Any, name: str, *, maximum: int = 500, empty: bool = False) -> 
     return value.strip()
 
 
+def _is_loopback(host: str) -> bool:
+    if host == "localhost":
+        return True
+    try:
+        address = ipaddress.ip_address(host)
+        # Python versions differ on IPv4-mapped IPv6 classification. Keep the
+        # accepted spelling small and consistent across supported versions.
+        return "%" not in host and not getattr(address, "ipv4_mapped", None) and address.is_loopback
+    except ValueError:
+        return False
+
+
+def _endpoint_binding(config: dict[str, Any]) -> str:
+    parsed = urlsplit(config["base_url"])
+    identity = [config["provider"], config["connection_mode"], parsed.scheme.lower(),
+                (parsed.hostname or "").lower(), parsed.port or (443 if parsed.scheme == "https" else 80), parsed.path.rstrip("/")]
+    return hashlib.sha256(_json(identity).encode("utf-8")).hexdigest()
+
+
 def _validate_profile(values: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(values, dict) or set(values) - _CONFIG_FIELDS:
         raise DataError(422, "模型配置包含未知字段")
@@ -71,15 +94,31 @@ def _validate_profile(values: dict[str, Any]) -> dict[str, Any]:
     base = _text(values.get("base_url"), "模型服务地址", maximum=2048).rstrip("/")
     try:
         parsed = urlsplit(base)
-        if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username is not None or parsed.password is not None or parsed.query or parsed.fragment:
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username is not None or parsed.password is not None or parsed.query or parsed.fragment or "\\" in base or any(char.isspace() for char in base):
             raise ValueError
         parsed.port
     except ValueError:
         # Never interpolate an untrusted URL, which might contain a password.
         raise DataError(422, "服务地址必须为 HTTP(S)，且不能包含账号、密码、查询参数或片段") from None
+    # Old profiles/snapshots receive a conservative classification, never a
+    # silent exemption from the new transport rules.
+    connection_mode = values.get("connection_mode", "local" if _is_loopback(parsed.hostname.lower()) else "remote")
+    if not isinstance(connection_mode, str) or connection_mode not in {"local", "remote"}:
+        raise DataError(422, "连接类型必须为 local 或 remote")
+    if connection_mode == "local" and not _is_loopback(parsed.hostname.lower()):
+        raise DataError(422, "本地模型地址仅允许 localhost、127.0.0.0/8 或 ::1")
+    if connection_mode == "remote" and parsed.scheme != "https":
+        raise DataError(422, "远程 API 必须使用 HTTPS，请修改服务地址")
     key_env = _text(values.get("key_env", ""), "密钥环境变量", maximum=200, empty=True)
     if key_env and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key_env):
         raise DataError(422, "密钥环境变量名称格式无效")
+    credential_mode = values.get("credential_mode", "environment" if key_env else "session")
+    if not isinstance(credential_mode, str) or credential_mode not in {"session", "vault", "environment"}:
+        raise DataError(422, "密钥保存方式必须为 session、vault 或 environment")
+    if credential_mode == "environment" and not key_env:
+        raise DataError(422, "请填写密钥环境变量名称")
+    if credential_mode != "environment":
+        key_env = ""
     context_window = _integer(values.get("context_window", 8192), "上下文窗口", 128, 10_000_000)
     max_output = _integer(values.get("max_output_tokens", 2048), "最大输出 token", 1, context_window - 1)
     prices = {}
@@ -98,6 +137,7 @@ def _validate_profile(values: dict[str, Any]) -> dict[str, Any]:
         "id": _text(values.get("id"), "模型配置 ID", maximum=100),
         "name": _text(values.get("name", model), "配置名称", maximum=200),
         "provider": provider, "base_url": base, "model": model,
+        "connection_mode": connection_mode, "credential_mode": credential_mode,
         "context_window": context_window, "max_output_tokens": max_output,
         "timeout_seconds": _number(values.get("timeout_seconds", 180), "超时秒数", 1, 3600),
         "key_env": key_env, "currency": currency,
@@ -169,13 +209,15 @@ class ModelService:
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.db_path = self.data_dir / "workbench.sqlite3"
         self.transport = transport
-        self._session_keys: dict[str, str] = {}
+        self.vault = CredentialVault(self.data_dir)
+        self._session_keys: dict[str, tuple[str, str]] = {}
         self._lock = threading.RLock()
         with self._connect() as connection:
             connection.execute("PRAGMA journal_mode=WAL")
             connection.execute("CREATE TABLE IF NOT EXISTS model_profiles (id TEXT PRIMARY KEY, config_json TEXT NOT NULL, updated_at TEXT NOT NULL)")
             connection.execute("CREATE TABLE IF NOT EXISTS usage_calls (id TEXT PRIMARY KEY, run_id TEXT NOT NULL, profile_id TEXT NOT NULL, started_at TEXT NOT NULL, record_json TEXT NOT NULL)")
             connection.execute("CREATE INDEX IF NOT EXISTS usage_calls_run ON usage_calls(run_id,started_at)")
+            connection.execute("CREATE TABLE IF NOT EXISTS model_vault_entries (profile_id TEXT PRIMARY KEY, binding TEXT NOT NULL, stored_at TEXT NOT NULL)")
             # A process that died after recording a request cannot know whether
             # the remote service completed or charged it. Keep this visible.
             # Do not rewrite pending rows here: another ModelService in the same
@@ -195,18 +237,42 @@ class ModelService:
         finally:
             connection.close()
 
+    @staticmethod
+    def _legacy_defaults(config: dict[str, Any]) -> dict[str, Any]:
+        config = dict(config)
+        host = (urlsplit(config["base_url"]).hostname or "").lower()
+        config.setdefault("connection_mode", "local" if _is_loopback(host) else "remote")
+        config.setdefault("credential_mode", "environment" if config.get("key_env") else "session")
+        return config
+
     def _config(self, profile_id: str) -> dict[str, Any]:
         with self._connect() as connection:
             row = connection.execute("SELECT config_json FROM model_profiles WHERE id=?", (profile_id,)).fetchone()
         if row is None:
             raise DataError(404, "模型配置不存在，请先创建本地或 API 模型配置")
-        return json.loads(row["config_json"])
+        return self._legacy_defaults(json.loads(row["config_json"]))
+
+    def security_status(self) -> dict[str, Any]:
+        return {**self.vault.status(), "credential_modes": ["session", "vault", "environment"]}
+
+    def _vault_binding(self, profile_id: str) -> str | None:
+        with self._connect() as connection:
+            row = connection.execute("SELECT binding FROM model_vault_entries WHERE profile_id=?", (profile_id,)).fetchone()
+        return row["binding"] if row else None
 
     def _public(self, config: dict[str, Any], updated_at: str | None = None) -> dict[str, Any]:
-        identifier = config["id"]
+        config = self._legacy_defaults(config)
+        identifier, binding = config["id"], _endpoint_binding(config)
         with self._lock:
-            has_session = bool(self._session_keys.get(identifier))
-        result = {**config, "has_session_key": has_session, "key_available": has_session or bool(config["key_env"] and os.environ.get(config["key_env"]))}
+            entry = self._session_keys.get(identifier)
+            has_session = bool(entry and entry[0] == binding)
+        has_vault = self._vault_binding(identifier) == binding
+        mode = config["credential_mode"]
+        vault_available = self.vault.status()["vault_available"] if mode == "vault" else False
+        available = has_session if mode == "session" else bool(config["key_env"] and os.environ.get(config["key_env"])) if mode == "environment" else has_vault and vault_available
+        status = "available" if available else "vault_unavailable" if mode == "vault" and not vault_available else "missing"
+        result = {**config, "target_fingerprint": target_fingerprint(config), "has_session_key": has_session, "has_vault_key": has_vault,
+                  "key_available": available, "credential_status": status}
         if updated_at is not None:
             result["updated_at"] = updated_at
         return result
@@ -219,69 +285,130 @@ class ModelService:
     def get_profile(self, profile_id: str) -> dict[str, Any]:
         return self._public(self._config(profile_id))
 
+    @staticmethod
+    def _validate_key(api_key: Any) -> str | None:
+        if api_key is not None and (not isinstance(api_key, str) or len(api_key) > 4096 or any(ord(char) < 32 or ord(char) == 127 for char in api_key)):
+            raise DataError(422, "API Key 格式无效")
+        return api_key
+
+    def _forget_vault(self, profile_id: str) -> None:
+        binding = self._vault_binding(profile_id)
+        if binding is not None:
+            self.vault.delete(profile_id, binding)
+            with self._connect() as connection:
+                connection.execute("DELETE FROM model_vault_entries WHERE profile_id=?", (profile_id,))
+
     def save_profile(self, values: dict[str, Any], profile_id: str | None = None) -> dict[str, Any]:
         if not isinstance(values, dict) or set(values) - (_CONFIG_FIELDS | _PUBLIC_FIELDS | {"api_key"}):
             raise DataError(422, "模型配置包含未知字段")
         values = dict(values)
         if profile_id is not None and "id" in values and values["id"] != profile_id:
             raise DataError(422, "不能更改已有模型配置 ID")
-        identifier = profile_id or values.get("id") or uuid.uuid4().hex
-        identifier = _text(identifier, "模型配置 ID", maximum=100)
-        previous: dict[str, Any] = {}
-        with self._connect() as connection:
-            row = connection.execute("SELECT config_json FROM model_profiles WHERE id=?", (identifier,)).fetchone()
-            if row:
-                previous = json.loads(row["config_json"])
-        api_key = values.pop("api_key", None)
-        if api_key is not None and (not isinstance(api_key, str) or len(api_key) > 4096 or any(ord(char) < 32 for char in api_key)):
-            raise DataError(422, "本次会话 API Key 格式无效")
-        config = _validate_profile({**previous, **{key: value for key, value in values.items() if key in _CONFIG_FIELDS}, "id": identifier})
-        updated = _now()
+        identifier = _text(profile_id or values.get("id") or uuid.uuid4().hex, "模型配置 ID", maximum=100)
+        api_key = self._validate_key(values.pop("api_key", None))
         with self._lock:
+            previous: dict[str, Any] = {}
+            with self._connect() as connection:
+                row = connection.execute("SELECT config_json FROM model_profiles WHERE id=?", (identifier,)).fetchone()
+                if row:
+                    previous = self._legacy_defaults(json.loads(row["config_json"]))
+            merged = {**previous, **{key: value for key, value in values.items() if key in _CONFIG_FIELDS}, "id": identifier}
+            # An inherited environment reference is never silently reassigned to
+            # another endpoint. The GUI clears explicitly submitted references
+            # as well; a new explicit reference counts as a new user setting.
+            probe = {**merged, "credential_mode": "session", "key_env": ""}
+            probe = _validate_profile(probe)
+            endpoint_changed = bool(previous and _endpoint_binding(previous) != _endpoint_binding(probe))
+            if endpoint_changed and "key_env" not in values:
+                merged["key_env"] = ""
+                if merged.get("credential_mode") == "environment":
+                    merged["credential_mode"] = "session"
+            config = _validate_profile(merged)
+            if api_key and config["credential_mode"] == "environment":
+                raise DataError(422, "环境变量模式请仅填写变量名；API Key 可使用本次会话或系统凭据库")
+            mode_changed = bool(previous and previous["credential_mode"] != config["credential_mode"])
+            if config["credential_mode"] == "vault" and not self.vault.status()["vault_available"]:
+                raise DataError(503, "系统凭据库不可用，请使用本次会话或环境变量")
+            if endpoint_changed or mode_changed or api_key is not None:
+                self._forget_vault(identifier)
+                self._session_keys.pop(identifier, None)
+            binding = _endpoint_binding(config)
+            if api_key:
+                if config["credential_mode"] == "vault":
+                    self.vault.set(identifier, binding, api_key)
+                    with self._connect() as connection:
+                        connection.execute("INSERT OR REPLACE INTO model_vault_entries VALUES (?,?,?)", (identifier, binding, _now()))
+                else:
+                    self._session_keys[identifier] = (binding, api_key)
+            updated = _now()
             with self._connect() as connection:
                 connection.execute("INSERT INTO model_profiles VALUES (?,?,?) ON CONFLICT(id) DO UPDATE SET config_json=excluded.config_json,updated_at=excluded.updated_at", (identifier, _json(config), updated))
-            if api_key is not None:
-                if api_key:
-                    self._session_keys[identifier] = api_key
-                else:
-                    self._session_keys.pop(identifier, None)
         return self._public(config, updated)
+
+    def clear_credentials(self, profile_id: str) -> dict[str, Any]:
+        with self._lock:
+            config = self._config(profile_id)
+            self._forget_vault(profile_id)
+            self._session_keys.pop(profile_id, None)
+            config.update(key_env="", credential_mode="session")
+            with self._connect() as connection:
+                connection.execute("UPDATE model_profiles SET config_json=?,updated_at=? WHERE id=?", (_json(config), _now(), profile_id))
+        return self._public(config)
 
     def delete_profile(self, profile_id: str) -> dict[str, int]:
         with self._lock:
+            self._config(profile_id)
+            self._forget_vault(profile_id)
             with self._connect() as connection:
-                cursor = connection.execute("DELETE FROM model_profiles WHERE id=?", (profile_id,))
-                if not cursor.rowcount:
-                    raise DataError(404, "模型配置不存在")
+                connection.execute("DELETE FROM model_profiles WHERE id=?", (profile_id,))
             self._session_keys.pop(profile_id, None)
         return {"deleted": 1}
 
     def snapshot(self, profile_id: str) -> dict[str, Any]:
-        return self._config(profile_id)
+        return _validate_profile(self._config(profile_id))
 
     @staticmethod
     def estimate_messages(messages: list[dict[str, str]]) -> dict[str, Any]:
         return estimate_messages(messages)
 
-    def _key(self, profile_id: str, config: dict[str, Any]) -> str | None:
-        with self._lock:
-            key = self._session_keys.get(profile_id)
-        key = key or (os.environ.get(config["key_env"]) if config["key_env"] else None)
-        if not key and config["key_env"]:
-            raise DataError(422, "密钥环境变量尚未设置，请设置该环境变量或提供本次会话 API Key")
-        if key is not None and any(ord(char) < 32 for char in key):
-            raise DataError(422, "模型密钥格式无效")
-        return key
+    def _key(self, profile_id: str, config: dict[str, Any], *, require_current: bool = True) -> str | None:
+        binding = _endpoint_binding(config)
+        if require_current and binding != _endpoint_binding(self._config(profile_id)):
+            raise DataError(409, "模型服务地址已变更，请重新选择模型并确认连接")
+        mode = config["credential_mode"]
+        if mode == "session":
+            with self._lock:
+                entry = self._session_keys.get(profile_id)
+            key = entry[1] if entry and entry[0] == binding else None
+        elif mode == "vault":
+            if self._vault_binding(profile_id) != binding:
+                raise DataError(422, "该模型尚未保存系统凭据，请重新填写 API Key")
+            key = self.vault.get(profile_id, binding)
+            if not key:
+                raise DataError(422, "系统凭据已失效，请重新填写 API Key")
+        else:
+            # Only the currently selected reference may resolve a secret. A
+            # stale workflow snapshot cannot resurrect a cleared variable name.
+            if require_current and self._config(profile_id).get("key_env") != config["key_env"]:
+                raise DataError(409, "模型密钥来源已变更，请重新确认模型配置")
+            key = os.environ.get(config["key_env"])
+            if not key:
+                raise DataError(422, "密钥环境变量尚未设置，请设置环境变量后重试")
+        return self._validate_key(key)
 
     def _write_call(self, record: dict[str, Any]) -> None:
         with self._connect() as connection:
             connection.execute("INSERT INTO usage_calls VALUES (?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET record_json=excluded.record_json", (record["id"], record["run_id"], record["profile_id"], record["started_at"], _json(record)))
 
     def invoke(self, profile_id: str, messages: list[dict[str, str]], *, run_id: str, chunk_id: str, attempt: int = 1, options: dict[str, Any] | None = None, profile_snapshot: dict[str, Any] | None = None) -> dict[str, Any]:
-        messages = _validate_messages(messages)
-        config = _validate_profile(profile_snapshot) if profile_snapshot is not None else self._config(profile_id)
+        config = _validate_profile(profile_snapshot) if profile_snapshot is not None else _validate_profile(self._config(profile_id))
         if config["id"] != profile_id:
             raise DataError(422, "模型快照与配置 ID 不一致")
+        return self._invoke_config(config, messages, key=self._key(profile_id, config), run_id=run_id, chunk_id=chunk_id, attempt=attempt, options=options)
+
+    def _invoke_config(self, config: dict[str, Any], messages: list[dict[str, str]], *, key: str | None, run_id: str, chunk_id: str, attempt: int = 1, options: dict[str, Any] | None = None, connection_test: bool = False) -> dict[str, Any]:
+        messages = _validate_messages(messages)
+        profile_id = config["id"]
         _integer(attempt, "尝试次数", 1, 1000)
         run_id = _text(run_id, "运行 ID", maximum=200)
         chunk_id = _text(chunk_id, "文本块 ID", maximum=200)
@@ -289,7 +416,6 @@ class ModelService:
         estimate = estimate_messages(messages)
         if estimate["input_tokens"] + options["max_output_tokens"] > config["context_window"]:
             raise DataError(422, "输入的保守 token 估算与最大输出超过上下文预算，请减小文本块或核对上下文窗口")
-        key = self._key(profile_id, config)
         provider = config["provider"]
         if provider == "ollama":
             path = "/chat" if config["base_url"].endswith("/api") else "/api/chat"
@@ -352,6 +478,12 @@ class ModelService:
                         choice = data["choices"][0]
                         content = choice["message"]["content"]
                         finish = choice.get("finish_reason", "")
+                    # A reasoning model can spend the entire small test budget
+                    # before producing visible text. Known billed output plus
+                    # an explicit length finish proves a valid connection, but
+                    # is never accepted as an extraction result.
+                    if connection_test and provider == "openai_compatible" and content in (None, "") and finish == "length" and outgoing is not None:
+                        content = "连接成功；测试输出预算不足，模型未返回可见文本"
                     if not isinstance(content, str) or not isinstance(finish, str):
                         raise ValueError
                     if key:
@@ -383,6 +515,7 @@ class ModelService:
         if failure is not None:
             raise failure from None
         assert result is not None
+        result["duration_ms"] = record["duration_ms"]
         return result
 
     @staticmethod
@@ -417,10 +550,100 @@ class ModelService:
             result["response_format"] = requested
         return result
 
-    def test_profile(self, profile_id: str) -> dict[str, Any]:
-        """One explicitly requested small generation; charges/counts normally."""
-        result = self.invoke(profile_id, [{"role": "user", "content": "仅回复 OK"}], run_id="connection-test", chunk_id="connection-test", options={"max_output_tokens": 8})
-        return {"ok": True, "model": result["model"], "message": result["content"], "usage": result["usage"], "cost": result["cost"], "call_id": result["call_id"]}
+    @staticmethod
+    def _check_remote(config: dict[str, Any], allow_remote: bool) -> None:
+        if config["connection_mode"] == "remote" and allow_remote is not True:
+            raise DataError(428, "请先确认向该远程服务发送连接测试或模型列表请求")
+
+    def _draft(self, values: dict[str, Any], *, discovery: bool = False) -> tuple[dict[str, Any], str | None]:
+        allowed = _CONFIG_FIELDS | _PUBLIC_FIELDS | {"api_key", "use_saved_key", "remote_consent"}
+        if not isinstance(values, dict) or set(values) - allowed:
+            raise DataError(422, "模型草稿包含未知字段")
+        values = dict(values)
+        saved_id = values.pop("use_saved_key", None)
+        if saved_id is not None:
+            saved_id = _text(saved_id, "已保存配置 ID", maximum=100)
+        previous = self._config(saved_id) if saved_id is not None else {}
+        identifier = saved_id or "draft-" + uuid.uuid4().hex
+        api_key = self._validate_key(values.pop("api_key", None))
+        config_values = {**previous, **{key: value for key, value in values.items() if key in _CONFIG_FIELDS}, "id": identifier}
+        if discovery and not config_values.get("model"):
+            config_values["model"] = "model-discovery"
+        config = _validate_profile(config_values)
+        if saved_id is not None and _endpoint_binding(config) != _endpoint_binding(previous):
+            raise DataError(409, "服务地址、协议或连接类型已变更，请重新填写 API Key")
+        if api_key is not None:
+            if config["credential_mode"] == "environment" and api_key:
+                raise DataError(422, "环境变量模式请仅填写变量名")
+            key = api_key or None
+        elif saved_id is not None:
+            if config["credential_mode"] != previous["credential_mode"] or config["key_env"] != previous["key_env"]:
+                raise DataError(409, "密钥来源已变更，请重新填写 API Key 或环境变量")
+            key = self._key(saved_id, config)
+        elif config["credential_mode"] == "environment":
+            key = self._key(identifier, config, require_current=False)
+        elif config["credential_mode"] == "vault":
+            raise DataError(422, "请填写 API Key，或选择已保存的系统凭据")
+        else:
+            key = None
+        return config, key
+
+    def test_profile(self, profile_id: str, *, allow_remote: bool = False) -> dict[str, Any]:
+        """One explicitly requested synthetic generation; no document is read."""
+        config = self.snapshot(profile_id)
+        self._check_remote(config, allow_remote)
+        return self._test_connection(config, self._key(profile_id, config))
+
+    def test_draft(self, values: dict[str, Any], *, allow_remote: bool = False) -> dict[str, Any]:
+        config, key = self._draft(values)
+        self._check_remote(config, allow_remote or values.get("remote_consent") is True)
+        return self._test_connection(config, key)
+
+    def _test_connection(self, config: dict[str, Any], key: str | None) -> dict[str, Any]:
+        messages = [{"role": "user", "content": "仅回复 OK"}]
+        budget = min(256, config["max_output_tokens"], config["context_window"] - estimate_messages(messages)["input_tokens"])
+        result = self._invoke_config(config, messages, key=key, run_id="connection-test", chunk_id="connection-test", options={"max_output_tokens": budget}, connection_test=True)
+        return {"ok": True, **{name: result[name] for name in ("model", "usage", "cost", "call_id", "duration_ms")}, "message": result["content"]}
+
+    def discover_models(self, values: dict[str, Any], *, allow_remote: bool = False) -> dict[str, Any]:
+        """Fetch names only after an explicit action; no generation or body text."""
+        config, key = self._draft(values, discovery=True)
+        self._check_remote(config, allow_remote or values.get("remote_consent") is True)
+        if config["provider"] == "ollama":
+            path = "/tags" if config["base_url"].endswith("/api") else "/api/tags"
+        else:
+            path = "/models"
+        headers = {"Authorization": "Bearer " + key} if key else {}
+        try:
+            with httpx.Client(transport=self.transport, timeout=min(config["timeout_seconds"], 30), follow_redirects=False, trust_env=False) as client:
+                response = client.get(config["base_url"] + path, headers=headers)
+            if not 200 <= response.status_code < 300:
+                raise DataError(502, f"模型列表请求返回 HTTP {response.status_code}，请检查连接配置")
+            if len(response.content) > 5_000_000:
+                raise DataError(502, "模型列表超过大小限制")
+            data = response.json()
+            entries = data.get("models" if config["provider"] == "ollama" else "data")
+            if not isinstance(entries, list) or len(entries) > 10_000:
+                raise ValueError
+            names = []
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    raise ValueError
+                name = entry.get("name") if config["provider"] == "ollama" else entry.get("id")
+                name = _text(name, "模型名称", maximum=500)
+                if key:
+                    name = name.replace(key, "[REDACTED]")
+                if name not in names:
+                    names.append(name)
+            return {"models": [{"id": name} for name in names]}
+        except httpx.TimeoutException:
+            raise DataError(504, "获取模型列表超时，请检查模型服务") from None
+        except httpx.HTTPError:
+            raise DataError(502, "无法连接模型服务，请检查服务地址") from None
+        except DataError:
+            raise
+        except Exception:
+            raise DataError(502, "模型列表格式无效，请手动填写模型名称") from None
 
     def list_usage(self, run_id: str | None = None) -> list[dict[str, Any]]:
         with self._connect() as connection:

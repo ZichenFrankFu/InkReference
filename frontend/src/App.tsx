@@ -32,27 +32,23 @@ type Section =
 const sections: {
   id: Section;
   label: string;
-  english: string;
   icon: typeof BookOpen;
 }[] = [
-  { id: "library", label: "素材库", english: "LIBRARY", icon: Layers3 },
+  { id: "library", label: "素材库", icon: Layers3 },
   {
     id: "documents",
     label: "全文与清洗",
-    english: "DOCUMENTS",
     icon: FileText,
   },
-  { id: "jobs", label: "分析与审核", english: "ANALYSIS", icon: Play },
+  { id: "jobs", label: "分析与审核", icon: Play },
   {
     id: "workflows",
     label: "工作流与 Skills",
-    english: "WORKFLOWS",
     icon: GitBranch,
   },
   {
     id: "models",
-    label: "模型与用量",
-    english: "MODELS",
+    label: "模型设置",
     icon: SlidersHorizontal,
   },
 ];
@@ -69,13 +65,14 @@ export default function App() {
   const [collapsed, setCollapsed] = useState(false);
   const [jobId, setJobId] = useState<string>();
   const [help, setHelp] = useState(false);
+  const [modelReturn, setModelReturn] = useState<Section | null>(null);
   const nav = (id: Section) => {
+    if (id === "models" && section !== "models") setModelReturn(section);
     setSection(id);
     setVisited((v) => (v.includes(id) ? v : [...v, id]));
     window.history.replaceState(null, "", `#${id}`);
     setMobile(false);
-    if (id === "library")
-      window.dispatchEvent(new Event("inkreference:library-refresh"));
+    window.dispatchEvent(new Event(`inkreference:${id}-refresh`));
   };
   useEffect(() => {
     const update = () => {
@@ -85,7 +82,7 @@ export default function App() {
     };
     window.addEventListener("hashchange", update);
     return () => window.removeEventListener("hashchange", update);
-  }, []);
+  }, [section]);
   const current = sections.find((s) => s.id === section);
   return (
     <div className={`app studio-app ${collapsed ? "sidebar-collapsed" : ""}`}>
@@ -160,11 +157,20 @@ export default function App() {
             <ChevronRight size={13} />
             <strong>{current?.label || "备份与恢复"}</strong>
           </div>
-          <div className="topbar-status">
-            <span className="local-dot" />
-            本地工作区
-            <span className="topbar-divider" />
-            <span className="topbar-wordmark">INK / REFERENCE</span>
+          <div className="topbar-actions">
+            {section === "models" && modelReturn && (
+              <button className="text-button model-return" onClick={() => nav(modelReturn)}>
+                返回{sections.find((s) => s.id === modelReturn)?.label || "备份与恢复"}
+              </button>
+            )}
+            <button
+              className={`button secondary model-settings-entry ${section === "models" ? "selected" : ""}`}
+              onClick={() => nav("models")}
+              aria-current={section === "models" ? "page" : undefined}
+            >
+              <SlidersHorizontal size={16} />
+              模型设置
+            </button>
           </div>
         </header>
         <div id="workspace-content" className="workspace-content" tabIndex={-1}>
@@ -175,6 +181,7 @@ export default function App() {
               className="workspace-page"
             >
               <Suspense fallback={<Busy label="正在打开工作区" />}>
+                {page === "models" && modelReturn && <div className="mobile-return-bar"><button className="text-button" onClick={() => nav(modelReturn)}>返回{sections.find((s) => s.id === modelReturn)?.label || "备份与恢复"}</button></div>}
                 {page === "library" ? (
                   <Library />
                 ) : page === "documents" ? (
@@ -280,7 +287,6 @@ function Backup() {
     <main className="studio-main">
       <header className="studio-heading">
         <div>
-          <span className="eyebrow">WORKSPACE ARCHIVE</span>
           <h1>备份与恢复</h1>
         </div>
       </header>

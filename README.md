@@ -2,7 +2,36 @@
 
 Windows 优先的本地写作参考工作台：整理作品、人物和桥段，管理全文及清洗版本，用可定制的 LangGraph 工作流提取剧情与证据，审核后入库。
 
-React 中文界面提供素材库、全文清洗、EPUB／MinerU PDF 转换、分析任务、工作流与 Skills、模型用量和项目备份。可在指定 Conda 环境中打开 pywebview 桌面窗口或浏览器，也提供 Windows 安装包构建入口。
+React 中文界面提供素材库、全文清洗、EPUB／MinerU PDF 转换、分析任务、工作流与 Skills、模型设置和项目备份。可在指定 Conda 环境中打开 pywebview 桌面窗口或浏览器，也提供 Windows 安装包构建入口。
+
+## 当前功能
+
+| 工作区 | 已实现的功能 |
+|---|---|
+| 素材库 | 作品、人物、桥段三类 v8 数据；搜索、分页、新增、编辑、删除；查看作品与人物／桥段的关联；版本冲突检查和关联删除保护。 |
+| CSV 导入 | 同时选择或拖入多个 CSV；按表头自动识别三类表，严格解析 UTF-8／GB18030；预览新增、已有记录、错误和关联；选择跳过、更新或报错后，整批事务提交。重复导入不会重复添加。 |
+| CSV 导出 | 单表 CSV、兼容原始 v8 的三个 CSV ZIP、素材库内部表 ZIP，以及覆盖全文／转换／Skills／工作流／分析／用量的全部业务表 CSV ZIP；CSV 为 UTF-8 BOM。 |
+| 全文库 | 上传 TXT、Markdown、SRT、DOCX、EPUB；搜索全文条目，选择编码、标题并关联已有作品；保存不可变原件与 SHA-256；下载原件和各版本 TXT。大文本按 Unicode 字符范围分页阅读。 |
+| 数据清洗 | 处理开头 BOM、HTML 实体、换行符和控制字符；疑似采集 ID 需明确勾选才删除；标记疑似乱码、HTML 标记和作者题外话。保留原文、新清洗版本、修改记录和差异，可手动编辑生成新版本。 |
+| 章节与覆盖 | 识别中文章／回／节、Chapter 和数字编号；无标题时按字符切分；保留序言与结尾，并检查分段是否完整覆盖全文。 |
+| 格式转换 | EPUB 按 spine 阅读顺序转 Markdown／TXT；PDF 使用本地 MinerU 4 提取文字层，或使用 Standard OCR 识别扫描页。查看阶段与进度，取消、重试，下载 MD／TXT，或把结果导入全文库。 |
+| 模型设置 | 完整 GUI 配置本地 Ollama、LM Studio、vLLM 和兼容 OpenAI Chat Completions 的商业 API；配置地址、模型、凭据、上下文、输出上限、超时及价格；主动读取模型列表、测试当前草稿和管理已存凭据。 |
+| 分析与审核 | 对明确的全文版本运行真实 LangGraph 工作流，提取梗概、人物、剧情事件和桥段；搜索任务，显示块级进度、全文覆盖、失败原因和原文证据；取消、恢复、修订结果，确认后幂等入库。切换任务时保护未保存的审核草稿。 |
+| 工作流与 Skills | 内置参考作品分析流程；自定义提取开关、提示词、分块、重试和 token 预算；保存不可变版本。画布支持移动、缩放与布局保存。创建或上传 JSON、SKILL.md、声明式 ZIP Skill，校验输出结构与引文。 |
+| 用量与费用 | 每次模型请求及重试独立记账；查看成功／失败／待确认状态、输入和输出 token，区分提供商实测、规划估算及未知；按配置的价格和币种估算费用，可按分析任务筛选。 |
+| 备份与恢复 | 导出包含五个 SQLite 数据库及原始 CSV 导入文件的完整项目 ZIP；恢复时校验路径、大小、SHA-256 和数据库完整性，生成独立工作区。全部业务表 CSV 用于查阅和迁移，恢复项目使用完整备份 ZIP。 |
+| 桌面与运行 | 命名 Conda 环境一键安装／打开；pywebview 桌面或浏览器入口；自选端口与数据目录；工作区单实例保护；Windows 可携带 ZIP 和 Setup 构建。界面提供进度条、键盘操作、窄屏布局与减少动态效果支持。 |
+
+当前素材结构采用 v8 的固定字段，CSV 表头需要完整匹配某一类表；文件名和列的排列顺序可以不同。
+
+## 第一次使用
+
+1. 按下面的 PowerShell 命令安装并打开应用。
+2. 在“素材库”导入三个 v8 CSV，检查预览后提交；也可以直接新建作品。
+3. 打开“模型设置”，选择本地模型或商业 API，在界面填写地址、模型和凭据，测试连接后保存。详见[模型配置与数据边界](#模型配置与数据边界)。
+4. 在“全文与清洗”上传全文，查看章节、诊断和清洗版本。EPUB／PDF 的 MD、TXT 输出在该页面的“格式转换”中完成。
+5. 选择全文版本、模型及工作流，开始分析；远程请求需确认目的服务。到“分析与审核”查看证据、修订并确认入库。
+6. 在“备份与恢复”下载完整项目 ZIP。迁移到另一台机器或另一目录后，重新配置模型凭据。
 
 ## Windows 安装与启动
 
@@ -82,27 +111,60 @@ GitHub Actions 工作流 **Build Windows desktop package** 会在相关 PR 中�
 - 导入先预览，存在校验错误时不会写入。提交在一个事务内执行；重复记录可选择跳过、更新或报错。
 - 编辑使用版本检查。存在关联的记录默认禁止直接删除，级联删除需要在界面确认。
 
-一键导出提供两种 ZIP：兼容模式包含 v8 格式的三个 CSV；完整模式为每张业务表生成 CSV，并附格式说明 `manifest.json`。也可以单独导出一张表。CSV 使用 UTF-8 BOM，便于在 Windows Excel 中打开。
+素材库导出提供两种 ZIP：兼容模式包含 v8 格式的三个 CSV；完整模式包含三张素材表（附记录 ID／revision）、作品桥段关联表及 `manifest.json`。也可以单独导出一张素材表。CSV 使用 UTF-8 BOM，便于在 Windows Excel 中打开。
 
-素材库的兼容导出保留 v8 的三个 CSV；备份页的“全部业务表”会为素材、全文、转换、Skills、工作流、分析与用量等每张业务表生成 CSV。完整项目 ZIP 另外包含五个 SQLite 数据库、原始导入文件与校验清单，可恢复为独立工作区。会话 API Key 和系统环境变量不进入备份。
+素材库的兼容导出保留 v8 的三个 CSV；备份页的“全部业务表”会为素材、全文、转换、Skills、工作流、分析与用量等每张业务表生成 CSV。完整项目 ZIP 另外包含五个 SQLite 数据库、原始导入文件与校验清单，可恢复为独立工作区。模型凭据的备份边界见下一节。
+
+## 模型配置与数据边界
+
+模型连接在 GUI 的“模型设置”中完成，无需通过代码或命令行填写模型参数。
+
+| 连接方式 | GUI 配置 |
+|---|---|
+| 本地 Ollama | 选择“本地模型”中的 Ollama，默认地址 `http://127.0.0.1:11434`；确保 Ollama 已运行且已下载所需模型，然后主动读取模型列表或填写模型 ID。 |
+| 本地 LM Studio／vLLM | 选择相应预设，启动本机 OpenAI-compatible 服务，填写实际监听地址与模型 ID。应用连接已有推理服务；模型权重由该服务管理。 |
+| 商业 API | 选择 OpenAI、DeepSeek、通义千问或自定义兼容服务，核对 HTTPS 服务地址、模型 ID 和 API Key。当前适配 OpenAI-compatible Chat Completions 协议；其他协议需对应的兼容端点。 |
+
+填写配置名称、地址和模型后，可直接“测试连接”，测试使用当前草稿，无需提前保存。模型列表只在点击“读取模型列表”时获取；商业服务的列表权限取决于提供商，也可手动输入模型 ID。上下文窗口、最大输出、超时、每百万 token 的输入／输出价格和币种位于详细设置中。
+
+凭据支持三种保存方式：
+
+- **仅本次运行**：API Key 仅保存在后端内存，退出应用后重新填写。
+- **系统密钥库**：通过操作系统凭据后端保存。可用性在 GUI 显示；不可用时禁止保存，不回退到明文文件。凭据按工作区路径隔离，移动／恢复到新目录后需重新填写。
+- **环境变量**：GUI 只填写变量名，后端读取进程中的变量值。清除配置中的凭据会移除该引用，保留系统中原有的环境变量。
+
+密码输入默认遮罩，保存后清空输入框；配置返回值、模型快照、CSV 和项目备份不包含 API Key。可以在 GUI 中清除已存凭据。浏览器不使用 localStorage／sessionStorage 保存 Key 或配置草稿。
+
+本地模型地址只接受 `localhost` 或字面量回环 IP，商业服务只接受 HTTPS。每次商业 API 连接测试、读取模型列表及启动／恢复远程分析，界面都会显示目标地址并要求明确同意。分析确认绑定当前服务地址和模型；其他窗口修改配置后，创建任务会被阻止，需要刷新并重新确认。连接测试使用固定测试消息；分析请求会把所选版本的正文块、Skill 提示词与自定义提示词发送给所选服务。CSV 整理、规则清洗、EPUB 转换、导出和备份均在本机执行；MinerU OCR 首次运行可能需要下载其模型。
+
+应用服务仅允许本机回环监听，并检查 Host、请求来源与浏览器同源边界；页面使用 CSP，不加载外部字体、脚本或统计服务。LangGraph 工作流显式关闭远程追踪，不继承外部 LangSmith tracing 开关。正文、分析结果和本地数据库没有做整体加密，完整备份也包含这些内容，应存放在自己的受保护目录。系统密钥库保护凭据，不能隔离同一账户下已经获得系统访问权限的其他程序。
+
+若选择环境变量模式，可在启动前设置变量；这是可选凭据方式：
+
+```powershell
+$inkReferenceKey = Read-Host 'API Key' -AsSecureString
+$env:INKREFERENCE_LLM_KEY = [System.Net.NetworkCredential]::new('', $inkReferenceKey).Password
+# 在 GUI 的“环境变量”方式中填 INKREFERENCE_LLM_KEY
+try {
+    .\scripts\open.ps1 -EnvironmentName InkReference
+}
+finally {
+    Remove-Item Env:\INKREFERENCE_LLM_KEY -ErrorAction SilentlyContinue
+    Remove-Variable inkReferenceKey -ErrorAction SilentlyContinue
+}
+```
+
+遮罩输入避免把 Key 写进 PowerShell 命令历史；程序退出后上面的命令会清除当前终端中的变量。
 
 ## 全文、转换与分析
 
 1. 在“全文与清洗”上传 TXT、Markdown、SRT、DOCX 或 EPUB。原件不可变；编码严格解码，无法确认时选择编码后重新预览。清洗结果作为新版本保存，可以查看章节、疑似乱码、修改差异及原文。默认不删除题外话、疑似编号或故事线索；移除随机 ID 需明确勾选。
 2. 在“格式转换”选择 EPUB 或 PDF。EPUB 按书籍 spine 顺序转 Markdown，再生成 TXT。PDF 使用 **MinerU 4**；默认 `flash + txt` 提取已有文字层，扫描件选择 `standard + ocr` 并准备相应模型。转换完成后可下载 `.md`、`.txt`，或把 TXT 导入全文库。原件一直保留。PDF 完整块渲染保留可能被识别为页眉的正文，避免默认渲染省略内容。
-3. 在“模型与用量”保存模型配置。Ollama 使用 `http://127.0.0.1:11434`；LM Studio／vLLM 等使用 OpenAI-compatible 服务地址，填写本机实际已部署的模型名称。远程 API 使用其服务地址和模型名；密钥可仅保存于当前会话，或通过 `key_env` 引用进程环境变量。
+3. 在“模型设置”配置并测试模型，选择本地推理服务或商业 API，再回到全文页面选择该配置。
 4. 在“工作流与 Skills”选择声明式 Skill，调整人物／剧情／桥段开关、自定义提示词、字符块上限、重试和 token 预算；保存为新版本。React Flow 画布布局单独保存，提取行为由工作流定义控制。Skill 可上传 JSON、带简单元数据的 SKILL.md，或 `manifest.json` 加提示词的 ZIP；不会执行上传代码。
 5. 选择明确的全文版本和模型，开始分析。LangGraph 保存每块状态与 checkpoint；失败、取消或关闭后可手动继续，已完成块跳过。每条候选保留原文引用和位置；查看证据、修订并确认入库后才写入素材表。已有作品的人工字段不会被分析覆盖。尚未完成的任务不会在下次打开时自动调用模型。
 
 所有模型请求及重试独立记账。提供商实际计数、UTF-8 字节规划预估和未知值分开显示；未配置价格时费用显示未知，已配置价格时仍作为费用预估。规划预估不等同特定模型的 tokenizer。取消会在当前请求边界停止后续调用，已发出的请求仍可能产生费用。
-
-指定密钥环境变量的 PowerShell 示例：
-
-```powershell
-$env:INKREFERENCE_LLM_KEY = '填写自己的 API Key'
-.\scripts\open.ps1 -EnvironmentName InkReference
-# 模型配置中的 key_env 填 INKREFERENCE_LLM_KEY
-```
 
 MinerU 也可安装在独立 Python 环境。源码和安装包均支持指定该环境的可信 Python 路径：
 
@@ -122,7 +184,22 @@ conda run --no-capture-output -n InkReference python -m pytest -q
 conda run --no-capture-output -n InkReference python -m inkreference --no-open
 ```
 
-前端开发在 `frontend` 目录运行 `conda run -n InkReference npm run dev`；Python API 与前端构建的约定见 [API contract](docs/api-contract.md)。发布前检查：
+Vite 开发界面需要显式允许对应的本机来源。在第一个 PowerShell 终端中设置后再启动后端：
+
+```powershell
+$env:INKREFERENCE_DEV_ORIGIN = 'http://localhost:5173'
+conda run --no-capture-output -n InkReference python -m inkreference --no-open
+```
+
+在第二个终端启动前端，然后打开 `http://localhost:5173`：
+
+```powershell
+Push-Location frontend
+conda run --no-capture-output -n InkReference npm run dev -- --host localhost --port 5173 --strictPort
+Pop-Location
+```
+
+此环境变量仅供开发调试，生产界面保持同源。Python API 与前端构建的约定见 [API contract](docs/api-contract.md)，接口结构可在本地 `/openapi.json` 查看。发布前检查：
 
 ```powershell
 Push-Location frontend

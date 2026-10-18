@@ -13,6 +13,7 @@ import urllib.request
 import webbrowser
 
 import uvicorn
+from .local_security import loopback_host
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -25,6 +26,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if not 1 <= args.port <= 65535:
         parser.error("端口必须在 1 至 65535 之间。")
+    if not loopback_host(args.host):
+        parser.error("InkReference 仅允许本机监听，请使用 127.0.0.1、localhost 或 ::1。")
     if args.data_dir:
         os.environ["INKREFERENCE_DATA_DIR"] = args.data_dir
 
@@ -83,6 +86,7 @@ def main(argv: list[str] | None = None) -> int:
         config = uvicorn.Config(
             "inkreference.api:app", host=args.host, port=args.port,
             log_level="info",
+            proxy_headers=False, server_header=False,
             loop="asyncio:SelectorEventLoop" if sys.platform == "win32" else "auto",
         )
         server = uvicorn.Server(config)

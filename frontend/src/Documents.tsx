@@ -8,6 +8,9 @@ import {
   History,
   Plus,
   RefreshCw,
+  Search,
+  ShieldCheck,
+  SlidersHorizontal,
   Upload,
 } from "lucide-react";
 import { download } from "./api";
@@ -69,7 +72,24 @@ export default function Documents({ navigate, onJob }: Props) {
   const [workflows, setWorkflows] = useState<Workflow[]>([]);
   const [profile, setProfile] = useState("");
   const [workflow, setWorkflow] = useState("");
+  const [query, setQuery] = useState("");
+  const [remoteConsent, setRemoteConsent] = useState(false);
+  const [discardClean, setDiscardClean] = useState(false);
+  const [pendingDocument, setPendingDocument] = useState<{ id: string; vid?: string } | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
+  const continueAfterModels = useRef(false);
+  const selectionRequest = useRef(0);
+  const cleanDirty = !!version && (
+    JSON.stringify(options) !== JSON.stringify(version.options || {}) ||
+    (manualEnabled && manual !== version.text)
+  );
+  const cleanDirtyRef = useRef(cleanDirty);
+  cleanDirtyRef.current = cleanDirty;
+  const selectedProfile = profiles.find((p) => p.id === profile);
+  const remote = !!selectedProfile && (selectedProfile.connection_mode
+    ? selectedProfile.connection_mode === "remote"
+    : !isLoopback(selectedProfile.base_url));
+  const target = endpointLabel(selectedProfile?.base_url);
   const load = useCallback(async () => {
     setLoading(true);
     try {
@@ -82,9 +102,25 @@ export default function Documents({ navigate, onJob }: Props) {
   }, []);
   useEffect(() => {
     void load();
+    const refresh = () => void load();
+    window.addEventListener("inkreference:documents-refresh", refresh);
+    return () => window.removeEventListener("inkreference:documents-refresh", refresh);
   }, [load]);
-  const choose = async (id: string, vid?: string) => {
+  useEffect(() => {
+    const beforeUnload = (event: BeforeUnloadEvent) => {
+      if (cleanDirtyRef.current) event.preventDefault();
+    };
+    window.addEventListener("beforeunload", beforeUnload);
+    return () => window.removeEventListener("beforeunload", beforeUnload);
+  }, []);
+  const choose = async (id: string, vid?: string, discard = false) => {
+    if (cleanDirtyRef.current && !discard) {
+      setPendingDocument({ id, vid });
+      setDiscardClean(true);
+      return;
+    }
     setBusy("version");
+    const ticket = ++selectionRequest.current;
     setError("");
     setChapter(-1);
     setTab("clean");
@@ -92,37 +128,38 @@ export default function Documents({ navigate, onJob }: Props) {
       const doc = await studio<DocumentMeta>(
         `/documents/${encodeURIComponent(id)}`,
       );
-      setSelected(doc);
       const versionPath = `/documents/${encodeURIComponent(id)}/versions/${encodeURIComponent(vid || doc.latest_version_id)}`;
       const meta = await studio<TextVersion>(
         `${versionPath}?include_text=false`,
       );
       const complete = Number(meta.characters || 0) <= 200000;
-      setFullLoaded(complete);
-      setPageStart(0);
-      setPageTotal(Number(meta.characters || 0));
       let result = meta;
+      let preview: { text: string; start: number; total: number } | null = null;
       if (complete) {
         result = await studio<TextVersion>(versionPath);
       } else {
-        const page = await studio<{
+        preview = await studio<{
           text: string;
           start: number;
           total: number;
         }>(`${versionPath}/text?start=0&limit=20000`);
-        setPageText(page.text);
-        setPageStart(page.start);
-        setPageTotal(page.total);
         result = { ...meta, text: "", source_text: "", diff: "" };
       }
+      if (ticket !== selectionRequest.current) return;
+      setSelected(doc);
+      setFullLoaded(complete);
+      setPageStart(preview?.start || 0);
+      setPageTotal(preview?.total || Number(meta.characters || 0));
+      setPageText(preview?.text || "");
       setVersion(result);
       setOptions(result.options || {});
       setManual(complete ? result.text || "" : "");
       setManualEnabled(false);
+      cleanDirtyRef.current = false;
     } catch (e) {
-      setError(messageOf(e));
+      if (ticket === selectionRequest.current) setError(messageOf(e));
     } finally {
-      setBusy("");
+      if (ticket === selectionRequest.current) setBusy("");
     }
   };
   const upload = async () => {
@@ -164,7 +201,7 @@ export default function Documents({ navigate, onJob }: Props) {
         },
       );
       setCleanOpen(false);
-      await choose(selected.id, result.id);
+      await choose(selected.id, result.id, true);
       setMessage("新的清洗版本已保存。");
     } catch (e) {
       setError(messageOf(e));
@@ -174,6 +211,7 @@ export default function Documents({ navigate, onJob }: Props) {
   };
   const begin = async () => {
     if (!selected || !version) return;
+    if (remote && (!remoteConsent || !selectedProfile?.target_fingerprint)) return;
     setBusy("start");
     setError("");
     try {
@@ -185,6 +223,8 @@ export default function Documents({ navigate, onJob }: Props) {
         workflow_version: w?.version || "1.0.0",
         profile_id: profile,
         start: true,
+        remote_consent: remote && remoteConsent,
+        expected_model_fingerprint: selectedProfile?.target_fingerprint,
       });
       setStartOpen(false);
       onJob(run.id);
@@ -206,8 +246,9 @@ export default function Documents({ navigate, onJob }: Props) {
         ws = normalizeList(w);
       setProfiles(ps);
       setWorkflows(ws);
-      setProfile(ps[0]?.id || "");
+      setProfile((current) => ps.some((p) => p.id === current) ? current : ps[0]?.id || "");
       setWorkflow(ws[0] ? `${ws[0].id}@${ws[0].version}` : "");
+      setRemoteConsent(false);
       setStartOpen(true);
     } catch (e) {
       setError(messageOf(e));
@@ -215,6 +256,30 @@ export default function Documents({ navigate, onJob }: Props) {
       setBusy("");
     }
   };
+  useEffect(() => {
+    const continueSetup = () => {
+      if (continueAfterModels.current && selected && version) {
+        continueAfterModels.current = false;
+        void startDialog();
+      }
+    };
+    window.addEventListener("inkreference:documents-refresh", continueSetup);
+    return () => window.removeEventListener("inkreference:documents-refresh", continueSetup);
+  });
+  useEffect(() => {
+    const refresh = () => {
+      void studio<List<ModelProfile>>("/models")
+        .then((result) => {
+          const next = normalizeList(result);
+          setProfiles(next);
+          setProfile((current) => next.some((p) => p.id === current) ? current : next[0]?.id || "");
+          setRemoteConsent(false);
+        })
+        .catch((e) => setError(messageOf(e)));
+    };
+    window.addEventListener("inkreference:models-changed", refresh);
+    return () => window.removeEventListener("inkreference:models-changed", refresh);
+  }, []);
   const doDownload = async (path: string, name: string) => {
     setBusy("download");
     try {
@@ -299,7 +364,7 @@ export default function Documents({ navigate, onJob }: Props) {
   return (
     <main className="studio-main">
       <PageTitle
-        kicker="DOCUMENT ARCHIVE"
+        kicker=""
         title="全文与清洗"
         description="保留原件，逐版整理故事。"
         action={
@@ -344,6 +409,7 @@ export default function Documents({ navigate, onJob }: Props) {
           <Notice error={!!error} success={!error && !!message}>
             {error || message}
           </Notice>
+          {busy === "version" && !selected && <Busy label="正在读取全文版本" compact />}
           <div className="document-layout">
             <aside className="surface document-index">
               <div className="surface-heading">
@@ -357,13 +423,19 @@ export default function Documents({ navigate, onJob }: Props) {
                   <RefreshCw size={15} />
                 </button>
               </div>
+              {!!items.length && (
+                <label className="index-search">
+                  <Search size={15} />
+                  <input aria-label="搜索全文" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="搜索标题或文件名" />
+                </label>
+              )}
               {loading ? (
                 <Busy label="正在读取文档" />
               ) : !items.length ? (
                 <div className="index-empty">尚未导入全文</div>
               ) : (
                 <div className="document-list">
-                  {items.map((doc) => (
+                  {items.filter((doc) => `${doc.title} ${doc.filename}`.toLocaleLowerCase().includes(query.toLocaleLowerCase())).map((doc) => (
                     <button
                       key={doc.id}
                       className={`document-item ${selected?.id === doc.id ? "active" : ""}`}
@@ -383,6 +455,7 @@ export default function Documents({ navigate, onJob }: Props) {
                       <ChevronRight size={14} />
                     </button>
                   ))}
+                  {query && !items.some((doc) => `${doc.title} ${doc.filename}`.toLocaleLowerCase().includes(query.toLocaleLowerCase())) && <div className="index-empty">没有匹配的全文</div>}
                 </div>
               )}
             </aside>
@@ -390,16 +463,17 @@ export default function Documents({ navigate, onJob }: Props) {
               {!selected ? (
                 <Empty
                   icon={FileText}
-                  title="给故事一个完整的来源"
-                  description="导入全文后查看清洗差异、章节与版本。"
+                  title="导入第一份全文"
+                  description="导入、清洗、分析，审核后保存为素材。"
                   action={
-                    <button
+                    <div className="empty-actions"><button
                       className="button secondary"
                       onClick={() => setUploadOpen(true)}
                     >
                       <Plus size={16} />
-                      添加文档
+                      导入全文
                     </button>
+                    <button className="text-button" onClick={() => navigate("models")}><SlidersHorizontal size={15} />配置本地模型或 API</button></div>
                   }
                 />
               ) : (
@@ -811,7 +885,7 @@ export default function Documents({ navigate, onJob }: Props) {
       {cleanOpen && (
         <Modal
           title="生成新的清洗版本"
-          onClose={() => setCleanOpen(false)}
+          onClose={() => cleanDirty ? setDiscardClean(true) : setCleanOpen(false)}
           wide
           busy={busy === "clean"}
         >
@@ -899,7 +973,7 @@ export default function Documents({ navigate, onJob }: Props) {
             <button
               className="button secondary"
               disabled={!!busy}
-              onClick={() => setCleanOpen(false)}
+              onClick={() => cleanDirty ? setDiscardClean(true) : setCleanOpen(false)}
             >
               取消
             </button>
@@ -938,7 +1012,7 @@ export default function Documents({ navigate, onJob }: Props) {
             <SelectField
               label="工作流版本"
               value={workflow}
-              onChange={setWorkflow}
+              onChange={(id) => { setWorkflow(id); setRemoteConsent(false); }}
             >
               {workflows.map((w) => (
                 <option
@@ -949,7 +1023,7 @@ export default function Documents({ navigate, onJob }: Props) {
                 </option>
               ))}
             </SelectField>
-            <SelectField label="模型配置" value={profile} onChange={setProfile}>
+            <SelectField label="模型配置" value={profile} onChange={(id) => { setProfile(id); setRemoteConsent(false); }}>
               {!profiles.length && <option value="">尚未配置模型</option>}
               {profiles.map((p) => (
                 <option value={p.id} key={p.id}>
@@ -957,19 +1031,23 @@ export default function Documents({ navigate, onJob }: Props) {
                 </option>
               ))}
             </SelectField>
-            {!profiles.length && (
-              <button
-                className="text-button"
-                onClick={() => {
-                  setStartOpen(false);
-                  navigate("models");
-                }}
-              >
-                前往配置模型
-                <ArrowRight size={13} />
-              </button>
+            <button className="text-button" onClick={() => { continueAfterModels.current = true; setStartOpen(false); navigate("models"); }}>
+              <SlidersHorizontal size={14} />{profiles.length ? "管理模型配置" : "配置本地模型或商业 API"}<ArrowRight size={13} />
+            </button>
+            <button className="text-button" disabled={!!busy} onClick={() => void startDialog()}><RefreshCw size={14} />刷新模型配置</button>
+            {selectedProfile && (
+              <div className={`model-destination ${remote ? "remote" : "local"}`}>
+                <div><ShieldCheck size={18} /><strong>{remote ? "发送到商业 / 远程 API" : "连接本机模型服务"}</strong></div>
+                <dl><dt>目标地址</dt><dd>{target}</dd><dt>模型</dt><dd>{selectedProfile.model}</dd></dl>
+                {remote ? <>
+                  <p>本任务将向此服务发送全文分块、分析提示词与 Skill，由该 API 提供商处理。</p>
+                  <label className="check-line"><input type="checkbox" checked={remoteConsent} disabled={!selectedProfile.target_fingerprint} onChange={(e) => setRemoteConsent(e.target.checked)} />我确认本次任务可以向上述服务发送内容</label>
+                  {!selectedProfile.target_fingerprint && <p>请刷新模型配置后，重新确认目标服务。</p>}
+                </> : <p>全文分块与提示词将发送到上面的本机地址。</p>}
+              </div>
             )}
             <Notice error>{error}</Notice>
+            {busy === "config" && <Busy label="正在刷新模型配置" />}
             {busy === "start" && <Busy label="正在固定配置并创建任务" />}
           </div>
           <div className="modal-footer">
@@ -982,7 +1060,7 @@ export default function Documents({ navigate, onJob }: Props) {
             </button>
             <button
               className="button primary"
-              disabled={!profile || !workflow || !!busy}
+              disabled={!profile || !workflow || !!busy || (remote && (!remoteConsent || !selectedProfile?.target_fingerprint))}
               onClick={() => void begin()}
             >
               创建并运行
@@ -991,6 +1069,29 @@ export default function Documents({ navigate, onJob }: Props) {
           </div>
         </Modal>
       )}
+      {discardClean && (
+        <Modal title="有未保存的清洗修订" onClose={() => { setDiscardClean(false); setPendingDocument(null); }}>
+          <div className="modal-body"><p>保存为新版本后，修订才会写入全文库。</p></div>
+          <div className="modal-footer">
+            <button className="button secondary" onClick={() => { setDiscardClean(false); setPendingDocument(null); setCleanOpen(true); }}>继续修订</button>
+            <button className="button danger" onClick={() => {
+              setDiscardClean(false); setCleanOpen(false);
+              setOptions(version?.options || {}); setManual(version?.text || ""); setManualEnabled(false); cleanDirtyRef.current = false;
+              if (pendingDocument) void choose(pendingDocument.id, pendingDocument.vid, true);
+              setPendingDocument(null);
+            }}>放弃修订</button>
+          </div>
+        </Modal>
+      )}
     </main>
   );
+}
+function isLoopback(value: string) {
+  try { const host = new URL(value).hostname; return ["localhost", "[::1]", "::1"].includes(host) || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host); }
+  catch { return false; }
+}
+function endpointLabel(value?: string) {
+  if (!value) return "尚未配置";
+  try { return new URL(value).origin; }
+  catch { return value; }
 }

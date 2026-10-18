@@ -18,7 +18,7 @@ def epub():
 
 def test_epub_conversion_download_and_import(tmp_path):
     raw = epub()
-    with TestClient(create_app(tmp_path)) as client:
+    with TestClient(create_app(tmp_path), base_url="http://127.0.0.1") as client:
         response = client.post("/api/studio/conversions", files={"file": ("故事.epub", raw)}, data={"options": "{}"})
         assert response.status_code == 201, response.text
         identifier = response.json()["id"]
@@ -44,7 +44,7 @@ def test_epub_conversion_download_and_import(tmp_path):
 
 
 def test_conversion_rejects_invalid_settings_and_download_format(tmp_path):
-    with TestClient(create_app(tmp_path)) as client:
+    with TestClient(create_app(tmp_path), base_url="http://127.0.0.1") as client:
         response = client.post("/api/studio/conversions", files={"file": ("book.epub", epub())}, data={"options": "[]"})
         assert response.status_code == 422
         response = client.post("/api/studio/conversions", files={"file": ("script.py", b"print('do not execute')")})
@@ -54,6 +54,6 @@ def test_conversion_rejects_invalid_settings_and_download_format(tmp_path):
 
 def test_queued_analysis_can_be_started_explicitly(tmp_path):
     # The start route must exist even when a client creates a queued run.
-    with TestClient(create_app(tmp_path)) as client:
+    with TestClient(create_app(tmp_path), base_url="http://127.0.0.1") as client:
         response = client.post("/api/studio/jobs/missing/start")
         assert response.status_code == 404
