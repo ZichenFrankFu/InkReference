@@ -39,6 +39,38 @@ _NOISE = [
 ]
 _LABELS = {"author_note": "非正文", "missing_glyph": "字符缺失", "mojibake": "疑似乱码",
            "noise": "采集杂字", "length": "篇幅异常", "gap": "章节缺号", "duplicate": "章节重号"}
+_TITLE_PROMOTION = re.compile(r"求(?:订阅|收藏|月票|推荐票?|票|打赏|支持)(?:[！!，,、 \t\u3000]*(?:求(?:订阅|收藏|月票|推荐票?|票|打赏|支持)))*[！!]*(?=$|[\s！!，,、。.）)】\]”」』])")
+_TITLE_BRACKET = re.compile(r"[（(【\[][^(（)）【】\[\]\r\n]{1,80}[）)】\]]")
+
+
+def chapter_title_span(chapter: dict[str, Any]) -> tuple[int, int]:
+    """Locate the exact pure-title span within the pinned chapter text."""
+    marker = str(chapter.get("raw_marker") or "")
+    title = str(chapter.get("title") or "")
+    end = len(marker.rstrip())
+    if title and marker[:end].endswith(title):
+        return end - len(title), end
+    return end, end
+
+
+def _heading_noise_spans(chapter: dict[str, Any]) -> list[tuple[int, int]]:
+    """Propose promotional title fragments without touching number/real title."""
+    start, end = chapter_title_span(chapter)
+    title = chapter["text"][start:end]
+    spans = []
+    for bracket in _TITLE_BRACKET.finditer(title):
+        interior = bracket.group()[1:-1]
+        # Only a bracket composed of explicit solicitation phrases qualifies.
+        residue = _TITLE_PROMOTION.sub("", interior).strip(" \t\u3000，,、！!。.")
+        if not residue and _TITLE_PROMOTION.search(interior):
+            spans.append((bracket.start(), bracket.end()))
+    for match in _TITLE_PROMOTION.finditer(title):
+        if not any(left <= match.start() and match.end() <= right for left, right in spans):
+            left = match.start()
+            while left > 0 and title[left - 1] in " \t\u3000":
+                left -= 1
+            spans.append((left, match.end()))
+    return [(start + left, start + right) for left, right in spans]
 
 
 def validate_settings(options: dict[str, Any]) -> dict[str, Any]:
@@ -115,7 +147,12 @@ def chapter_proposals(chapter: dict[str, Any], options: dict[str, Any]) -> list[
 
     def make_proposal(start: int, end: int, kind: str, label: str, reason: str,
                       enabled: bool = True, removable: bool = True) -> dict[str, Any]:
-        return _proposal(text, start, end, kind, label, reason, enabled, removable, source_hash)
+        proposal = _proposal(text, start, end, kind, label, reason, enabled, removable, source_hash)
+        proposal["scope"] = "heading" if end <= body_offset else "body"
+        return proposal
+
+    for start, end in _heading_noise_spans(chapter):
+        proposals.append(make_proposal(start, end, "author_note", "标题求票内容", "章节标题中的订阅或求票提示"))
 
     title = chapter.get("raw_marker") or chapter.get("title") or ""
     # Strong author chapters are review candidates as a whole, never silently removed.
@@ -227,6 +264,10 @@ def annotate_chapters(chapters: list[dict[str, Any]], options: dict[str, Any],
                        proposal_count=sum(p["removable"] for p in proposals),
                        proposal_ids=[p["id"] for p in proposals if p["removable"]],
                        enabled_proposal_ids=[p["id"] for p in proposals if p["removable"] and p["enabled"]])
+        body_proposals = [proposal for proposal in proposals if proposal.get("scope", "body") == "body"]
+        chapter["heading_proposal_count"] = len(proposals) - len(body_proposals)
+        chapter["body_proposal_count"] = len(body_proposals)
+        chapter["first_body_issue_start"] = min((proposal["start"] for proposal in body_proposals), default=None)
         issues = [{"kind": kind, "label": _LABELS[kind], "count": count,
                    "severity": "warning" if kind in {"author_note", "noise"} else "error"}
                   for kind, count in counts.items()]

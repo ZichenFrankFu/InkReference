@@ -342,8 +342,7 @@ export default function Jobs({ initialId, navigate }: Props) {
           {!selected ? (
             <Empty
               icon={FileSearch}
-              title="开始第一次全文分析"
-              description="配置模型后，从全文库选择作品创建任务。"
+              title="暂无分析任务"
               action={
                 <div className="empty-actions"><button
                   className="button primary"

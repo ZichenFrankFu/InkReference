@@ -39,3 +39,43 @@
 @media(max-width:600px){.chapter-recognition-settings .chapter-format-grid{grid-template-columns:repeat(auto-fit,minmax(130px,1fr))}}
 .chapter-settings-blocked{display:block;color:#a17d43;font-size:11px;margin:0 0 12px}
 .chapter-cleanup-fragment{display:grid;grid-template-columns:15px minmax(0,1fr);align-items:start;gap:9px;border-bottom:1px solid #edf2f8;min-width:0}.chapter-cleanup-fragment:last-child{border-bottom:0}.chapter-cleanup-fragment>input{width:13px;height:13px;margin:13px 0 0;accent-color:#4177df;cursor:pointer}.chapter-cleanup-fragment>.chapter-cleanup-snippet{border-bottom:0}.chapter-cleanup-fragment .chapter-fragment-manual{display:block;width:6px;height:6px;border-radius:50%;background:#c6afe4;margin:17px 3px 0}.chapter-cleanup-fragment:has(input:checked) mark.removing{background:#ffd8e2}.chapter-cleanup-fragment:has(input:not(:checked)) mark.removing{background:#f0f4fb;color:#8191ab;box-shadow:inset 0 -1px #c0cde1}.chapter-cleanup-card-heading input:indeterminate{accent-color:#4177df}
+
+/* Editable headings and visible chapter review states. */
+.chapter-workbench-v2 .chapter-reader-header{flex-wrap:wrap}
+.chapter-heading-fields{flex:1 1 210px;min-width:0}
+.chapter-editable-heading{display:flex;align-items:center;gap:9px;min-width:0;margin-top:5px}
+.chapter-number-label{flex:0 0 auto;font-size:15px;font-weight:650;color:var(--text,#3c5275);white-space:nowrap}
+.chapter-title-editor{position:relative;isolation:isolate;overflow:hidden;flex:1;min-width:70px;height:32px;border-radius:5px}
+.chapter-title-background,.chapter-title-input{position:absolute;inset:0;width:100%;height:32px;padding:2px 4px;box-sizing:border-box;font-family:inherit;font-size:15px;font-weight:600;line-height:28px;letter-spacing:normal;white-space:pre;border:0;border-radius:4px;outline:0}
+.chapter-title-background{z-index:-1;pointer-events:none;overflow:hidden;color:transparent}
+.chapter-title-background>div{white-space:pre;transform-origin:top left;min-height:28px}
+.chapter-title-input{background:transparent!important;color:var(--text,#3c5275);box-shadow:inset 0 -1px var(--line,#e7edf7)}
+.chapter-title-input:hover{box-shadow:inset 0 -1px var(--accent,#346beb)}
+.chapter-title-input:focus{background:transparent!important;box-shadow:inset 0 -2px var(--accent,#346beb)}
+.chapter-title-input::placeholder{font-weight:400;color:var(--muted,#96a3b7)}
+.chapter-workbench-v2 .chapter-reader-actions>.chapter-delete-button{width:auto;height:31px;min-width:0;color:var(--red,#c66779);border-color:color-mix(in srgb,var(--red,#c66779) 23%,var(--line,#e7edf7));background:var(--paper,#fff);margin-left:6px}
+.chapter-workbench-v2 .chapter-reader-actions>.chapter-delete-button:hover{background:var(--red-soft,#fff0f3);border-color:color-mix(in srgb,var(--red,#c66779) 50%,var(--line,#e7edf7))}
+.chapter-workbench-v2 .chapter-navigation-item.has-removal{background:var(--red-soft,#fff0f3);box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--red,#c66779) 18%,transparent)}
+.chapter-workbench-v2 .chapter-navigation-item.has-removal .chapter-navigation-copy>strong{color:var(--red,#b95670)}
+.chapter-workbench-v2 .chapter-navigation-item.has-diagnostic{background:var(--purple-soft,#f0e8fc);box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--purple,#9462c5) 22%,transparent)}
+.chapter-workbench-v2 .chapter-navigation-item.has-diagnostic .chapter-navigation-copy>strong{color:var(--purple,#8451b8)}
+.chapter-workbench-v2 .chapter-navigation-item.has-removal:hover{background:color-mix(in srgb,var(--red-soft,#fff0f3) 75%,var(--red,#c66779) 8%)}
+.chapter-workbench-v2 .chapter-navigation-item.has-diagnostic:hover{background:color-mix(in srgb,var(--purple-soft,#f0e8fc) 75%,var(--purple,#9462c5) 8%)}
+.chapter-workbench-v2 .chapter-navigation-item.has-removal.active,.chapter-workbench-v2 .chapter-navigation-item.has-diagnostic.active{box-shadow:inset 3px 0 var(--accent,#346beb),inset 0 0 0 1px color-mix(in srgb,var(--accent,#346beb) 55%,transparent)}
+.chapter-inline-findings{display:flex;gap:7px;flex-wrap:wrap;padding:10px 23px;border-bottom:1px solid var(--line,#e7edf7);background:var(--paper,#fff);flex:0 0 auto;max-height:110px;overflow:auto}
+.chapter-inline-finding,.chapter-structural-issue{display:inline-flex;align-items:center;gap:6px;border:1px solid color-mix(in srgb,var(--purple,#9462c5) 26%,transparent);border-radius:6px;background:var(--purple-soft,#f0e8fc);color:var(--purple,#8451b8);padding:5px 8px;font:inherit;font-size:10px;line-height:1.6;text-align:left;overflow-wrap:anywhere}
+.chapter-inline-finding{cursor:pointer}
+.chapter-inline-finding:hover{border-color:var(--purple,#9462c5)}
+.chapter-inline-finding:disabled{opacity:.65;cursor:default}
+.chapter-inline-finding code{font:inherit;font-weight:600;max-width:180px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.chapter-inline-finding small{font:inherit;opacity:.8;white-space:nowrap}
+.chapter-input-mark.removing{background:var(--red-soft,#ffd9e2);box-shadow:0 1px var(--red,#d38498)}
+.chapter-input-mark.diagnostic{background:var(--purple-soft,#e7d5fc);box-shadow:0 1px var(--purple,#9e76c8)}
+.chapter-input-mark.hidden-character{position:relative}
+.chapter-input-mark.hidden-character:after{content:"";position:absolute;left:0;top:.1em;height:1.15em;width:3px;background:var(--purple,#9462c5);box-shadow:0 0 0 2px var(--purple-soft,#e7d5fc);border-radius:2px}
+.chapter-cleanup-pagination>.button{min-width:85px;justify-content:center;border:1px solid var(--line,#e7edf7);background:var(--paper,#fff);color:var(--text,#536a8c);box-shadow:0 1px 2px #273c6507}
+.chapter-cleanup-pagination>.button:not(:disabled):hover{border-color:var(--accent,#346beb);background:var(--accent-soft,#edf3ff);color:var(--accent,#346beb)}
+.chapter-cleanup-pagination>.button:disabled{opacity:.4;cursor:not-allowed;box-shadow:none}
+@container(max-width:760px){.chapter-inline-findings{padding:9px 15px}.chapter-editable-heading{gap:6px}.chapter-title-background,.chapter-title-input{font-size:14px}.chapter-number-label{font-size:14px}.chapter-heading-fields{flex-basis:170px}}
+@container(max-width:490px){.chapter-workbench-v2 .chapter-heading-fields{flex-basis:100%}.chapter-workbench-v2 .chapter-reader-actions{margin-top:3px}.chapter-inline-findings{padding:8px 10px;max-height:122px}.chapter-inline-finding,.chapter-structural-issue{font-size:9px;padding:4px 6px}.chapter-title-background,.chapter-title-input{font-size:13px}.chapter-number-label{font-size:13px}.chapter-workbench-v2 .chapter-reader-actions>.chapter-delete-button{font-size:10px!important;margin-left:3px;padding:6px 8px!important}}
+.chapter-input-mark.hidden-character.removing:after{background:var(--red,#c66779);box-shadow:0 0 0 2px var(--red-soft,#ffd9e2)}

@@ -72,6 +72,7 @@ class ChapterSlice(BaseModel):
     end: StrictInt = Field(ge=0)
     text: str
     expected_text: str
+    title: str | None = Field(default=None, max_length=500)
 
 
 class ChapterAction(BaseModel):
@@ -395,7 +396,7 @@ def install_studio_routes(application, runtime):
     def edit_chapter_slice(document_id: str, body: ChapterSlice, summary: bool = False):
         with runtime.studio.lock:
             result = runtime.studio.documents.edit_chapter_slice(document_id, body.base_version_id, body.chapter_id,
-                body.start, body.end, body.text, body.expected_text)
+                body.start, body.end, body.text, body.expected_text, title=body.title)
             return runtime.studio.documents.version_summary(result) if summary else result
 
     @router.post("/documents/{document_id}/chapters/resegment", status_code=201)

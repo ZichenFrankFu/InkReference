@@ -1,3 +1,5 @@
+import { recordDiagnostic } from "./diagnostics";
+
 export type TableKey = "works" | "characters" | "cliches";
 export type Item = {
   id: string;
@@ -80,6 +82,7 @@ export async function request<T>(url: string, init?: RequestInit): Promise<T> {
   try {
     response = await fetch(`/api${url}`, init);
   } catch {
+    recordDiagnostic("network", `${init?.method || "GET"} connection failed`, url);
     throw new ApiError("无法连接本地服务，请确认 InkReference 已启动。", 0);
   }
   if (!response.ok) {
@@ -94,6 +97,7 @@ export async function request<T>(url: string, init?: RequestInit): Promise<T> {
     } catch {
       /* preserve status fallback */
     }
+    recordDiagnostic("http", `${init?.method || "GET"} ${response.status}`, url);
     throw new ApiError(message, response.status);
   }
   return response.json() as Promise<T>;
@@ -102,9 +106,16 @@ export const jsonBody = (data: unknown) => ({
   headers: { "Content-Type": "application/json" },
   body: JSON.stringify(data),
 });
-export async function download(path: string, fallback: string) {
-  const response = await fetch(`/api${path}`);
+export async function download(path: string, fallback: string, init?: RequestInit) {
+  let response: Response;
+  try {
+    response = await fetch(`/api${path}`, init);
+  } catch {
+    recordDiagnostic("network", `${init?.method || "GET"} connection failed`, path);
+    throw new ApiError("无法连接本地服务，请确认 InkReference 已启动。", 0);
+  }
   if (!response.ok) {
+    recordDiagnostic("http", `${init?.method || "GET"} ${response.status}`, path);
     let message = `导出失败（${response.status}）`;
     try {
       const d = await response.json();

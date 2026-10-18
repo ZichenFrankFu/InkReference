@@ -4,8 +4,10 @@ import {
   CheckCircle2,
   ChevronRight,
   LoaderCircle,
+  Wrench,
   X,
 } from "lucide-react";
+import { openQuickRepair } from "./diagnostics";
 export const messageOf = (e: unknown) =>
   e instanceof Error ? e.message : "操作未完成，请重试。";
 export function Busy({
@@ -195,6 +197,11 @@ export function Notice({
     >
       {success ? <CheckCircle2 size={17} /> : <AlertCircle size={17} />}
       <div>{children}</div>
+      {error && (
+        <button className="notice-repair" onClick={openQuickRepair} type="button">
+          <Wrench size={14} />快捷修复
+        </button>
+      )}
     </div>
   );
 }

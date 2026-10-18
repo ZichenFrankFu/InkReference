@@ -86,6 +86,21 @@ def main() -> int:
                 assert version["text"] == source.decode("utf-8")
                 findings = request(f'/api/studio/documents/{upload["document_id"]}/versions/{upload["version_id"]}/findings')
                 assert any(item["kind"] == "author_note" for item in findings["items"])
+                repair = request("/api/studio/repair/capabilities")
+                assert repair["protocol"] == "inkreference.repair.v1" and repair["can_rebuild_cache"]
+                operation = request("/api/studio/repair/cache-rebuild", "POST", {
+                    "document_id": upload["document_id"], "version_id": upload["version_id"],
+                })
+                deadline = time.monotonic() + 20
+                while operation["status"] == "running" and time.monotonic() < deadline:
+                    time.sleep(.1)
+                    operation = request(f'/api/studio/repair/operations/{operation["operation_id"]}')
+                assert operation["status"] == "succeeded", operation
+                unchanged = request(f'/api/studio/documents/{upload["document_id"]}/versions/{upload["version_id"]}')
+                assert unchanged["text"] == version["text"] and unchanged["id"] == version["id"]
+                prompt = request("/api/studio/repair/prompt", "POST", {"description": "合成启动检查", "topic": "chapters"})
+                assert prompt["session_id"] and "inkreference.repair.v1" in prompt["prompt"]
+                assert "正文尾标" not in prompt["prompt"]
                 security = request("/api/studio/models/security")
                 if args.require_vault:
                     if not security["vault_available"]:
@@ -105,7 +120,7 @@ def main() -> int:
                     finally:
                         request(f"/api/studio/models/{profile_id}", "DELETE")
                 print(json.dumps({"health": "ok", "frontend": "ok", "database": "ok", "library_formats": ["db", "csv", "xlsx"],
-                                  "upload_pipeline": "ok", "native_vault": security["vault_backend"], "credential_roundtrip": args.require_vault}))
+                                  "upload_pipeline": "ok", "quick_repair": "ok", "native_vault": security["vault_backend"], "credential_roundtrip": args.require_vault}))
             except Exception:
                 log.flush()
                 print(log_path.read_text(encoding="utf-8", errors="replace")[-12000:], file=sys.stderr)

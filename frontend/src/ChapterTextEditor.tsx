@@ -5,15 +5,7 @@ export type TextHighlight = { id: string; start: number; end: number; label: str
 export type ChapterEditorHandle = { reveal: (start: number, end: number) => void; focus: () => void };
 type Props = { value: string; highlights: TextHighlight[]; readOnly: boolean; placeholder?: string; onChange: (value: string) => void };
 
-// Native text input keeps IME composition, caret movement and undo intact. The
-// background layer only supplies marks, so the reader sees one editable text.
-const ChapterTextEditor = forwardRef<ChapterEditorHandle, Props>(function ChapterTextEditor({ value, highlights, readOnly, placeholder, onChange }, ref) {
-  const input = useRef<HTMLTextAreaElement>(null);
-  const background = useRef<HTMLDivElement>(null);
-  const content = useRef<HTMLDivElement>(null);
-  const normalized = useMemo(() => textareaText(value), [value]);
-  const points = useMemo(() => Array.from(normalized.value), [normalized.value]);
-  const mapped = highlights.map((mark) => ({ ...mark, start: normalized.sourceToDisplay[Math.min(mark.start, normalized.sourceToDisplay.length - 1)] || 0, end: normalized.sourceToDisplay[Math.min(mark.end, normalized.sourceToDisplay.length - 1)] || 0 }));
+function markedNodes(points: string[], mapped: TextHighlight[]) {
   const nodes: ReactNode[] = [];
   const starts = new Map<number, typeof mapped>(), ends = new Map<number, string[]>();
   for (const mark of mapped) {
@@ -29,11 +21,36 @@ const ChapterTextEditor = forwardRef<ChapterEditorHandle, Props>(function Chapte
     for (const id of ends.get(start) || []) active.delete(id);
     for (const item of starts.get(start) || []) active.set(item.id, item);
     if (start >= end) continue;
-    // Loss warnings stay visible even within a proposed non-body removal.
     const mark = [...active.values()].sort((a, b) => Number(a.removable) - Number(b.removable))[0];
-    if (!mark) nodes.push(points.slice(start, end).join(""));
-    else nodes.push(<mark key={`${mark.id}-${start}`} data-marker={mark.id} data-offset={start} className={`chapter-input-mark ${mark.removable ? mark.selected ? "removing" : "keeping" : "diagnostic"} ${mark.kind}`} title={mark.label}>{points.slice(start, end).join("")}</mark>);
+    const text = points.slice(start, end).join("");
+    if (!mark) nodes.push(text);
+    else nodes.push(<mark key={`${mark.id}-${start}`} data-marker={mark.id} data-offset={start} className={`chapter-input-mark ${mark.removable ? mark.selected ? "removing" : "keeping" : "diagnostic"} ${mark.kind} ${/^[\p{Cf}\p{Cc}]+$/u.test(text) ? "hidden-character" : ""}`} title={mark.label}>{text}</mark>);
   }
+  return nodes;
+}
+
+export const ChapterTitleEditor = forwardRef<HTMLInputElement, Props>(function ChapterTitleEditor({ value, highlights, readOnly, placeholder, onChange }, forwardedRef) {
+  const input = useRef<HTMLInputElement>(null);
+  const background = useRef<HTMLDivElement>(null);
+  const sync = () => { if (background.current && input.current) background.current.style.transform = `translateX(${-input.current.scrollLeft}px)`; };
+  useImperativeHandle(forwardedRef, () => input.current!);
+  useLayoutEffect(sync, [value]);
+  return <div className="chapter-title-editor">
+    <div className="chapter-title-background" aria-hidden="true"><div ref={background}>{markedNodes(Array.from(value), highlights)}</div></div>
+    <input ref={input} className="chapter-title-input" aria-label="章节标题" maxLength={80} value={value} readOnly={readOnly} placeholder={placeholder} onChange={(event) => onChange(event.target.value)} onScroll={sync} spellCheck={false} autoComplete="off" />
+  </div>;
+});
+
+// Native text input keeps IME composition, caret movement and undo intact. The
+// background layer only supplies marks, so the reader sees one editable text.
+const ChapterTextEditor = forwardRef<ChapterEditorHandle, Props>(function ChapterTextEditor({ value, highlights, readOnly, placeholder, onChange }, ref) {
+  const input = useRef<HTMLTextAreaElement>(null);
+  const background = useRef<HTMLDivElement>(null);
+  const content = useRef<HTMLDivElement>(null);
+  const normalized = useMemo(() => textareaText(value), [value]);
+  const points = useMemo(() => Array.from(normalized.value), [normalized.value]);
+  const mapped = highlights.map((mark) => ({ ...mark, start: normalized.sourceToDisplay[Math.min(mark.start, normalized.sourceToDisplay.length - 1)] || 0, end: normalized.sourceToDisplay[Math.min(mark.end, normalized.sourceToDisplay.length - 1)] || 0 }));
+  const nodes = markedNodes(points, mapped);
   const sync = () => {
     if (!input.current || !content.current || !background.current) return;
     background.current.style.width = `${input.current.clientWidth}px`;

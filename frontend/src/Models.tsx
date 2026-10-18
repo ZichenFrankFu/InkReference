@@ -278,7 +278,7 @@ export default function Models() {
           <aside className="connection-sidebar" aria-label="已保存的模型">
             <div className="connection-sidebar-heading"><h2>我的模型 <span>{items.length}</span></h2><button className="icon-button" aria-label="刷新模型配置" disabled={!!busy || loading} onClick={() => void load()}><RefreshCw size={15} /></button></div>
             {loading ? <Busy label="正在读取模型配置" /> : !items.length ? (
-              <p className="connection-sidebar-empty">还没有连接，选择右侧的模型来源开始。</p>
+              <p className="connection-sidebar-empty">暂无模型</p>
             ) : items.map((p) => (
               <button className={`connection-card ${!isNew && draft?.id === p.id ? "active" : ""}`} disabled={!!busy} key={p.id}
                 aria-pressed={!isNew && draft?.id === p.id} onClick={() => guarded(() => activate(cleanProfile(p)))}>
@@ -289,13 +289,12 @@ export default function Models() {
                 {!isNew && draft?.id === p.id && <Check size={16} className="connection-selected" />}
               </button>
             ))}
-            <button className="connection-add" disabled={!!busy} onClick={() => create()}><Plus size={16} />新建连接</button>
           </aside>
           <section className="surface connection-editor">
             {!draft ? (
               <div className="connection-welcome">
                 <span className="connection-welcome-icon"><Zap size={29} /></span>
-                <h2>连接你的模型</h2><p>选择模型来源，填写地址与模型，即可开始分析。</p>
+                <h2>添加模型</h2>
                 <div className="connection-start-options">
                   <button onClick={() => create("local")} disabled={loading}><Cpu size={26} /><strong>本地模型</strong><span>Ollama · LM Studio · vLLM</span><ChevronDown size={17} /></button>
                   <button onClick={() => create("remote")} disabled={loading}><Cloud size={26} /><strong>商业 API</strong><span>OpenAI · DeepSeek · 通义千问</span><ChevronDown size={17} /></button>
@@ -423,7 +422,6 @@ export default function Models() {
               <Empty
                 icon={Activity}
                 title="还没有模型调用"
-                description="运行分析或测试连接后，用量会记录在这里。"
               />
             ) : (
               <div className="usage-scroll">

@@ -29,8 +29,8 @@ from xml.etree import ElementTree as ET
 
 from .database import DataError
 from .chapter_layout import chapter_label, chapter_body_span, expand_missing_chapters, normalize_chapter_body, normalize_document_chapter_bodies
-from .chapter_preprocessing import AUTHOR_KEYWORDS, annotate_chapters, chapter_proposals, validate_settings
-from .text_processing import analyze_text, chunk_text, diagnose_text
+from .chapter_preprocessing import AUTHOR_KEYWORDS, annotate_chapters, chapter_proposals, chapter_title_span, validate_settings
+from .text_processing import analyze_text, chunk_text, diagnose_text, split_chapters
 
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 MAX_ARCHIVE_BYTES = 100 * 1024 * 1024
@@ -466,7 +466,7 @@ class DocumentStore:
                     version_id TEXT PRIMARY KEY REFERENCES doc_versions(id) ON DELETE CASCADE,
                     document_id TEXT NOT NULL, characters INTEGER NOT NULL,
                     summary_json TEXT NOT NULL, index_json TEXT NOT NULL, navigation_json TEXT NOT NULL,
-                    layout_version INTEGER NOT NULL DEFAULT 3
+                    layout_version INTEGER NOT NULL DEFAULT 4
                 );
                 CREATE TABLE IF NOT EXISTS doc_chapter_views (
                     version_id TEXT NOT NULL REFERENCES doc_versions(id) ON DELETE CASCADE,
@@ -685,7 +685,7 @@ class DocumentStore:
                                  for chunk in version.get("chunks", [])],
                       "diagnostics": version.get("diagnostics", []),
                       "source_diagnostics": version.get("source_diagnostics", [])}
-        connection.execute("INSERT OR REPLACE INTO doc_version_views VALUES (?,?,?,?,?,?,3)",
+        connection.execute("INSERT OR REPLACE INTO doc_version_views VALUES (?,?,?,?,?,?,4)",
                            (version["id"], version["document_id"], summary["characters"],
                             _json(summary), _json(index), _json(navigation)))
         rows = []
@@ -705,14 +705,14 @@ class DocumentStore:
                 if document is None:
                     raise DataError(404, "全文文档不存在")
                 version_id = document["latest_version_id"]
-            row = connection.execute(f"SELECT {column} FROM doc_version_views WHERE version_id=? AND document_id=? AND layout_version=3",
+            row = connection.execute(f"SELECT {column} FROM doc_version_views WHERE version_id=? AND document_id=? AND layout_version=4",
                                      (version_id, document_id)).fetchone()
             if row is None:
                 # Serialize only the one-time lazy rebuild. Recheck after the
                 # lock so simultaneous summary/index reads do not rescan or
                 # contend while upgrading a deferred read transaction.
                 connection.execute("BEGIN IMMEDIATE")
-                concurrent = connection.execute(f"SELECT {column} FROM doc_version_views WHERE version_id=? AND document_id=? AND layout_version=3", (version_id, document_id)).fetchone()
+                concurrent = connection.execute(f"SELECT {column} FROM doc_version_views WHERE version_id=? AND document_id=? AND layout_version=4", (version_id, document_id)).fetchone()
                 if concurrent is not None:
                     return json.loads(concurrent[column])
                 stored = connection.execute("SELECT payload_json FROM doc_versions WHERE id=? AND document_id=?",
@@ -728,6 +728,24 @@ class DocumentStore:
 
     def get_version_navigation(self, document_id: str, version_id: str | None = None) -> dict[str, Any]:
         return self._view(document_id, version_id, "navigation_json")
+
+    def rebuild_read_views(self, document_id: str, version_id: str | None = None) -> dict[str, Any]:
+        """Atomically rebuild one derived read model from its immutable snapshot."""
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            document = connection.execute("SELECT latest_version_id FROM doc_documents WHERE id=?", (document_id,)).fetchone()
+            if document is None:
+                raise DataError(404, "全文文档不存在")
+            selected = version_id or document["latest_version_id"]
+            stored = connection.execute("SELECT payload_json FROM doc_versions WHERE document_id=? AND id=?", (document_id, selected)).fetchone()
+            if stored is None:
+                raise DataError(404, "全文版本不存在")
+            version = json.loads(stored["payload_json"])
+            connection.execute("DELETE FROM doc_chapter_views WHERE version_id=?", (selected,))
+            connection.execute("DELETE FROM doc_version_views WHERE version_id=?", (selected,))
+            self._write_views(connection, version)
+            summary = connection.execute("SELECT summary_json FROM doc_version_views WHERE version_id=?", (selected,)).fetchone()
+            return json.loads(summary["summary_json"])
 
     def create_version(self, document_id: str, base_version_id: str, options: dict[str, Any],
                        manual_text: str | None = None) -> dict[str, Any]:
@@ -808,7 +826,7 @@ class DocumentStore:
         # Ensure a legacy snapshot is materialized only once. The existence
         # check is small; body reads do not deserialize the chapter directory.
         with self._connection() as connection:
-            exists = connection.execute("SELECT 1 FROM doc_version_views WHERE version_id=? AND document_id=? AND layout_version=3", (version_id, document_id)).fetchone()
+            exists = connection.execute("SELECT 1 FROM doc_version_views WHERE version_id=? AND document_id=? AND layout_version=4", (version_id, document_id)).fetchone()
         if exists is None:
             self.get_version_summary(document_id, version_id)
         with self._connection() as connection:
@@ -822,6 +840,16 @@ class DocumentStore:
             response = {**metadata, "chapter": metadata, "document_id": document_id, "version_id": version_id,
                         "proposals": json.loads(row["proposals_json"]),
                         "diagnostics": json.loads(row["diagnostics_json"]), "offset_unit": "unicode_codepoints"}
+            title_start, title_end = chapter_title_span(metadata)
+            response.update(title_source_start=title_start, title_source_end=title_end,
+                            title_proposals=[proposal for proposal in response["proposals"]
+                                             if proposal["start"] >= title_start and proposal["end"] <= title_end],
+                            heading_proposals=[proposal for proposal in response["proposals"] if proposal.get("scope") == "heading"],
+                            structured_issues=[{"id": f"structure-{metadata['id']}-{issue['kind']}",
+                                                "kind": issue["kind"], "label": issue["label"],
+                                                "reason": "章节正文篇幅与本作品其他章节差异较大" if issue["kind"] == "length" else issue["label"],
+                                                "location": "heading"}
+                                               for issue in metadata.get("issues", []) if issue["kind"] in {"length", "duplicate", "gap"}])
             if body_only:
                 actual_start = min(body_end, max(start, body_start))
                 actual_end = min(actual_start + limit, body_end)
@@ -849,18 +877,48 @@ class DocumentStore:
             if document["latest_version_id"] != base_version_id:
                 raise DataError(409, "全文已有新版本，请刷新后再保存")
 
+    @staticmethod
+    def _new_chapter_marker(chapter: dict[str, Any], title: str, options: dict[str, Any]) -> str:
+        DocumentStore._valid_text(title)
+        title = title.strip()
+        if len(title) > 80 or "\n" in title or "\r" in title or (not title and chapter.get("number") is None):
+            raise DataError(422, "章节标题需为不超过 80 字的单行文本")
+        marker = chapter.get("raw_marker") or ""
+        if not marker:
+            raise DataError(422, "该段落没有章节标题，请使用新增章节")
+        left, right = chapter_title_span(chapter)
+        if left == right and title:
+            marker = marker[:left] + " " + title + marker[right:]
+        else:
+            marker = marker[:left] + title + marker[right:]
+        parsed = split_chapters(marker + "\n", heading_formats=options.get("heading_formats") or [chapter["pattern"]],
+                                custom_formats=options.get("custom_formats", []))["chapters"]
+        if (len(parsed) != 1 or parsed[0].get("raw_marker") != marker
+                or parsed[0].get("number") != chapter.get("number") or parsed[0].get("title") != title):
+            raise DataError(422, "该标题未能识别为独立章节；请移除标题末尾的句号、问号等标点，或在「分卷与章节识别」中调整格式后重试。修改尚未保存。")
+        return marker
+
     def _incremental_chapter_edit(self, document_id: str, base: dict[str, Any], chapter: dict[str, Any],
-                                  start: int, end: int, replacement: str) -> dict[str, Any]:
+                                  start: int, end: int, replacement: str, *, title: str | None = None) -> dict[str, Any]:
         """Refresh only the edited chapter; retain downstream chunk identities."""
-        absolute_start, absolute_end = chapter["start"] + start, chapter["start"] + end
-        updated = base["text"][:absolute_start] + replacement + base["text"][absolute_end:]
+        options = self._version_options(base)
+        marker = self._new_chapter_marker(chapter, title, options) if title is not None else None
+        changed_text = chapter["text"][:start] + replacement + chapter["text"][end:]
+        marker_delta = 0
+        if marker is not None:
+            marker_delta = len(marker) - len(chapter["raw_marker"])
+            changed_text = marker + changed_text[len(chapter["raw_marker"]):]
+        updated = base["text"][:chapter["start"]] + changed_text + base["text"][chapter["end"]:]
         delta = len(replacement) - (end - start)
+        delta += marker_delta
         chapters = []
         changed = None
         for item in base["chapters"]:
             current = dict(item)
             if item["id"] == chapter["id"]:
-                current["text"] = item["text"][:start] + replacement + item["text"][end:]
+                current["text"] = changed_text
+                if marker is not None:
+                    current.update(raw_marker=marker, title=title.strip(), body_start=item["body_start"] + marker_delta)
                 current["content"] = current["text"][current["body_start"] - current["start"]:]
                 current["end"] += delta
                 changed = current
@@ -869,9 +927,9 @@ class DocumentStore:
                     current[field] += delta
             chapters.append(current)
         assert changed is not None
-        options = self._version_options(base)
         # Small precomputed diagnostics do not carry any source text or full
         # version. Invalidating one chapter keeps unchanged evidence exact.
+        self.get_version_summary(document_id, base["id"])
         with self._connection() as connection:
             cached = connection.execute("SELECT chapter_id,proposals_json,diagnostics_json FROM doc_chapter_views WHERE version_id=?", (base["id"],)).fetchall()
         proposals = {row["chapter_id"]: json.loads(row["proposals_json"]) for row in cached if row["chapter_id"] != chapter["id"]}
@@ -961,8 +1019,6 @@ class DocumentStore:
         base = self.get_version(document_id, base_version_id)
         if chapter_id.startswith("missing-before-"):
             return self._fill_missing(document_id, base, chapter_id, body_text, title)
-        if title is not None:
-            raise DataError(422, "请使用章节重命名修改已有标题")
         chapter = self._chapter(base, chapter_id)
         # Keep the exact source separator outside the editable body. In
         # particular, a CRLF heading must never become CRCRLF after saving.
@@ -970,12 +1026,12 @@ class DocumentStore:
         replacement = normalize_chapter_body(body_text, trim_boundaries=True)
         if replacement and chapter.get("raw_marker") and start == chapter["body_start"] - chapter["start"] and not chapter["text"][:start].endswith(("\n", "\r")):
             replacement = "\n" + replacement
-        prepared = self._incremental_chapter_edit(document_id, base, chapter, start, end, replacement)
+        prepared = self._incremental_chapter_edit(document_id, base, chapter, start, end, replacement, title=title)
         return self._commit_prepared(document_id, base, prepared,
                                      change={"stage": "chapter_edit", "chapter_id": chapter_id, "count": 1})
 
     def edit_chapter_slice(self, document_id: str, base_version_id: str, chapter_id: str,
-                           start: int, end: int, text: str, expected_text: str) -> dict[str, Any]:
+                           start: int, end: int, text: str, expected_text: str, *, title: str | None = None) -> dict[str, Any]:
         """Replace one raw source span displayed by the body-only page editor."""
         self._valid_text(text)
         self._valid_text(expected_text)
@@ -988,7 +1044,10 @@ class DocumentStore:
             raise DataError(422, "正文分页编辑范围无效")
         if chapter["text"][start:end] != expected_text:
             raise DataError(409, "正文内容已变化，请刷新后再保存")
-        replacement = normalize_chapter_body(text)
+        # A title-only save of a legacy blank-line view must not silently
+        # rewrite the source body merely because the editor displays one line.
+        unchanged_body_view = title is not None and text == _normalized_slice(expected_text, start)[0]
+        replacement = expected_text if unchanged_body_view else normalize_chapter_body(text)
         # Legacy callers can include the heading separator in the requested
         # span. Reintroduce its exact token when an edit removes it.
         body_start, body_end = chapter_body_span(chapter)
@@ -1004,7 +1063,7 @@ class DocumentStore:
         if end > body_end and chapter["end"] < len(base["text"]):
             replacement = re.sub(r"(?:(?>\r\n|\r|\n)[ \t\u3000]*)+$", "", replacement)
             replacement += chapter["text"][body_end:end]
-        prepared = self._incremental_chapter_edit(document_id, base, chapter, start, end, replacement)
+        prepared = self._incremental_chapter_edit(document_id, base, chapter, start, end, replacement, title=title)
         return self._commit_prepared(document_id, base, prepared,
                                      change={"stage": "chapter_page_edit", "chapter_id": chapter_id,
                                              "start": start, "end": end, "count": 1})
@@ -1103,11 +1162,13 @@ class DocumentStore:
                                selections: list[dict[str, Any]]) -> dict[str, Any]:
         if not isinstance(selections, list) or not selections:
             raise DataError(422, "请选择要清理的标注")
+        self._assert_current(document_id, base_version_id)
         base = self.get_version(document_id, base_version_id)
         options = self._version_options(base)
         ranges = []
         seen_chapters = set()
         removed = []
+        heading_checks = []
         for selection in selections:
             if not isinstance(selection, dict) or not isinstance(selection.get("chapter_id"), str):
                 raise DataError(422, "清理选择无效")
@@ -1122,42 +1183,37 @@ class DocumentStore:
             proposals = {proposal["id"]: proposal for proposal in chapter_proposals(chapter, options) if proposal["removable"]}
             if set(ids) - set(proposals):
                 raise DataError(409, "清理标注已变化，请刷新后重试")
+            heading_ranges = []
             for identifier in ids:
                 proposal = proposals[identifier]
+                if proposal.get("scope") == "heading":
+                    left, right = chapter_title_span(chapter)
+                    if not left <= proposal["start"] <= proposal["end"] <= right:
+                        raise DataError(422, "该标注涉及章节序号，请在标题中手动修复")
+                    heading_ranges.append((proposal["start"], proposal["end"]))
                 ranges.append((chapter["start"] + proposal["start"], chapter["start"] + proposal["end"]))
                 removed.append({"chapter_id": chapter_id, "proposal_id": identifier, "kind": proposal["kind"],
-                                "characters": proposal["end"] - proposal["start"]})
+                                "scope": proposal.get("scope", "body"), "characters": proposal["end"] - proposal["start"]})
+            if heading_ranges:
+                heading_checks.append((chapter, _without_ranges(chapter["raw_marker"], heading_ranges)))
         if not ranges:
             raise DataError(422, "尚未选择要清理的内容")
         updated = _without_ranges(base["text"], ranges)
         prepared = _prepare(updated, base["text"], options, normalize=False)
+        for chapter, marker in heading_checks:
+            new_start = chapter["start"] - sum(end - start for start, end in ranges if end <= chapter["start"])
+            if not any(item["start"] == new_start and item.get("number") == chapter.get("number")
+                       and item.get("raw_marker") == marker for item in prepared["chapters"]):
+                raise DataError(422, "清理后的标题未能识别为独立章节，请保留该标记并手动修改标题。内容尚未保存。")
         return self._commit_prepared(document_id, base, prepared,
                                      change={"stage": "reviewed_chapter_cleaning", "count": len(removed), "removed": removed})
 
     def rename_chapter(self, document_id: str, base_version_id: str, chapter_id: str, title: str) -> dict[str, Any]:
-        self._valid_text(title)
-        if not title.strip() or len(title) > 80 or "\n" in title or "\r" in title:
-            raise DataError(422, "章节标题需为 1 至 80 字的单行文本")
+        self._assert_current(document_id, base_version_id)
         base = self.get_version(document_id, base_version_id)
         chapter = self._chapter(base, chapter_id)
-        marker = chapter["raw_marker"]
-        if not marker:
-            raise DataError(422, "该段落没有章节标题，请使用新增章节")
-        # Preserve the numeral/punctuation prefix and replace title only.
-        old_title = chapter["title"]
-        if old_title and marker.rstrip().endswith(old_title):
-            title_start = marker.rfind(old_title)
-            new_marker = marker[:title_start] + title.strip() + marker[title_start + len(old_title):]
-        else:
-            trailing = marker[len(marker.rstrip()):]
-            new_marker = marker.rstrip() + " " + title.strip() + trailing
-        updated = base["text"][:chapter["start"]] + new_marker + base["text"][chapter["body_start"]:]
-        prepared = _prepare(updated, base["text"], self._version_options(base), normalize=False)
-        recognized = next((item for item in prepared["chapters"]
-                           if item["start"] == chapter["start"] and item.get("number") == chapter.get("number")
-                           and item.get("raw_marker") == new_marker and item.get("title") == title.strip()), None)
-        if recognized is None or len(prepared["chapters"]) != len(base["chapters"]):
-            raise DataError(422, "该标题未能识别为独立章节；请移除标题末尾的句号、问号等标点，或在「分卷与章节识别」中调整格式后重试。标题尚未保存。")
+        prepared = self._incremental_chapter_edit(document_id, base, chapter,
+                                                   len(chapter["raw_marker"]), len(chapter["raw_marker"]), "", title=title)
         return self._commit_prepared(document_id, base, prepared, change={"stage": "chapter_rename", "chapter_id": chapter_id, "count": 1})
 
     def insert_chapter(self, document_id: str, base_version_id: str, after_chapter_id: str | None,

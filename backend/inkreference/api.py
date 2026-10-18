@@ -168,16 +168,31 @@ def _origin_allowed(request: Request, origin: str) -> bool:
     return allowed_origin(origin, str(request.base_url).rstrip("/"))
 
 
+def _diagnostic_path(request: Request) -> str:
+    route = request.scope.get("route")
+    if getattr(route, "path", None):
+        return route.path
+    return "/assets/{asset}" if request.url.path.startswith("/assets/") else "/{unmatched}"
+
+
 def create_app(data_dir: str | Path | None = None, static_dir: str | Path | None = None) -> FastAPI:
     runtime = Runtime(Path(data_dir).expanduser().resolve() if data_dir is not None else default_data_dir())
 
+    def active_workers():
+        workers = runtime._studio.active_threads() if runtime._studio else []
+        repair_workers = getattr(application.state, "active_quick_repair_threads", None)
+        return workers + (repair_workers() if repair_workers is not None else [])
+
     @asynccontextmanager
     async def lifespan(_: FastAPI):
-        with workspace_lock(runtime.data_dir, pending_threads=lambda: runtime._studio.active_threads() if runtime._studio else []):
+        with workspace_lock(runtime.data_dir, pending_threads=active_workers):
             runtime.store
             try:
                 yield
             finally:
+                repair_shutdown = getattr(application.state, "shutdown_quick_repair", None)
+                if repair_shutdown is not None:
+                    await run_in_threadpool(repair_shutdown)
                 if runtime._studio is not None:
                     if runtime._studio._ingestions is not None:
                         await run_in_threadpool(runtime._studio.ingestions.shutdown)
@@ -205,10 +220,18 @@ def create_app(data_dir: str | Path | None = None, static_dir: str | Path | None
 
     @application.middleware("http")
     async def local_mutation_guard(request: Request, call_next):
+        started = time.monotonic()
+
         def protected(response):
             response.headers.update(SECURITY_HEADERS)
             if request.url.path.startswith("/api/") or "text/html" in response.headers.get("content-type", ""):
                 response.headers["Cache-Control"] = "no-store"
+            try:
+                repair_service(application).record_request(request.method, _diagnostic_path(request), response.status_code,
+                                                           (time.monotonic() - started) * 1000)
+            except Exception:
+                # Diagnostics must not turn a completed operation into an error.
+                pass
             return response
 
         hosts = request.headers.getlist("host")
@@ -229,7 +252,15 @@ def create_app(data_dir: str | Path | None = None, static_dir: str | Path | None
                         return protected(JSONResponse(status_code=413, content={"detail": "一次导入的数据集总大小不能超过 128 MB。"}))
                 except ValueError:
                     return protected(JSONResponse(status_code=400, content={"detail": "无效的请求长度。"}))
-        return protected(await call_next(request))
+        try:
+            response = await call_next(request)
+        except Exception as exc:
+            try:
+                repair_service(application).record_exception(exc, method=request.method, path=_diagnostic_path(request))
+            except Exception:
+                pass
+            response = JSONResponse(status_code=500, content={"detail": "程序内部错误。", "repair_available": True})
+        return protected(response)
 
     @application.get("/api/health")
     def health():
@@ -437,6 +468,8 @@ def create_app(data_dir: str | Path | None = None, static_dir: str | Path | None
 
     from .studio import install_studio_routes
     install_studio_routes(application, runtime)
+    from .repair_routes import install_repair_routes, repair_service
+    install_repair_routes(application, runtime)
 
     # API typos must stay JSON 404s rather than falling through to the SPA.
     @application.api_route("/api/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])

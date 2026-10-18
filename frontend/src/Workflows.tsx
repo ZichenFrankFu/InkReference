@@ -482,8 +482,7 @@ export default function Workflows() {
             {!draft ? (
               <Empty
                 icon={GitBranch}
-                title="定制你的素材提取方法"
-                description="选择工作流，调整产出、提示词与预算。"
+                title="选择工作流"
               />
             ) : (
               <>
@@ -694,8 +693,7 @@ export default function Workflows() {
             {!skill ? (
               <Empty
                 icon={Code2}
-                title="让你的分析习惯可以复用"
-                description="上传或编写 Skill，定义提示词与结构化输出。"
+                title="选择 Skill"
               />
             ) : (
               <>

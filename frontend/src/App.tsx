@@ -11,17 +11,23 @@ import {
   PanelLeftClose,
   PenLine,
   Play,
-  Settings2,
+  Monitor,
+  Moon,
+  Sun,
+  Wrench,
   SlidersHorizontal,
 } from "lucide-react";
 import { Busy, Modal, Notice } from "./ui";
 import { download } from "./api";
 import { studio } from "./studio";
+import { readScheme, setScheme, type Scheme } from "./theme";
+import "./theme.css";
 const Library = memo(lazy(() => import("./Library")));
 const Documents = memo(lazy(() => import("./Documents")));
 const Jobs = memo(lazy(() => import("./Jobs")));
 const Workflows = memo(lazy(() => import("./Workflows")));
 const Models = memo(lazy(() => import("./Models")));
+const QuickRepair = lazy(() => import("./QuickRepair"));
 type Section =
   | "library"
   | "documents"
@@ -70,11 +76,32 @@ export default function App() {
     return () => media.removeEventListener("change", compact);
   }, []);
   const [jobId, setJobId] = useState<string>();
-  const [help, setHelp] = useState(false);
+  const [repairOpen, setRepairOpen] = useState(false);
+  const [appearanceOpen, setAppearanceOpen] = useState(false);
+  const appearanceTrigger = useRef<HTMLButtonElement>(null);
+  const [scheme, changeScheme] = useState<Scheme>(readScheme);
+  useEffect(() => {
+    const open = () => { setRepairOpen(true); setMobile(false); setAppearanceOpen(false); };
+    window.addEventListener("inkreference:debug-open", open);
+    return () => window.removeEventListener("inkreference:debug-open", open);
+  }, []);
+  useEffect(() => {
+    const sync = () => changeScheme(readScheme());
+    window.addEventListener("inkreference:scheme-changed", sync);
+    return () => window.removeEventListener("inkreference:scheme-changed", sync);
+  }, []);
+  useEffect(() => {
+    if (!appearanceOpen) return;
+    const close = (event: KeyboardEvent) => { if (event.key === "Escape") { setAppearanceOpen(false); appearanceTrigger.current?.focus(); } };
+    document.querySelector<HTMLButtonElement>(".appearance-popover button.active")?.focus();
+    document.addEventListener("keydown", close);
+    return () => document.removeEventListener("keydown", close);
+  }, [appearanceOpen]);
   const [modelReturn, setModelReturn] = useState<Section | null>(null);
   const sectionRef = useRef(section);
   const nav = useCallback((id: Section) => {
     setMobile(false);
+    setAppearanceOpen(false);
     if (id === sectionRef.current) return;
     if (id === "models") setModelReturn(sectionRef.current);
     sectionRef.current = id;
@@ -144,11 +171,23 @@ export default function App() {
             <FolderArchive size={18} />
             <span>备份与恢复</span>
           </button>
-          <button className="sidebar-settings" onClick={() => setHelp(true)} title={collapsed ? "关于工作区" : undefined}>
-            <Settings2 size={16} />
-            <span>关于工作区</span>
-            <span>本地</span>
+          <button className="nav-item repair-entry" onClick={() => { setRepairOpen(true); setMobile(false); setAppearanceOpen(false); }} title={collapsed ? "快捷修复" : undefined}>
+            <Wrench size={18} />
+            <span>快捷修复</span>
           </button>
+          <div className="appearance-control">
+            <button ref={appearanceTrigger} className="appearance-trigger" onClick={() => setAppearanceOpen((open) => !open)} aria-expanded={appearanceOpen} aria-controls="appearance-options" aria-label="外观" title={collapsed ? "外观" : undefined}>
+              {scheme === "dark" ? <Moon size={17} /> : scheme === "light" ? <Sun size={17} /> : <Monitor size={17} />}
+              <span>外观</span>
+              <small>{scheme === "dark" ? "深色" : scheme === "light" ? "浅色" : "跟随系统"}</small>
+            </button>
+            {appearanceOpen && <>
+              <button className="appearance-dismiss" aria-label="关闭外观选项" tabIndex={-1} onClick={() => setAppearanceOpen(false)} />
+              <div id="appearance-options" className="appearance-popover" role="group" aria-label="颜色方案" onKeyDown={(event) => { if (event.key === "Escape") setAppearanceOpen(false); }}>
+                {([{ id: "light", label: "浅色", icon: Sun }, { id: "dark", label: "深色", icon: Moon }, { id: "system", label: "跟随系统", icon: Monitor }] as const).map(({ id, label, icon: Icon }) => <button key={id} onClick={() => { setScheme(id); changeScheme(id); setAppearanceOpen(false); appearanceTrigger.current?.focus(); }} aria-pressed={scheme === id} className={scheme === id ? "active" : ""}><Icon size={16} /><span>{label}</span><span className={`scheme-preview ${id}`} /></button>)}
+              </div>
+            </>}
+          </div>
         </div>
       </aside>
       <div className="workspace">
@@ -179,14 +218,6 @@ export default function App() {
                 返回{sections.find((s) => s.id === modelReturn)?.label || "备份与恢复"}
               </button>
             )}
-            <button
-              className={`button secondary model-settings-entry ${section === "models" ? "selected" : ""}`}
-              onClick={() => nav("models")}
-              aria-current={section === "models" ? "page" : undefined}
-            >
-              <SlidersHorizontal size={16} />
-              模型设置
-            </button>
           </div>
         </header>
         <div id="workspace-content" className="workspace-content" tabIndex={-1}>
@@ -219,25 +250,7 @@ export default function App() {
           ))}
         </div>
       </div>
-      {help && (
-        <Modal title="InkReference" onClose={() => setHelp(false)}>
-          <div className="modal-body">
-            <div className="about-row">
-              <span>素材与全文</span>
-              <p>整理作品、人物、桥段，保留全文原件、清洗版本与来源证据。</p>
-            </div>
-            <div className="about-row">
-              <span>可定制分析</span>
-              <p>配置工作流、Skills 与模型，审核提取结果后再入库。</p>
-            </div>
-          </div>
-          <div className="modal-footer">
-            <button className="button primary" onClick={() => setHelp(false)}>
-              关闭
-            </button>
-          </div>
-        </Modal>
-      )}
+      {repairOpen && <Suspense fallback={<Busy label="正在打开快捷修复" />}><QuickRepair onClose={() => setRepairOpen(false)} /></Suspense>}
     </div>
   );
 }
