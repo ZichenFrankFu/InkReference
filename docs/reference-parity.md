@@ -4,11 +4,31 @@
 
 本文件先明确完整审查范围与验收方法。表内“复刻目标”是需求与设计，不代表该行已通过运行验收；本轮实际实现、差异和独立验收结果见末尾，跨平台及浏览器结果见 `docs/validation.md`。
 
+## 上游 schema 与事实来源复核
+
+本次通过 `git ls-remote origin HEAD` 只读核对远端，HEAD 与上述审计提交一致；未改变固定的复用验证检出。本次重新读取了上游 `storage/reference_schema.py`、`knowledge/reference_db.py`、参考页实际挂载组件与对应路由。上游使用普通 SQLite 表和作品级 JSON，并没有独立的“人物属性历史”关系表。章节标签是文本证据的位置，和故事发生时间、数据库修改时间分别保存。
+
+| 上游表／结构 | 实际职责 | InkReference 采用的设计 |
+|---|---|---|
+| `reference_works` | `ref_id` 主键、作品元数据、评分／喜欢原因、全文与预处理状态；剧情、角色、设定、风格、节奏、分卷等 JSON；叙事／纯设定模式 | 素材作品保留外部 ID；全文及分析拆为独立存储，通过明确 ID 关联，分析写入仍有 revision 和人工审核 |
+| `reference_chapters` | `(ref_id,number)` 主键；持久化已确认的章节目录、原始标题、解析章号、卷名、正文、原文范围；另有场景／embedding 缓存 | 区分目录顺序与原文章号；采用不可变正文版本及可重建章节读模型，已运行分析继续指向原版本 |
+| `reference_entries` | 一部作品的摘录／用户笔记，区分场景、人物、设定、对白、技巧、气氛等类型，保存来源与位置 | 本应用素材与关系模型独立实现；没有将此表整体复制为摘录库 |
+| `project_reference_links` | 将参考作品／摘录用于某个写作项目，维度为 `world/character/plot/style/mood` | 不属于本应用当前的作品／人物／桥段关联；未移植写作项目注入接口 |
+| `work_index_progress` | `(ref_id,level,backend)` 保存 L1 摘要、L2 章节、L3 原文向量索引的分级进度与断点 | 未复制该向量索引体系；数据库字段筛选不等同于语义检索 |
+
+人物字段为 `name/role_tag/intro/mentions/first_chapter/first_seen_at`，并兼容 `speech_samples/appearance_chapters/appearance_word_count`。`appearance`、`personality`、`experiences` 都是 `[{chapter,text}]`：一项事实保留一处章节锚点，不把性格或外貌覆盖成一个最终值。设定为 `category/title/content/first_chapter/first_introduced_at/updates[{chapter,text}]`，分类包含力量体系、势力组织、地理、社会规则、历史、世界观、其他。
+
+剧情为 `epochs → periods → events`，事件字段为 `subject/category/name/description/first_chapter/time_marker/time_markers`。`first_chapter` 指向首次出现的文本章节；`time_marker` 和 `time_markers` 表示故事内时间；`created_at/updated_at` 才是数据库操作时间。上游 `CharactersAndSettingsExtraction.tsx::CharacterCard` 的实际经历读取规则是：人工／已存 `experiences` 非空时优先，否则按剧情事件 `subject` 与人物名的精确匹配补充显示；不是注释所说的始终从剧情重新生成。不能把派生补空写回为重复的第二份经历。
+
+上游 `referenceMerge.ts` 对人物按姓名合并，对设定按分类与标题合并，逐章事实按 `chapter + text` 去重；人物提及数累加、简介取较长值、角色定位按优先级、首次章号取较早值。InkReference 保留丰富事实数组与首次出现信息，但改为服务端合并、幂等贡献和人工标量优先，避免重新提交同一段时反复累加，或较长的新摘要覆盖人工编辑。
+
+上游 `UnifiedExtractionPanel.tsx` 每段一次调用同时提取事件／人物／设定／风格，分别记录四节完成状态；按字数聚合风格，再从逐章信号派生节奏。它的批量路径直接提交全部四节，且只要存在某个分段 ledger 就跳过；本应用保留批处理，要求人工审核，并逐节判定完成。上游 `prompts.py` 要求推断具体故事日期，`resolveEventTimeMarkers` 还会继承前一绝对日期；本应用不继承这一推断要求，原文不明确时保留未知或相对时间。
+
 ## 页面与作品
 
 叙事型作品的实际 7 个 tab 来自 `ui/frontend/src/pages/ReferenceLibraryPage.tsx` 的 `WorkDetailTab` / `TABS`：**原始文件、预处理、特征提取、剧情大纲、角色、设定、文本特征**。
 
-这是上游审查基线。InkReference 按后续工作流要求，把文件来源和预处理统一放入“全文与清洗”，依次为**原始文件、分卷、正文**；“分析与审核”只保留**特征提取、剧情大纲、角色、设定、文本特征**五个叙事子页。移除的是重复入口，章节识别、清洗和版本操作继续由全文工作区提供。
+这是上游审查基线。InkReference 按后续工作流要求，把文件来源和预处理统一放入“文本清理”，依次为**原始文件、分卷、正文**；“分析与审核”只保留**特征提取、剧情大纲、角色、设定、文本特征**五个叙事子页。移除的是重复入口，章节识别、清洗和版本操作继续由全文工作区提供。
 
 纯设定作品使用 `ui/frontend/src/components/reference/PureSettingPanel.tsx` 的 `PURE_SETTING_TABS`：**原始文本、设定、角色、特征提取、设定特征**。旧注释中的“快捷输入”不是当前实际 tab 文案。创建作品时选择 `structure_type=setting_collection` 才进入该模式。
 
@@ -103,12 +123,12 @@
 
 | 基线 | 当前入口与实现 | 覆盖与改动 |
 |---|---|---|
-| W01–04 | `ReferenceAnalysis.tsx`、`ReferenceEditors.tsx`、`reference_analysis.py`；原有 `Library.tsx` / v8 API | 作品搜索、评分、喜欢原因、章节笔记、独立素材作品 CRUD；参考分析以全文条目为中心。媒介筛选和批量作品删除没有完整复制到参考分析列表 |
+| W01–04 | `Library.tsx`、`catalog_links.py`、`ReferenceAnalysis.tsx`、`reference_analysis.py` | 首页作品 CRUD、类别／看过／有文本／有分析筛选与排序；列表快捷改看过。作品详情按明确 ID 读取文本／剧情／人物／设定，分析区继续保存评分、喜欢原因和章节笔记。没有把上游批量删作品按钮复制到分析列表 |
 | D01–02 | `Documents.tsx`、`DocumentUpload.tsx`、`ingestions.py`、`documents.py::{upload,replace,append,list_sources}` | TXT／PDF／EPUB 统一上传任务，PDF／EPUB 先转 TXT 后自动识别／扫描；新建或明确选择更新／补充，保留历史来源及版本。原始文件清单无下载按钮，按单个文件范围移除正文暂未提供 |
 | D03–05 | `ChapterWorkbench.tsx` 识别设置；`text_processing.py`、`chapter_preprocessing.py` | 格式候选、多格式、中文/全角/英文编号、自定义 N 模板和超时受限正则；自定义格式逐条新增/修改/启停/删除；前言/尾文完整覆盖，重复章号不丢章 |
 | D06–09 | `chapter_preprocessing.py`、章节工作台目录与标注 | 整章作者说、章内题外话、尾部/对话保护、缺字/乱码、长度/缺号/重号、可配置关键词及杂字规则；不可恢复的缺字仅诊断。未提供上游自动编码往返修复 |
 | D07、D11–12 | `documents.py::{findings,apply_chapter_cleaning}`、章节工作台与问题列表；全文版本下载 | 每章同一正文内红色删除候选可逐处保留，问题列表支持全选／勾选；保存仅移除所选区间，长章分页仍有全章候选索引；生成新版本，可撤销/恢复，导出全书 TXT；诊断集中在正文而非单独 tab |
-| D10–12 | `documents.py` 逐章 edit/edit-slice/rename/insert/delete/restore；`ChapterWorkbench.tsx` | 正文直接编辑与脏状态保护，长章按字符切片保存并核对原文本，未显示部分不会截断；改名、插入/删除、自由多选章节批量删除、版本历史、恢复/撤销 |
+| D10–12 | `documents.py` 逐章 edit/edit-slice/rename/insert/delete/restore；`ChapterWorkbench.tsx` | 标题／正文直接编辑与脏状态保护，长章按字符切片保存并核对原文本；插入／外露删除入口，多章删除 API；删除后同编号序列自动调整，历史恢复／撤销保留 |
 | D13 | 固定进度区域、章节缓存和预取；`ingestions.py` 的统一上传阶段；`workflows.py` 的任务状态 | 章切换不插入占位条挤动内容；上传转换、解析和扫描持久化进度，可取消／重试。没有复制预处理专用的暂停/继续/日志界面；模型分析仍独立支持取消／恢复，全文页显示分析进度 |
 | D14 | `VolumePanel.tsx`、`volumes.py`、`studio.py` 分卷路由 | 标题规则建议、手工范围、模型检测、复制 prompt/粘贴预览；版本固定、保存检查连续覆盖 |
 | E01–07 | `ReferenceExtraction.tsx`、`workflows.py`、`reference_analysis.py`、`skills.py` / `workflow_definitions.py` | 固定版本的 LangGraph 分段、按卷筛选、单段/批量提取、提示词/粘贴、逐段预览、四节独立审核与完成记录、幂等合并；批量不再自动确认事实 |
@@ -119,12 +139,28 @@
 | P07–08 | `ReferenceAnalysisStore::build_source`、`documents.py::create_literal_version`、特征提取 tab | 原始条目、已有角色、设定合成固定材料版本，三节独立人审。模型请求统一用量台账，网页粘贴不伪造 API token |
 | 额外完整性 | `reference_analysis_history`、活动提交/人工覆盖快照、`tests/test_reference_collection.py` | 分析历史恢复时同步恢复有效提交和人工覆盖，允许重新审核已撤销的段；来源正文版本随提交保留，旧版证据不会假装属于新正文 |
 
+### 数据库管理改版的最终机制对照
+
+| 机制 | 上游设计 | 本应用实现与修改 |
+|---|---|---|
+| 作品与全文身份 | `reference_works.ref_id` 同时承载元数据、文件路径与分析 JSON | `works.id` 管理目录身份，`doc_documents.work_id` 显式关联；“完成清洗”固定当前完成版本，一部作品可有多部文本，不按标题猜测关联 |
+| 数据库导入 | 上游内部参考库不是本应用最新三张 CSV 的交换格式 | 最新作品／角色／桥段三表保留独立 ID 和结构化关系；主库迁移 4 将旧字段归档，角色可跨作品关联；该交换与迁移实现为 InkReference 自己的代码 |
+| 人物逐章属性 | 外貌／性格／经历为 `{chapter,text}` 列表，首次章号与故事时间分开 | 保留结构、编辑与来源版本；作品详情增加按章节查看，未知锚点保留，不把它宣传为严格防剧透；不会只按姓名自动合并全局人物 |
+| 人物经历与剧情 | 自有经历优先，空列表用精确主体匹配派生 | 按相同规则派生读取，保持剧情与人物字段的人工编辑，不将派生结果复制回事实表 |
+| 设定演进 | 分类条目及逐章 `updates` | 保留分类、首次章号与变化列表；按作品／文本／章节定位，同一份已审核事实供两个入口读取 |
+| 重新分章 | 确认章节后保存，旧前端缓存与正文可能具有独立状态 | 预览旧／新目录、空章和重号数量，冲突时保留旧版或采用新版；token 与版本校验后整体替换，不合并两个目录。可修复相邻空重号标题，两个有效正文不会自动合并 |
+| 删除后的序号 | 上游章节编辑依赖当前识别目录 | 删除后更新同编号序列的后续章号，保留现有缺号和卷重启；正文原文及已执行任务的旧版本锚点保持原样，新版显示旧分析状态 |
+| 历史与缓存 | 多个 JSON／预处理状态及有限撤销机制 | 普通文本最近 10 版，初始／当前／被任务等引用的版本另保护；章节读模型最近 3 版，分析恢复快照最近 10 次。保护的历史可以超过普通上限，以免证据失效 |
+| GUI 与加载 | 原参考页的多面板布局 | 重新设计作品库与文本清理，标题下单一进度区、识别／正文规则默认折叠；摘要、章节、关联分析按需读取，未复制原前端布局 |
+
+以上是代码职责与行为对照，运行验收以 [validation.md](validation.md) 的最新记录为准。上游向量索引、写作项目引用注入、摘录分类表与自动编码往返修复并未因此变成已交付功能。
+
 ### 尚未完整复制的细节
 
 - 上传文件的逐文件范围删除与清空全部没有照搬；“更新”支持替换当前正文并保存新版本，“补充”接在已有正文之后。现有原件不可变，正文仍可通过章节操作及恢复历史版本调整。原件下载兼容 API 保留，GUI 不再显示下载入口。
 - 疑似乱码已定位与标记，尚无上游的一键编码往返修复；可按正确编码重新导入或逐章修订。字体是否具有某个正常 Unicode 字符的实际字形与文本中的缺字/替换符不同，当前只诊断文本层问题。
 - 上传已有统一的转换／章节解析／问题扫描后台任务，提供阶段进度、取消和重试；未保留上游单独的预处理暂停/继续/日志界面。模型提取的取消/恢复属于独立的 LangGraph 工作流。
-- 参考分析列表没有完全复制上游媒介过滤与批量作品删除；v8 素材库与全文库仍保留各自原有的管理入口。
+- 首页作品库提供类别、看过、文本与分析筛选，以及明确 ID 关联的文本／分析详情；参考分析列表没有再重复上游所有筛选和批量删作品按钮。作品元数据、全局角色素材与文档分析事实仍有各自的持久化职责，同名不自动合并。
 - 设定集导出使用带格式头的可读 UTF-8 TXT，保留 JSON 结构和多行字段；兼容本应用条目 v1 和普通 TXT。并非上游含 `## 设定` 等标记的导出格式解析器；普通 TXT 被当作一个原始条目导入，以避免标记歧义导致丢文。
 
 ### 独立复核证据

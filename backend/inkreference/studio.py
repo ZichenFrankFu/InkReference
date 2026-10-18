@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 import threading
+import re
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 from urllib.parse import quote
 
 from fastapi import APIRouter, File, Form, Query, UploadFile
@@ -18,7 +19,7 @@ from .models import ModelService
 from .projects import MAX_BACKUP_BYTES, ProjectStore
 from .skills import SkillStore
 from .workflow_definitions import WorkflowStore
-from .volumes import VolumeStore, detect_volumes, parse_volume_paste
+from .volumes import VolumeStore, parse_volume_paste
 from .reference_analysis import ReferenceAnalysisStore
 
 
@@ -90,6 +91,9 @@ class ChapterAction(BaseModel):
     author_keywords: list[str] | None = None
     garble_rules: list[dict[str, Any]] | None = None
     selections: list[dict[str, Any]] = Field(default_factory=list)
+    conflict_policy: Literal["keep_old", "use_new"] | None = None
+    preview_token: str | None = Field(default=None, min_length=1, max_length=200)
+    repair_duplicates: bool = False
 
 
 class VolumePlan(BaseModel):
@@ -399,10 +403,20 @@ def install_studio_routes(application, runtime):
                 body.start, body.end, body.text, body.expected_text, title=body.title)
             return runtime.studio.documents.version_summary(result) if summary else result
 
+    @router.post("/documents/{document_id}/chapters/resegment/preview")
+    def preview_resegment(document_id: str, body: ChapterAction):
+        with runtime.studio.lock:
+            return runtime.studio.documents.preview_resegment(
+                document_id, body.base_version_id, body.heading_formats, body.custom_formats,
+                repair_duplicates=body.repair_duplicates)
+
     @router.post("/documents/{document_id}/chapters/resegment", status_code=201)
     def resegment(document_id: str, body: ChapterAction, summary: bool = False):
         with runtime.studio.lock:
-            result = runtime.studio.documents.resegment(document_id, body.base_version_id, body.heading_formats, body.custom_formats)
+            result = runtime.studio.documents.resegment(
+                document_id, body.base_version_id, body.heading_formats, body.custom_formats,
+                conflict_policy=body.conflict_policy, preview_token=body.preview_token,
+                repair_duplicates=body.repair_duplicates, require_confirmation=True)
             return runtime.studio.documents.version_summary(result) if summary else result
 
     @router.post("/documents/{document_id}/chapters/clean", status_code=201)
@@ -458,12 +472,11 @@ def install_studio_routes(application, runtime):
 
     @router.post("/documents/{document_id}/versions/{version_id}/volumes/detect")
     def detect_volume_plan(document_id: str, version_id: str):
-        version = runtime.studio.documents.get_version(document_id, version_id)
-        return {"volumes": detect_volumes(version["chapters"]), "method": "chapter_markers"}
+        return runtime.studio.volumes.detect(document_id, version_id)
 
     @router.post("/documents/{document_id}/versions/{version_id}/volumes/paste")
     def paste_volume_plan(document_id: str, version_id: str, body: PastedContent):
-        count = len(runtime.studio.documents.get_version(document_id, version_id)["chapters"])
+        count = runtime.studio.documents.get_version_summary(document_id, version_id)["chapter_count"]
         return {"volumes": parse_volume_paste(body.content, count)}
 
     @router.post("/documents/{document_id}/versions/{version_id}/volumes/model")
@@ -477,7 +490,12 @@ def install_studio_routes(application, runtime):
             raise DataError(422, "导出格式请选择 raw 或 clean。")
         if format == "clean":
             text = runtime.studio.documents.formatted_export(document_id, version_id)
-            return _file_response(text.encode("utf-8-sig"), f"cleaned-{version_id[:8]}.txt", "text/plain; charset=utf-8")
+            document = runtime.studio.documents.get_document(document_id)
+            title = document.get("title") or Path(document["filename"]).stem
+            title = re.sub(r'[\x00-\x1f<>:"/\\|?*]', "_", title).strip(" .")[:160] or "正文"
+            if title.lower().endswith(".txt"):
+                title = title[:-4] or "正文"
+            return _file_response(text.encode("utf-8-sig"), f"{title}.txt", "text/plain; charset=utf-8")
         result = runtime.studio.documents.get_version(document_id, version_id)
         return _file_response(result["text"].encode("utf-8-sig"), f"cleaned-{version_id[:8]}.txt", "text/plain; charset=utf-8")
 

@@ -37,6 +37,10 @@ export default function DocumentUpload({ items, target, onClose, onSubmitted }: 
   const [mode, setMode] = useState<"replace" | "append">("replace");
   const [encoding, setEncoding] = useState("auto");
   const [workId, setWorkId] = useState(target?.work_id || "");
+  const workIdRef = useRef(workId); workIdRef.current = workId;
+  const [works, setWorks] = useState<{ id: string; title: string }[]>([]);
+  const [workQuery, setWorkQuery] = useState("");
+  const [worksBusy, setWorksBusy] = useState(false);
   const [tier, setTier] = useState("flash");
   const [ocr, setOcr] = useState("txt");
   const [busy, setBusy] = useState(false);
@@ -44,6 +48,12 @@ export default function DocumentUpload({ items, target, onClose, onSubmitted }: 
   const input = useRef<HTMLInputElement>(null);
   const format = file?.name.split(".").at(-1)?.toLowerCase();
   const duplicate = !destination && title.trim() ? items.filter((item) => item.title.trim() === title.trim()) : [];
+  useEffect(() => {
+    if (destination) return;
+    let active = true; setWorksBusy(true);
+    const timer = window.setTimeout(() => { void studio<{ items: { id: string; title: string }[] }>(`/catalog/works?q=${encodeURIComponent(workQuery.trim())}&limit=100`).then((result) => { if (active) setWorks((current) => { const selected = current.find((work) => work.id === workIdRef.current); return selected && !result.items.some((work) => work.id === selected.id) ? [selected, ...result.items] : result.items; }); }).catch((e) => { if (active) setError(messageOf(e)); }).finally(() => { if (active) setWorksBusy(false); }); }, workQuery ? 200 : 0);
+    return () => { active = false; window.clearTimeout(timer); };
+  }, [destination, workQuery]);
   const chooseFile = (next: File | null) => {
     setError("");
     if (next && !/\.(txt|pdf|epub)$/i.test(next.name)) { setError("请选择 TXT、PDF 或 EPUB 文件。"); return; }
@@ -69,12 +79,12 @@ export default function DocumentUpload({ items, target, onClose, onSubmitted }: 
       {target && <div className="document-upload-target"><BookOpen size={18} /><div><span>上传至作品</span><strong>{target.title}</strong></div></div>}
       <input ref={input} type="file" accept=".txt,.pdf,.epub" hidden onChange={(event) => chooseFile(event.target.files?.[0] || null)} />
       <button className={`document-file-drop ${file ? "has-file" : ""}`} disabled={busy} onClick={() => input.current?.click()} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); if (!busy) chooseFile(event.dataTransfer.files[0] || null); }}><span className="document-drop-icon"><Upload size={23} /></span><strong>{file?.name || "选择或拖入原始文件"}</strong><span>{file ? `${(file.size / 1024 / 1024).toFixed(2)} MB · 点击更换` : "TXT · PDF · EPUB"}</span></button>
-      {destination && <fieldset className="document-upload-mode"><legend>上传后如何处理现有正文？</legend><label className={mode === "replace" ? "selected" : ""}><input type="radio" name="upload-mode" value="replace" checked={mode === "replace"} disabled={busy} onChange={() => setMode("replace")} /><span><strong>更新正文</strong><small>用新文件替换当前全部正文</small></span></label><label className={mode === "append" ? "selected" : ""}><input type="radio" name="upload-mode" value="append" checked={mode === "append"} disabled={busy} onChange={() => setMode("append")} /><span><strong>补充章节</strong><small>将新文件追加到当前正文末尾</small></span></label>{mode === "replace" && <p>替换前的正文仍可从历史版本恢复。</p>}</fieldset>}
+      {destination && <fieldset className="document-upload-mode"><legend>上传后如何处理现有正文？</legend><label className={mode === "replace" ? "selected" : ""}><input type="radio" name="upload-mode" value="replace" checked={mode === "replace"} disabled={busy} onChange={() => setMode("replace")} /><span><strong>更新正文</strong><small>用新文件替换当前全部正文</small></span></label><label className={mode === "append" ? "selected" : ""}><input type="radio" name="upload-mode" value="append" checked={mode === "append"} disabled={busy} onChange={() => setMode("append")} /><span><strong>补充章节</strong><small>将新文件追加到当前正文末尾</small></span></label></fieldset>}
       {!destination && <label className="studio-field"><span>文档标题</span><input value={title} disabled={busy} onChange={(event) => setTitle(event.target.value)} placeholder="作品名称" /></label>}
-      {duplicate.length > 0 && <Notice>已有同名作品，本次将新建独立记录。更新已有作品时，请使用作品旁的“上传文件”。</Notice>}
+      {duplicate.length > 0 && <Notice>已有同名作品，本次将新建独立记录。更新已有作品时，请使用作品上方的“上传文件”。</Notice>}
       {format === "pdf" && <section className="document-format-options"><div className="document-option-heading"><FileText size={16} /><strong>PDF 转换设置</strong><span>MinerU</span></div><div className="form-grid"><SelectField label="解析模式" value={tier} disabled={busy} onChange={(value) => { setTier(value); if (value === "flash") setOcr("txt"); }}><option value="flash">读取原生文字层</option><option value="standard">完整解析</option></SelectField><SelectField label="文字识别" value={ocr} disabled={busy || tier === "flash"} onChange={setOcr}><option value="txt">使用文字层</option><option value="ocr">OCR 扫描文字</option></SelectField></div></section>}
-      {format === "epub" && <section className="document-format-options epub"><div className="document-option-heading"><Files size={16} /><strong>EPUB 转换</strong></div><p>按书籍阅读顺序提取正文与章节标题，转为 TXT 后自动识别章节。</p></section>}
-      <div className="form-grid">{format === "txt" && <SelectField label="文本编码" value={encoding} onChange={setEncoding} disabled={busy}><option value="auto">自动识别</option><option value="utf-8">UTF-8</option><option value="gb18030">GB18030 / GBK</option><option value="utf-16">UTF-16</option><option value="big5">Big5</option></SelectField>}{!destination && <label className="studio-field"><span>关联作品 ID（可选）</span><input value={workId} disabled={busy} onChange={(event) => setWorkId(event.target.value)} placeholder="例如 W001" /></label>}</div>
+      {format === "epub" && <section className="document-format-options epub"><div className="document-option-heading"><Files size={16} /><strong>EPUB 转换</strong></div><div className="document-conversion-path"><span>EPUB</span><span>→</span><span>TXT</span><span>→</span><span>章节</span></div></section>}
+      <div className="form-grid">{format === "txt" && <SelectField label="文本编码" value={encoding} onChange={setEncoding} disabled={busy}><option value="auto">自动识别</option><option value="utf-8">UTF-8</option><option value="gb18030">GB18030 / GBK</option><option value="utf-16">UTF-16</option><option value="big5">Big5</option></SelectField>}{!destination && <div className="document-upload-catalog"><label className="studio-field"><span>关联作品</span><input aria-label="搜索作品库" value={workQuery} disabled={busy} onChange={(event) => setWorkQuery(event.target.value)} placeholder="搜索作品库" /></label><SelectField label="作品" value={workId} disabled={busy} onChange={setWorkId}><option value="">暂不关联</option>{works.map((work) => <option key={work.id} value={work.id}>{work.title} · {work.id}</option>)}</SelectField>{worksBusy && <Busy label="正在读取作品库" inline delay={0} />}</div>}</div>
       <Notice error>{error}</Notice>{busy && <Busy inline delay={0} label="正在上传原始文件" />}
     </div>
     <div className="modal-footer"><button className="button secondary" disabled={busy} onClick={onClose}>取消</button><button className="button primary" disabled={!file || busy} onClick={() => void submit()}><Upload size={15} />{destination ? mode === "replace" ? "上传并更新正文" : "上传并补充章节" : "上传并识别章节"}</button></div>
@@ -82,10 +92,13 @@ export default function DocumentUpload({ items, target, onClose, onSubmitted }: 
 }
 
 type Source = { id: string; filename: string; bytes?: number; original_bytes?: number; created_at?: string; mode?: string; operation?: string; active?: boolean; superseded?: boolean; derived_format?: string | null };
-export function DocumentSources({ document, versionId }: { document: DocumentMeta; versionId: string }) {
+export function DocumentSources({ document, versionId, onActivity }: { document: DocumentMeta; versionId: string; onActivity?: (label: string) => void }) {
+  const activityRef = useRef(onActivity); activityRef.current = onActivity;
   const [sources, setSources] = useState<Source[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  useEffect(() => { activityRef.current?.(loading ? "正在读取文件记录" : ""); }, [loading]);
+  useEffect(() => () => activityRef.current?.(""), []);
   useEffect(() => { let active = true; setLoading(true); setError(""); studio<List<Source>>(`/documents/${document.id}/sources`).then((data) => { if (active) setSources(normalizeList(data)); }).catch((e) => { if (active) setError(messageOf(e)); }).finally(() => { if (active) setLoading(false); }); return () => { active = false; }; }, [document.id, versionId]);
-  return <section className="document-sources" aria-label="原始文件"><div className="document-sources-heading"><div><h3>原始文件</h3><span>{sources.length} 次上传 · 当前 {Number(document.current_characters ?? document.source_characters ?? 0).toLocaleString()} 字</span></div></div><Notice error>{error}</Notice>{loading && <Busy label="正在读取文件记录" />}{!loading && <div className="document-source-timeline">{sources.map((source, index) => <article key={source.id} className={source.superseded ? "superseded" : ""}><span className="document-source-number">{index + 1}</span><span className="document-file-icon"><FileText size={19} /></span><div><strong>{source.filename}</strong><span>{({ new: "初始上传", replace: "替换正文", append: "补充章节" } as Record<string, string>)[source.mode || source.operation || ""] || (index ? "后续上传" : "初始上传")} · {dateLabel(source.created_at || document.created_at)} · {((source.original_bytes ?? source.bytes ?? 0) / 1024).toFixed(1)} KB{source.derived_format === "txt" && " · 已转为 TXT"}</span>{source.superseded && <small className="document-source-history">历史原件 · 已由后续更新替换</small>}</div><span className="document-source-format">{source.filename.split(".").at(-1)?.toUpperCase()}</span></article>)}</div>}</section>;
+  return <section className="document-sources" aria-label="原始文件"><div className="document-sources-heading"><div><h3>原始文件</h3><span>{sources.length} 次上传 · 当前 {Number(document.current_characters ?? document.source_characters ?? 0).toLocaleString()} 字</span></div></div><Notice error>{error}</Notice>{loading && <div className="document-loading-skeleton"><i /><i /><i /></div>}{!loading && <div className="document-source-timeline">{sources.map((source, index) => <article key={source.id} className={source.superseded ? "superseded" : ""}><span className="document-source-number">{index + 1}</span><span className="document-file-icon"><FileText size={19} /></span><div><strong>{source.filename}</strong><span>{({ new: "初始上传", replace: "替换正文", append: "补充章节" } as Record<string, string>)[source.mode || source.operation || ""] || (index ? "后续上传" : "初始上传")} · {dateLabel(source.created_at || document.created_at)} · {((source.original_bytes ?? source.bytes ?? 0) / 1024).toFixed(1)} KB{source.derived_format === "txt" && " · 已转为 TXT"}</span>{source.superseded && <small className="document-source-history">历史原件 · 已由后续更新替换</small>}</div><span className="document-source-format">{source.filename.split(".").at(-1)?.toUpperCase()}</span></article>)}</div>}</section>;
 }

@@ -5,7 +5,6 @@ import {
   FileText,
   FolderArchive,
   GitBranch,
-  HardDrive,
   Layers3,
   Menu,
   PanelLeftClose,
@@ -22,6 +21,7 @@ import { download } from "./api";
 import { studio } from "./studio";
 import { readScheme, setScheme, type Scheme } from "./theme";
 import "./theme.css";
+import "./loading.css";
 const Library = memo(lazy(() => import("./Library")));
 const Documents = memo(lazy(() => import("./Documents")));
 const Jobs = memo(lazy(() => import("./Jobs")));
@@ -40,10 +40,10 @@ const sections: {
   label: string;
   icon: typeof BookOpen;
 }[] = [
-  { id: "library", label: "素材库", icon: Layers3 },
+  { id: "library", label: "作品库", icon: BookOpen },
   {
     id: "documents",
-    label: "全文与清洗",
+    label: "文本清理",
     icon: FileText,
   },
   { id: "jobs", label: "分析与审核", icon: Play },
@@ -115,6 +115,18 @@ export default function App() {
     nav("jobs");
   }, [nav]);
   useEffect(() => {
+    const open = (event: Event) => {
+      const target = (event as CustomEvent).detail;
+      if (!target || !["library", "documents", "jobs"].includes(target.section)) return;
+      // Keep the focus target until a lazy page has mounted and consumed it.
+      try { sessionStorage.setItem("inkreference.catalog-focus", JSON.stringify(target)); } catch { /* focus event still works */ }
+      nav(target.section as Section);
+      window.dispatchEvent(new CustomEvent("inkreference:catalog-focus", { detail: target }));
+    };
+    window.addEventListener("inkreference:navigate", open);
+    return () => window.removeEventListener("inkreference:navigate", open);
+  }, [nav]);
+  useEffect(() => {
     const update = () => {
       const key = window.location.hash.slice(1);
       if ([...sections.map((s) => s.id), "backup"].includes(key))
@@ -140,12 +152,6 @@ export default function App() {
           </span>
           <span>InkReference</span>
         </button>
-        <div className="workspace-label">
-          <span className="local-dot" />
-          <span>本地工作区</span>
-          <HardDrive size={13} />
-        </div>
-        <div className="nav-caption">创作工作台</div>
         <nav>
           {sections.map((s) => (
             <button
@@ -227,7 +233,7 @@ export default function App() {
               hidden={section !== page}
               className="workspace-page"
             >
-              <Suspense fallback={<div className="workspace-loading"><Busy label="正在打开工作区" /></div>}>
+              <Suspense fallback={page === "documents" ? <main className="studio-main documents-main"><header className="studio-heading"><h1>文本清理</h1></header><div className="documents-title-progress" role="progressbar" aria-label="正在打开文本清理"><i /></div></main> : <div className="workspace-loading"><Busy inline label="正在打开工作区" /></div>}>
                 {page === "models" && modelReturn && <div className="mobile-return-bar"><button className="text-button" onClick={() => nav(modelReturn)}>返回{sections.find((s) => s.id === modelReturn)?.label || "备份与恢复"}</button></div>}
                 {page === "library" ? (
                   <Library />

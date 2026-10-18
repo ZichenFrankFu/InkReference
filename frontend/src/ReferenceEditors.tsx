@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { Check, ChevronDown, ChevronRight, Copy, Edit3, Plus, Save, Search, Trash2, X } from "lucide-react";
 import { Busy, messageOf, Notice } from "./ui";
-import { chapterNumber, chapterTypes, record, records, referenceChunkLabel, roleTags, settingCategories, stringList, stringValue, type ReferenceChunkRange, type ReferenceRecord } from "./reference-types";
+import { characterExperiences, chapterNumber, chapterTypes, record, records, referenceChunkLabel, roleTags, settingCategories, stringList, stringValue, type ReferenceChunkRange, type ReferenceRecord } from "./reference-types";
 
 type Field = { key: string; label: string; area?: boolean; options?: string[][] | string[]; number?: boolean; lines?: boolean };
 type FactField = { key: string; label: string; fields?: Field[] };
@@ -44,7 +44,7 @@ export function FactView({ label, value }: { label: string; value: unknown }) {
   if (!items.length) return null;
   return <div className="ref-fact-view"><h4>{label}</h4>{items.map((f, i) => <div key={i}><span className="ref-chapter-tag">{stringValue(f.chapter) || "未标章节"}</span><p>{stringValue(f.text || f.content)}</p></div>)}</div>;
 }
-export function CollectionEditor({ kind, value, onSave, busy, onDirty, onExtra, settingCollection = false, chunkRanges = [] }: { kind: CollectionKind; value: unknown; onSave: (items: ReferenceRecord[]) => Promise<void>; busy: boolean; onDirty?: (dirty: boolean) => void; onExtra?: (item: ReferenceRecord, index: number) => ReactNode; settingCollection?: boolean; chunkRanges?: ReferenceChunkRange[] }) {
+export function CollectionEditor({ kind, value, onSave, busy, onDirty, onExtra, settingCollection = false, chunkRanges = [], plot }: { kind: CollectionKind; value: unknown; onSave: (items: ReferenceRecord[]) => Promise<void>; busy: boolean; onDirty?: (dirty: boolean) => void; onExtra?: (item: ReferenceRecord, index: number) => ReactNode; settingCollection?: boolean; chunkRanges?: ReferenceChunkRange[]; plot?: unknown }) {
   const config = descriptions[kind];
   const items = records(value);
   const [editing, setEditing] = useState<number | null>(null);
@@ -96,7 +96,7 @@ export function CollectionEditor({ kind, value, onSave, busy, onDirty, onExtra, 
       <header><button className="ref-entity-title" onClick={() => setExpanded(prev => { const next = new Set(prev); next.has(index) ? next.delete(index) : next.add(index); return next; })} aria-expanded={expanded.has(index)}>{expanded.has(index) ? <ChevronDown size={16} /> : <ChevronRight size={16} />}<strong>{stringValue(item.name || item.title) || `未命名${config.title}`}</strong></button><div className="inline-actions">{item.role_tag ? <span className="ref-tag">{stringValue(item.role_tag)}</span> : null}<button className="icon-button" aria-label={`编辑${stringValue(item.name || item.title)}`} onClick={() => start(index)} disabled={busy || editing !== null}><Edit3 size={15} /></button><button className="icon-button danger-text" aria-label={`删除${stringValue(item.name || item.title)}`} onClick={() => void remove(index)} disabled={busy || editing !== null}><Trash2 size={15} /></button></div></header>
       <p className="ref-entity-intro">{stringValue(item.intro || item.content || item.description)}</p>
       <div className="ref-entity-meta">{item.first_chapter ? <span>{stringValue(item.first_chapter)}</span> : null}{item.first_seen_at || item.first_introduced_at ? <span>故事时间：{stringValue(item.first_seen_at || item.first_introduced_at)}</span> : null}{item.appearance_chapters ? <span>出场 {stringValue(item.appearance_chapters)} 章</span> : null}{item.appearance_word_count ? <span>{Number(item.appearance_word_count).toLocaleString()} 字</span> : null}</div>
-      {expanded.has(index) && <div className="ref-entity-details">{config.facts?.map(f => <FactView key={f.key} label={f.label} value={item[f.key]} />)}{!!stringList(item.speech_samples).length && <div className="ref-fact-view"><h4>语言样例</h4>{stringList(item.speech_samples).map((s, i) => <blockquote key={i}>{s}</blockquote>)}</div>}{kind !== "raw_entries" && onExtra?.(item, index)}</div>}
+      {expanded.has(index) && <div className="ref-entity-details">{config.facts?.map(f => <FactView key={f.key} label={f.label} value={kind === "characters" && f.key === "experiences" ? characterExperiences(item, plot) : item[f.key]} />)}{!!stringList(item.speech_samples).length && <div className="ref-fact-view"><h4>语言样例</h4>{stringList(item.speech_samples).map((s, i) => <blockquote key={i}>{s}</blockquote>)}</div>}{kind !== "raw_entries" && onExtra?.(item, index)}</div>}
       {kind === "raw_entries" && onExtra?.(item, index)}
     </article>)}</div>)}
   </section>;

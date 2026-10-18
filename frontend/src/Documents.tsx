@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ArrowDownToLine, ArrowRight, BookOpen, CheckCircle2, FileText, History, Layers3, RefreshCw, RotateCcw, Search, Server, SlidersHorizontal, Upload } from "lucide-react";
-import { download } from "./api";
+import { ArrowDownToLine, ArrowRight, BookOpen, CheckCircle2, Link2, FileText, History, Layers3, RefreshCw, RotateCcw, Search, Server, SlidersHorizontal, Upload } from "lucide-react";
+import { ApiError, download } from "./api";
 import ChapterWorkbench from "./ChapterWorkbench";
 import ChapterRecognitionSettings from "./ChapterRecognitionSettings";
 import DocumentUpload, { DocumentSources, IngestionProgress, IngestionStatus, ingestionRunning, type IngestionTask } from "./DocumentUpload";
@@ -11,6 +11,8 @@ import { Busy, Empty, Modal, Notice, PageTitle, Progress, SelectField, Status, d
 import "./documents.css";
 
 type Props = { navigate: (id: "library" | "documents" | "jobs" | "workflows" | "models" | "backup") => void; onJob: (id: string) => void };
+type CatalogWork = { id: string; title: string; revision: number };
+type CatalogState = { document_id: string; work_id: string | null; work: CatalogWork | null; completion: { version_id: string; completed_at: string } | null; latest_version_id: string };
 type VersionSummary = TextVersion & { chapter_count?: number; placeholder_count?: number; parent_version_id?: string };
 const chapterLabel = (version: VersionSummary | null) => {
   const count = version?.chapter_count ?? version?.chapters?.length ?? "—";
@@ -44,6 +46,19 @@ export default function Documents({ navigate, onJob }: Props) {
   const [historyOpen, setHistoryOpen] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
   const [exported, setExported] = useState(false);
+  const [catalog, setCatalog] = useState<CatalogState | null>(null);
+  const [catalogWorks, setCatalogWorks] = useState<CatalogWork[]>([]);
+  const [catalogQuery, setCatalogQuery] = useState("");
+  const [catalogChoice, setCatalogChoice] = useState("new");
+  const [catalogChoiceWork, setCatalogChoiceWork] = useState<CatalogWork | null>(null);
+  const catalogInitialWorks = useRef<CatalogWork[]>([]);
+  const [catalogSearching, setCatalogSearching] = useState(false);
+  const [activities, setActivities] = useState<Record<string, string>>({});
+  const activity = useCallback((key: string, label: string) => setActivities((current) => current[key] === label ? current : { ...current, [key]: label }), []);
+  const chapterActivity = useCallback((label: string) => activity("chapters", label), [activity]);
+  const recognitionActivity = useCallback((label: string) => activity("recognition", label), [activity]);
+  const volumeActivity = useCallback((label: string) => activity("volumes", label), [activity]);
+  const sourcesActivity = useCallback((label: string) => activity("sources", label), [activity]);
   const [startOpen, setStartOpen] = useState(false);
   const [profiles, setProfiles] = useState<ModelProfile[]>([]);
   const [workflows, setWorkflows] = useState<Workflow[]>([]);
@@ -99,11 +114,24 @@ export default function Documents({ navigate, onJob }: Props) {
     if (doc && selectedRef.current?.id !== id) { setSelected(doc); setVersion(null); }
     setBusy("version");
     try {
-      const nextDoc = doc || await studio<DocumentMeta>(`/documents/${encodeURIComponent(id)}`);
-      const vid = targetId || nextDoc.latest_version_id;
-      const meta = versionCache.current.get(vid) || await studio<VersionSummary>(`/documents/${encodeURIComponent(id)}/versions/${encodeURIComponent(vid)}?summary=true`);
+      let nextDoc = doc || await studio<DocumentMeta>(`/documents/${encodeURIComponent(id)}`);
+      const requestedVersionId = targetId || nextDoc.latest_version_id;
+      let meta: VersionSummary;
+      let reclaimed = false;
+      try {
+        meta = (!vid || requestedVersionId === nextDoc.latest_version_id ? versionCache.current.get(requestedVersionId) : undefined) || await studio<VersionSummary>(`/documents/${encodeURIComponent(id)}/versions/${encodeURIComponent(requestedVersionId)}?summary=true`);
+      } catch (e) {
+        if (!(e instanceof ApiError) || ![404, 410].includes(e.status)) throw e;
+        nextDoc = await studio<DocumentMeta>(`/documents/${encodeURIComponent(id)}`);
+        if (nextDoc.latest_version_id === requestedVersionId) throw e;
+        versionCache.current.delete(requestedVersionId);
+        meta = await studio<VersionSummary>(`/documents/${encodeURIComponent(id)}/versions/${encodeURIComponent(nextDoc.latest_version_id)}?summary=true`);
+        reclaimed = true;
+      }
       if (ticket !== selectionRequest.current) return;
+      if (reclaimed) setMessage("历史版本已回收，已打开最新版本");
       versionCache.current.set(meta.id, meta);
+      while (versionCache.current.size > 8) versionCache.current.delete(versionCache.current.keys().next().value!);
       setSelected(nextDoc); setVersion(meta); setRun(null); setChapterDirty(false); setVolumeDirty(false); setRecognitionDirty(false); dirtyRef.current = false;
       try { sessionStorage.setItem("inkreference:current-document", id); } catch { /* Optional navigation memory. */ }
     } catch (e) { if (ticket === selectionRequest.current) setError(messageOf(e)); }
@@ -115,7 +143,7 @@ export default function Documents({ navigate, onJob }: Props) {
     const meta: VersionSummary = received || versionCache.current.get(id) || await studio<VersionSummary>(`/documents/${doc.id}/versions/${id}?summary=true`);
     if (selectedRef.current?.id !== doc.id) return;
     dirtyRef.current = false; setChapterDirty(false); setRecognitionDirty(false);
-    versionCache.current.set(id, meta); setVersion(meta);
+    versionCache.current.set(id, meta); while (versionCache.current.size > 8) versionCache.current.delete(versionCache.current.keys().next().value!); setVersion(meta);
     const next = { ...doc, latest_version_id: id, current_characters: meta.characters ?? Number(meta.coverage?.characters || doc.current_characters || 0) };
     setSelected(next); selectedRef.current = next;
     setItems((all) => all.map((item) => item.id === doc.id ? next : item));
@@ -127,9 +155,12 @@ export default function Documents({ navigate, onJob }: Props) {
   };
   useEffect(() => {
     const open = (event: Event) => { const detail = (event as CustomEvent<{ document_id: string; tab?: string }>).detail; if (detail?.document_id) { const show = () => { setTab(detail.tab === "files" ? "files" : detail.tab === "volumes" ? "volumes" : "body"); void chooseRef.current(detail.document_id, undefined, true); }; if (dirtyRef.current) setDiscardAction(() => show); else show(); } };
+    const focus = (event: Event) => { const target = (event as CustomEvent<{ section?: string; documentId?: string; versionId?: string }>).detail; if (target?.section !== "documents" || !target.documentId) return; try { sessionStorage.removeItem("inkreference.catalog-focus"); } catch { /* Optional navigation memory. */ } const show = () => { setTab("body"); void chooseRef.current(target.documentId!, target.versionId, true); }; if (dirtyRef.current) setDiscardAction(() => show); else show(); };
     window.addEventListener("inkreference:document-open", open);
+    window.addEventListener("inkreference:catalog-focus", focus);
+    try { const target = sessionStorage.getItem("inkreference.catalog-focus"); if (target) focus(new CustomEvent("inkreference:catalog-focus", { detail: JSON.parse(target) })); } catch { /* Optional navigation memory. */ }
     try { const pending = sessionStorage.getItem("inkreference:pending-document"); if (pending) { sessionStorage.removeItem("inkreference:pending-document"); open(new CustomEvent("inkreference:document-open", { detail: JSON.parse(pending) })); } } catch { /* Navigation hints never change the source text. */ }
-    return () => window.removeEventListener("inkreference:document-open", open);
+    return () => { window.removeEventListener("inkreference:document-open", open); window.removeEventListener("inkreference:catalog-focus", focus); };
   }, []);
 
   const receiveTask = useCallback((task: IngestionTask) => { setIngestion(task); setIngestions((all) => all.some((item) => item.id === task.id) ? all.map((item) => item.id === task.id ? task : item) : [task, ...all]); }, []);
@@ -171,46 +202,76 @@ export default function Documents({ navigate, onJob }: Props) {
   };
   useEffect(() => { const resume = () => { if (continueAfterModels.current && selectedRef.current) { continueAfterModels.current = false; void startDialog(); } }; window.addEventListener("inkreference:documents-refresh", resume); return () => window.removeEventListener("inkreference:documents-refresh", resume); });
   useEffect(() => { const refresh = () => { void studio<List<ModelProfile>>("/models").then((result) => { const next = normalizeList(result); setProfiles(next); setProfile((current) => next.some((item) => item.id === current) ? current : next[0]?.id || ""); }).catch((e) => setError(messageOf(e))); }; window.addEventListener("inkreference:models-changed", refresh); return () => window.removeEventListener("inkreference:models-changed", refresh); }, []);
-  const exportText = async () => { if (!selected || !version) return; setBusy("export"); setError(""); try { await download(`/studio/documents/${selected.id}/versions/${version.id}/download?format=clean`, `${selected.title}.txt`); setExported(true); } catch (e) { setError(messageOf(e)); } finally { setBusy(""); } };
+  const openFinish = async () => {
+    if (!selected || !version) return;
+    const documentId = selected.id;
+    setExported(false); setExportOpen(true); setCatalog(null); setCatalogQuery(""); setBusy("catalog"); setError("");
+    try {
+      const [next, choices] = await Promise.all([studio<CatalogState>(`/documents/${documentId}/catalog`), studio<{ items: CatalogWork[] }>("/catalog/works?limit=100")]);
+      if (selectedRef.current?.id !== documentId) return;
+      catalogInitialWorks.current = choices.items; setCatalog(next); setCatalogChoice(next.work_id || "new"); setCatalogChoiceWork(next.work); setCatalogWorks(choices.items);
+    } catch (e) { setError(messageOf(e)); } finally { setBusy(""); }
+  };
+  useEffect(() => {
+    if (!exportOpen) return;
+    if (!catalogQuery.trim()) { setCatalogWorks(catalogInitialWorks.current); return; }
+    let active = true; setCatalogSearching(true);
+    const timer = window.setTimeout(() => { void studio<{ items: CatalogWork[] }>(`/catalog/works?q=${encodeURIComponent(catalogQuery.trim())}&limit=100`).then((result) => { if (active) setCatalogWorks(result.items); }).catch((e) => { if (active) setError(messageOf(e)); }).finally(() => { if (active) setCatalogSearching(false); }); }, 200);
+    return () => { active = false; window.clearTimeout(timer); setCatalogSearching(false); };
+  }, [exportOpen, catalogQuery]);
+  const exportText = async () => {
+    if (!selected || !version || !catalog) return;
+    setBusy("export"); setError("");
+    try {
+      const nextCatalog = await send<CatalogState>(`/documents/${selected.id}/catalog`, { ...(catalogChoice === "new" ? { new_work: { title: selected.title } } : { work_id: catalogChoice }), expected_work_id: catalog.work_id, expected_version_id: version.id, complete: true }, "PUT");
+      setCatalog(nextCatalog); setCatalogChoice(nextCatalog.work_id || "new"); setCatalogChoiceWork(nextCatalog.work);
+      const nextDocument = { ...selected, work_id: nextCatalog.work_id || undefined };
+      setSelected(nextDocument); selectedRef.current = nextDocument; setItems((current) => current.map((item) => item.id === selected.id ? nextDocument : item));
+      window.dispatchEvent(new Event("inkreference:library-refresh"));
+      await download(`/studio/documents/${selected.id}/versions/${version.id}/download?format=clean`, `${selected.title}.txt`); setExported(true);
+    } catch (e) { setError(messageOf(e)); } finally { setBusy(""); }
+  };
   const restore = async () => { if (!selected || !version) return; setBusy("restore"); setError(""); try { const next = await send<TextVersion>(`/documents/${selected.id}/chapters/restore?summary=true`, { base_version_id: selected.latest_version_id, target_version_id: restoreTarget }); await receiveVersion(next.id, next); setRestoreTarget(""); setHistoryOpen(false); } catch (e) { setError(messageOf(e)); } finally { setBusy(""); } };
   const visibleItems = items.filter((doc) => `${doc.title} ${doc.filename}`.toLocaleLowerCase().includes(query.toLocaleLowerCase()));
+  const progressLabel = loading ? "正在读取作品" : busy === "version" ? "正在读取正文" : busy ? ({ catalog: "正在读取作品库", export: "正在关联作品与导出正文", config: "正在读取分析配置", history: "正在读取历史版本", restore: "正在恢复版本", start: "正在创建分析任务" } as Record<string, string>)[busy] || "正在处理" : Object.values(activities).find(Boolean) || "";
+  const finishWorks = [catalogChoiceWork, catalog?.work, ...catalogWorks].filter((work, index, all): work is CatalogWork => !!work && all.findIndex((item) => item?.id === work.id) === index);
   const pendingTasks = ingestions.filter((task) => ingestionRunning(task) || ["failed", "interrupted"].includes(task.status));
 
   return <main className="studio-main documents-page">
-    <PageTitle kicker="" title="全文与清洗" description="" action={<button className="button primary" onClick={() => openUpload()}><Upload size={16} />新建作品</button>} />
+    <PageTitle kicker="" title="文本清理" description="" action={<button className="button primary" onClick={() => openUpload()}><Upload size={16} />新建作品</button>} />
+    <div className={`documents-title-progress ${progressLabel ? "active" : ""}`} role={progressLabel ? "progressbar" : undefined} aria-label={progressLabel || undefined} aria-hidden={!progressLabel}><i /></div>
     <Notice error={!!error} success={!error && !!message}>{error || message}</Notice>
     <div className="document-library-picker"><SelectField label="作品" value={selected?.id || ""} onChange={(id) => { if (id) void choose(id); }}><option value="">选择作品</option>{items.map((doc) => <option key={doc.id} value={doc.id}>{doc.title} · {wordCount(doc.current_characters ?? doc.source_characters)}</option>)}</SelectField></div>
     <div className="document-layout">
       <aside className="surface document-index">
         <div className="surface-heading"><h2>作品</h2><span>{items.length}</span><button className="icon-button" onClick={() => void load()} aria-label="刷新文档"><RefreshCw size={15} /></button></div>
         {!!items.length && <label className="index-search"><Search size={15} /><input aria-label="搜索全文" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索作品" /></label>}
-        {loading ? <Busy label="正在读取作品" /> : !items.length ? <div className="index-empty">尚未上传文件</div> : <div className="document-list">{visibleItems.map((doc) => <div key={doc.id} className={`document-entry ${selected?.id === doc.id ? "active" : ""}`}><button className="document-item" aria-current={selected?.id === doc.id ? "true" : undefined} onClick={() => void choose(doc.id)}><strong>{doc.title || doc.filename}</strong><small>{wordCount(doc.current_characters ?? doc.source_characters)}</small></button></div>)}{query && !visibleItems.length && <div className="index-empty">没有匹配的作品</div>}</div>}
+        {loading ? <div className="document-list-skeleton" aria-label="正在读取作品"><i /><i /><i /></div> : !items.length ? <div className="index-empty">尚未上传文件</div> : <div className="document-list">{visibleItems.map((doc) => <div key={doc.id} className={`document-entry ${selected?.id === doc.id ? "active" : ""}`}><button className="document-item" aria-current={selected?.id === doc.id ? "true" : undefined} onClick={() => void choose(doc.id)}><strong>{doc.title || doc.filename}</strong><small>{wordCount(doc.current_characters ?? doc.source_characters)}</small></button></div>)}{query && !visibleItems.length && <div className="index-empty">没有匹配的作品</div>}</div>}
         {!!pendingTasks.length && <section className="document-pending-tasks"><h3>处理任务</h3>{pendingTasks.map((task) => <button key={task.id} className={ingestion?.id === task.id ? "active" : ""} onClick={() => setIngestion(task)}><span>{task.filename}</span><IngestionStatus status={task.status} /></button>)}</section>}
       </aside>
       <section className="surface document-content">
-        <div className={`document-detail-progress ${busy ? "active" : ""}`}><div className="indeterminate" role={busy ? "progressbar" : undefined} aria-label={busy === "version" ? "正在读取正文" : "正在处理"}><i /></div></div>
         {!!pendingTasks.length && <div className="document-task-picker"><span>处理任务</span><div>{pendingTasks.map((task) => <button key={task.id} className={ingestion?.id === task.id ? "active" : ""} onClick={() => setIngestion(task)}>{task.filename}<IngestionStatus status={task.status} /></button>)}</div></div>}
         {ingestion && ingestion.status !== "completed" && <IngestionProgress task={ingestion} action={(kind) => void ingestionAction(kind)} busy={!!busy} />}
-        {!selected ? loading ? <div className="document-first-load"><Busy label="正在读取作品" /></div> : <Empty icon={BookOpen} title={ingestion && ingestionRunning(ingestion) ? "正在准备正文" : "尚未上传文件"} action={<button className="button secondary" onClick={() => openUpload()}><Upload size={16} />上传文件</button>} /> : <>
+        {!selected ? loading || busy === "version" ? <div className="document-first-load"><div className="document-loading-skeleton"><i /><i /><i /></div></div> : <Empty icon={BookOpen} title={ingestion && ingestionRunning(ingestion) ? "正在准备正文" : "尚未上传文件"} action={<button className="button secondary" onClick={() => openUpload()}><Upload size={16} />上传文件</button>} /> : <>
           <div className="document-detail-header"><div className="document-heading-copy"><h2>{selected.title}</h2><span className="helper">{chapterLabel(version)} · {Number(version?.characters ?? selected.current_characters ?? selected.source_characters ?? 0).toLocaleString()} 字{version && <> · 版本 {version.version_number}</>}</span></div><div className="inline-actions"><button className="button secondary document-upload-button" disabled={!!busy} onClick={() => openUpload(selected)}><Upload size={15} />上传文件</button><button className="button secondary document-history-button" disabled={!!busy} onClick={() => guard(() => void openHistory())}><History size={15} />历史版本</button><button className="button primary" disabled={!!busy || !version || workspaceDirty || (!!run && activeRun(run))} onClick={() => void startDialog()}><ArrowRight size={15} />开始分析</button></div></div>
           {run && <section className="document-analysis-progress" aria-label="全文分析进度"><div className="document-analysis-heading"><strong>作品分析</strong><Status value={run.status} /><button className="text-button" onClick={() => onJob(run.id)}>查看分析与审核<ArrowRight size={13} /></button></div><Progress completed={run.total ? run.completed : undefined} total={run.total || undefined} stage={runStage[run.stage] || (activeRun(run) ? "正在分析" : "分析任务")} busy={activeRun(run)} />{run.error && <Notice error>{run.error}</Notice>}</section>}
-          <div className="document-subbar"><div className="document-review-tabs" role="tablist" aria-label="全文工作区">{([["files", "原始文件", FileText], ["volumes", "分卷与章节识别", Layers3], ["body", "正文", BookOpen]] as const).map(([id, label, TabIcon], index) => <button key={id} role="tab" aria-selected={tab === id} className={tab === id ? "active" : ""} onClick={() => guard(() => setTab(id))}><span className="document-step-number">{index + 1}</span><TabIcon size={14} />{label}</button>)}</div></div>
+          <div className="document-subbar"><div className="document-review-tabs" role="tablist" aria-label="文本清理工作区">{([["files", "原始文件", FileText], ["volumes", "分卷与章节识别", Layers3], ["body", "正文", BookOpen]] as const).map(([id, label, TabIcon], index) => <button key={id} role="tab" aria-selected={tab === id} className={tab === id ? "active" : ""} onClick={() => guard(() => setTab(id))}><span className="document-step-number">{index + 1}</span><TabIcon size={14} />{label}</button>)}</div></div>
           {version ? <>
-            {tab === "body" && <ChapterWorkbench key={`${selected.id}:${chapterReset}`} documentId={selected.id} version={version} onDirty={setChapterDirty} onVersion={receiveVersion} onComplete={() => guard(() => { setExported(false); setExportOpen(true); })} />}
-            {tab === "volumes" && <div className="document-structure"><ChapterRecognitionSettings key={`recognition:${selected.id}:${chapterReset}`} documentId={selected.id} version={version} onVersion={receiveVersion} onDirty={setRecognitionDirty} blocked={volumeDirty} /><VolumePanel key={`${selected.id}:${version.id}:${chapterReset}`} documentId={selected.id} versionId={version.id} onDirty={setVolumeDirty} /></div>}
-            {tab === "files" && <DocumentSources document={selected} versionId={version.id} />}
-          </> : <div className="document-version-loading"><Busy label="正在读取正文" /></div>}
+            {tab === "body" && <ChapterWorkbench key={`${selected.id}:${chapterReset}`} documentId={selected.id} version={version} onDirty={setChapterDirty} onActivity={chapterActivity} onVersion={receiveVersion} onComplete={() => guard(() => void openFinish())} />}
+            {tab === "volumes" && <div className="document-structure"><ChapterRecognitionSettings key={`recognition:${selected.id}:${chapterReset}`} documentId={selected.id} version={version} onVersion={receiveVersion} onDirty={setRecognitionDirty} onActivity={recognitionActivity} blocked={volumeDirty} /><VolumePanel key={`${selected.id}:${version.id}:${chapterReset}`} documentId={selected.id} versionId={version.id} onDirty={setVolumeDirty} onActivity={volumeActivity} /></div>}
+            {tab === "files" && <DocumentSources document={selected} versionId={version.id} onActivity={sourcesActivity} />}
+          </> : <div className="document-version-loading"><div className="document-loading-skeleton"><i /><i /><i /></div></div>}
         </>}
       </section>
     </div>
-    {historyOpen && selected && version && <Modal title="历史版本" onClose={() => setHistoryOpen(false)} busy={busy === "history" || busy === "restore"}><div className="modal-body"><div className="document-history-list">{(selected.versions || []).map((item) => <article key={item.id}><div><strong>版本 {item.version_number}{item.id === selected.latest_version_id && <span>最新</span>}{item.id === version.id && <span>当前查看</span>}</strong><small>{dateLabel(item.created_at)}</small></div><button className="button secondary compact-button" disabled={!!busy || item.id === version.id} onClick={() => { setHistoryOpen(false); void choose(selected.id, item.id); }}>查看</button>{item.id !== selected.latest_version_id && <button className="text-button" disabled={!!busy} onClick={() => setRestoreTarget(item.id)}><RotateCcw size={13} />恢复</button>}</article>)}</div><Notice error>{error}</Notice>{busy === "history" && <Busy label="正在读取版本记录" />}</div><div className="modal-footer"><button className="button secondary" disabled={!!busy} onClick={() => setHistoryOpen(false)}>关闭</button></div></Modal>}
-    {exportOpen && selected && version && <Modal title={exported ? "正文已导出" : "完成清洗"} busy={busy === "export"} onClose={() => setExportOpen(false)}><div className="modal-body document-finish"><span className="document-finish-icon"><CheckCircle2 size={28} /></span><h3>{selected.title}</h3><p>{chapterLabel(version)} · {Number(version.characters ?? selected.current_characters ?? 0).toLocaleString()} 字 · 版本 {version.version_number}</p>{exported && <Notice success>TXT 文件已导出。</Notice>}<Notice error>{error}</Notice>{busy === "export" && <Busy label="正在导出清洗后的 TXT" />}</div><div className="modal-footer"><button className="button secondary" disabled={!!busy} onClick={() => setExportOpen(false)}>{exported ? "关闭" : "继续清洗"}</button><button className="button primary" disabled={!!busy} onClick={() => void exportText()}><ArrowDownToLine size={15} />{exported ? "再次导出 TXT" : "导出清洗后的 TXT"}</button></div></Modal>}
+    {historyOpen && selected && version && <Modal title="历史版本" onClose={() => setHistoryOpen(false)} busy={busy === "history" || busy === "restore"}><div className="modal-body"><div className="document-history-list">{(selected.versions || []).map((item) => <article key={item.id}><div><strong>版本 {item.version_number}{item.id === selected.latest_version_id && <span>最新</span>}{item.id === version.id && <span>当前查看</span>}</strong><small>{dateLabel(item.created_at)}</small></div><button className="button secondary compact-button" disabled={!!busy || item.id === version.id} onClick={() => { setHistoryOpen(false); void choose(selected.id, item.id); }}>查看</button>{item.id !== selected.latest_version_id && <button className="text-button" disabled={!!busy} onClick={() => setRestoreTarget(item.id)}><RotateCcw size={13} />恢复</button>}</article>)}</div><Notice error>{error}</Notice>{busy === "history" && <Busy label="正在读取版本记录" inline />}</div><div className="modal-footer"><button className="button secondary" disabled={!!busy} onClick={() => setHistoryOpen(false)}>关闭</button></div></Modal>}
+    {exportOpen && selected && version && <Modal title={exported ? "正文已导出" : "完成清理"} busy={!!busy} onClose={() => setExportOpen(false)}><div className="modal-body document-finish"><span className="document-finish-icon"><CheckCircle2 size={28} /></span><h3>{selected.title}</h3><p>{chapterLabel(version)} · {Number(version.characters ?? selected.current_characters ?? 0).toLocaleString()} 字 · 版本 {version.version_number}</p>{catalog && <div className="document-finish-link"><label className="studio-field"><span><Link2 size={14} />关联作品</span><input aria-label="搜索关联作品" value={catalogQuery} disabled={!!busy || exported} placeholder="搜索作品库" onChange={(event) => setCatalogQuery(event.target.value)} /></label><SelectField label="作品" value={catalogChoice} onChange={(id) => { setCatalogChoice(id); setCatalogChoiceWork(finishWorks.find((work) => work.id === id) || null); }} disabled={!!busy || exported}><option value="new">新建作品：《{selected.title}》</option>{finishWorks.map((work) => <option key={work.id} value={work.id}>{work.title} · {work.id}</option>)}</SelectField>{catalogSearching && <Busy label="正在搜索作品" inline delay={0} />}{exported && catalog.work_id && <button className="text-button" onClick={() => { setExportOpen(false); window.dispatchEvent(new CustomEvent("inkreference:navigate", { detail: { section: "library", workId: catalog.work_id } })); }}>查看作品<ArrowRight size={14} /></button>}</div>}{exported && <Notice success>TXT 已导出 · 已关联作品库</Notice>}<Notice error>{error}</Notice>{busy === "catalog" && <Busy label="正在读取关联作品" inline delay={0} />}{busy === "export" && <Busy label="正在关联作品与导出正文" inline delay={0} />}</div><div className="modal-footer"><button className="button secondary" disabled={!!busy} onClick={() => setExportOpen(false)}>{exported ? "关闭" : "继续清理"}</button><button className="button primary" disabled={!!busy || !catalog} onClick={() => void exportText()}><ArrowDownToLine size={15} />{exported ? "再次导出 TXT" : "完成并导出 TXT"}</button></div></Modal>}
     {uploadOpen && <DocumentUpload items={items} target={uploadTarget} onClose={() => setUploadOpen(false)} onSubmitted={(task) => { setUploadOpen(false); setMessage(""); receiveTask(task); }} />}
     {startOpen && <Modal title="开始全文分析" onClose={() => setStartOpen(false)} busy={busy === "start"}>
-      <div className="modal-body"><div className="run-source"><FileText size={20} /><div><strong>{selected?.title}</strong><span>版本 {version?.version_number} · {Number(version?.characters ?? selected?.current_characters ?? 0).toLocaleString()} 字</span></div></div><SelectField label="工作流版本" value={workflow} onChange={setWorkflow}>{workflows.map((item) => <option key={`${item.id}@${item.version}`} value={`${item.id}@${item.version}`}>{item.name} · v{item.version}</option>)}</SelectField><SelectField label="模型配置" value={profile} onChange={setProfile}>{!profiles.length && <option value="">尚未配置模型</option>}{profiles.map((item) => <option value={item.id} key={item.id}>{item.name} · {item.model}</option>)}</SelectField><div className="document-model-actions"><button className="text-button" onClick={() => { continueAfterModels.current = true; setStartOpen(false); navigate("models"); }}><SlidersHorizontal size={14} />{profiles.length ? "管理模型配置" : "配置本地模型或商业 API"}<ArrowRight size={13} /></button><button className="text-button" disabled={!!busy} onClick={() => void startDialog()}><RefreshCw size={14} />刷新配置</button></div>{selectedProfile && <div className={`model-destination ${remote ? "remote" : "local"}`}><div><Server size={18} /><strong>{remote ? "使用远程 API 分析" : "使用本机模型分析"}</strong></div><dl><dt>目标地址</dt><dd>{target}</dd><dt>模型</dt><dd>{selectedProfile.model}</dd></dl>{remote && <><p>点击“发送并运行”将向此服务发送全文分块、提示词与 Skill。</p>{!selectedProfile.target_fingerprint && <p>请刷新模型配置。</p>}</>}</div>}<Notice error>{error}</Notice>{busy === "config" && <Busy label="正在刷新模型配置" />}{busy === "start" && <Busy label="正在创建分析任务" />}</div>
+      <div className="modal-body"><div className="run-source"><FileText size={20} /><div><strong>{selected?.title}</strong><span>版本 {version?.version_number} · {Number(version?.characters ?? selected?.current_characters ?? 0).toLocaleString()} 字</span></div></div><SelectField label="工作流版本" value={workflow} onChange={setWorkflow}>{workflows.map((item) => <option key={`${item.id}@${item.version}`} value={`${item.id}@${item.version}`}>{item.name} · v{item.version}</option>)}</SelectField><SelectField label="模型配置" value={profile} onChange={setProfile}>{!profiles.length && <option value="">尚未配置模型</option>}{profiles.map((item) => <option value={item.id} key={item.id}>{item.name} · {item.model}</option>)}</SelectField><div className="document-model-actions"><button className="text-button" onClick={() => { continueAfterModels.current = true; setStartOpen(false); navigate("models"); }}><SlidersHorizontal size={14} />{profiles.length ? "管理模型配置" : "配置本地模型或商业 API"}<ArrowRight size={13} /></button><button className="text-button" disabled={!!busy} onClick={() => void startDialog()}><RefreshCw size={14} />刷新配置</button></div>{selectedProfile && <div className={`model-destination ${remote ? "remote" : "local"}`}><div><Server size={18} /><strong>{remote ? "使用远程 API 分析" : "使用本机模型分析"}</strong></div><dl><dt>目标地址</dt><dd>{target}</dd><dt>模型</dt><dd>{selectedProfile.model}</dd></dl>{remote && <><p>点击“发送并运行”将向此服务发送全文分块、提示词与 Skill。</p>{!selectedProfile.target_fingerprint && <p>请刷新模型配置。</p>}</>}</div>}<Notice error>{error}</Notice>{busy === "config" && <Busy label="正在刷新模型配置" inline />}{busy === "start" && <Busy label="正在创建分析任务" inline />}</div>
       <div className="modal-footer"><button className="button secondary" disabled={!!busy} onClick={() => setStartOpen(false)}>取消</button><button className="button primary" disabled={!profile || !workflow || !!busy || (remote && !selectedProfile?.target_fingerprint)} onClick={() => void begin()}>{remote ? "发送并运行" : "创建并运行"}<ArrowRight size={15} /></button></div>
     </Modal>}
-    {restoreTarget && <Modal title="恢复历史版本" busy={busy === "restore"} onClose={() => setRestoreTarget("")}><div className="modal-body"><p>将所选历史版本恢复为新的最新版本，已有修订保留。</p><Notice error>{error}</Notice>{busy === "restore" && <Busy label="正在恢复全文版本" />}</div><div className="modal-footer"><button className="button secondary" disabled={!!busy} onClick={() => setRestoreTarget("")}>取消</button><button className="button primary" disabled={!!busy} onClick={() => void restore()}><RotateCcw size={15} />恢复此版本</button></div></Modal>}
+    {restoreTarget && <Modal title="恢复历史版本" busy={busy === "restore"} onClose={() => setRestoreTarget("")}><div className="modal-body"><p>将所选历史版本恢复为新的最新版本，已有修订保留。</p><Notice error>{error}</Notice>{busy === "restore" && <Busy label="正在恢复全文版本" inline />}</div><div className="modal-footer"><button className="button secondary" disabled={!!busy} onClick={() => setRestoreTarget("")}>取消</button><button className="button primary" disabled={!!busy} onClick={() => void restore()}><RotateCcw size={15} />恢复此版本</button></div></Modal>}
     {discardAction && <Modal title={volumeDirty || recognitionDirty ? "识别与分卷修改尚未保存" : "正文修改尚未保存"} onClose={() => setDiscardAction(null)}><div className="modal-body"><p>保存当前{volumeDirty || recognitionDirty ? "识别与分卷设置" : "正文"}后再继续，或放弃此次修改。</p></div><div className="modal-footer"><button className="button secondary" onClick={() => setDiscardAction(null)}>继续编辑</button><button className="button danger" onClick={() => { const action = discardAction; setDiscardAction(null); setChapterDirty(false); setVolumeDirty(false); setRecognitionDirty(false); dirtyRef.current = false; setChapterReset((value) => value + 1); action(); }}>放弃修改</button></div></Modal>}
   </main>;
 }

@@ -21,11 +21,41 @@ VERSION = __version__
 WORK_COLUMNS = ["作品ID", "作品", "类别", "作者", "发布日期", "版本与原作关系", "用户是否完整体验过", "两句话概括", "剧情补充说明", "热度", "典型桥段（剧透）"]
 CHARACTER_COLUMNS = ["人物ID", "作品ID", "作品", "版本", "角色", "角色定位", "开场身份", "开场能力／专长", "后续能力", "性格", "人物补充说明"]
 CLICHE_COLUMNS = ["cliché内容", "cliché程度", "出现作品"]
-TABLES = {
+LEGACY_TABLES = {
     "works": {"label": "作品", "id_field": "作品ID", "columns": WORK_COLUMNS},
     "characters": {"label": "人物", "id_field": "人物ID", "columns": CHARACTER_COLUMNS},
     "cliches": {"label": "桥段", "id_field": "cliché内容", "columns": CLICHE_COLUMNS},
 }
+LIBRARY_WORK_COLUMNS = ["作品ID", "作品", "类别", "作者", "发布日期", "用户是否完整体验过", "两句话概括", "热度权重", "关联作品", "关联角色", "关联cliché"]
+LIBRARY_CHARACTER_COLUMNS = ["人物ID", "角色", "别名", "角色定位", "开场身份", "开场能力／专长", "后续能力", "性格", "人物补充说明", "关联作品", "关联cliché"]
+LIBRARY_CLICHE_COLUMNS = ["clichéID", "cliché内容", "cliché程度（%）", "命中作品数", "命中热度合计", "关联作品", "关联角色"]
+TABLES = {
+    "works": {"label": "作品", "id_field": "作品ID", "columns": LIBRARY_WORK_COLUMNS},
+    "characters": {"label": "人物", "id_field": "人物ID", "columns": LIBRARY_CHARACTER_COLUMNS},
+    "cliches": {"label": "桥段", "id_field": "clichéID", "columns": LIBRARY_CLICHE_COLUMNS},
+}
+ASSOCIATIONS = {"关联作品": ("works", "作品ID"), "关联角色": ("characters", "人物ID"), "关联cliché": ("cliches", "clichéID")}
+REVERSE_FIELD = {"works": "关联作品", "characters": "关联角色", "cliches": "关联cliché"}
+
+
+def modern_values(table: str, values: dict[str, str]) -> bool:
+    if table == "cliches" and "clichéID" not in values and re.match(r"^C\d+(?=[｜|：:]|$)",values.get("cliché内容","")):
+        return False
+    markers = {"works": {"热度权重", "关联作品", "关联角色", "关联cliché"}, "characters": {"别名", "关联作品", "关联cliché"}, "cliches": {"clichéID", "关联作品", "cliché程度（%）"}}
+    return bool(markers[table] & set(values)) or not bool((set(LEGACY_TABLES[table]["columns"]) - set(TABLES[table]["columns"])) & set(values))
+
+
+def association_items(value: str, label: str) -> list[Any]:
+    if not value:
+        return []
+    try:
+        items = json.loads(value)
+    except (TypeError, ValueError) as exc:
+        raise DataError(422, f"{label} 必须为 JSON 数组") from exc
+    if not isinstance(items, list) or any(not isinstance(item, (str, dict)) for item in items):
+        raise DataError(422, f"{label} 必须为编号或对象组成的 JSON 数组")
+    return items
+
 WORK_RELATION_FIELD = "典型桥段（剧透）"
 CLICHE_ID = re.compile(r"^(C\d+)(?=[｜|：:]|$)")
 # A relation starts on its own line. Semicolons inside narrative text are data.
@@ -49,7 +79,7 @@ def require_table(table: str) -> str:
 
 def record_id(table: str, values: dict[str, str]) -> str:
     require_table(table)
-    if table == "cliches":
+    if table == "cliches" and "clichéID" not in values:
         match = CLICHE_ID.match(values.get("cliché内容", ""))
         if not match:
             raise DataError(422, "桥段内容必须以 C 编号开头，例如 C001｜描述")
@@ -66,12 +96,22 @@ def validate_values(table: str, values: dict[str, str], *, partial: bool = False
     require_table(table)
     if not isinstance(values, dict):
         raise DataError(422, "字段必须为对象")
-    unknown = set(values) - set(TABLES[table]["columns"])
+    if table == "works" and "看过" in values:
+        values = {**values, "用户是否完整体验过": values["看过"]}
+        del values["看过"]
+    modern = modern_values(table, values)
+    columns = TABLES[table]["columns"] if modern else LEGACY_TABLES[table]["columns"]
+    unknown = set(values) - set(columns)
     if unknown:
         raise DataError(422, f"未知字段：{'、'.join(sorted(unknown))}")
     if any(not isinstance(value, str) for value in values.values()):
         raise DataError(422, "所有 CSV 字段必须为字符串")
-    return dict(values) if partial else {column: values.get(column, "") for column in TABLES[table]["columns"]}
+    normalized = dict(values) if partial else {column: values.get(column, "[]" if column in ASSOCIATIONS or column == "别名" else "") for column in columns}
+    if modern:
+        for column in (*ASSOCIATIONS, "别名"):
+            if column in normalized:
+                association_items(normalized[column], column)
+    return normalized
 
 
 def split_occurrences(text: str) -> list[str]:
@@ -111,7 +151,7 @@ def parse_work_relations(text: str) -> tuple[list[Any], dict[str, str]]:
 
 
 def work_label(values: dict[str, str]) -> str:
-    return f"{values['作品']}〔{values['版本与原作关系']}〕"
+    return f"{values['作品']}〔{values.get('版本与原作关系', '')}〕"
 
 
 def character_version(version: str) -> str:
@@ -161,7 +201,7 @@ class DataStore:
         with self.transaction() as connection:
             connection.execute("CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)")
             current = connection.execute("SELECT COALESCE(MAX(version), 0) FROM schema_migrations").fetchone()[0]
-            if current > 3:
+            if current > 4:
                 raise DataError(409, "数据库版本高于当前应用，请使用更新的应用")
             applied = {row[0] for row in connection.execute("SELECT version FROM schema_migrations")}
             if 1 not in applied:
@@ -218,6 +258,29 @@ class DataStore:
                            OR (target_table = '{table}' AND target_id = OLD.id); END""")
                 connection.execute("INSERT INTO schema_migrations VALUES (3, ?)", (datetime.now(timezone.utc).isoformat(),))
 
+            if 4 not in applied:
+                # A person can appear in several works. The old ownership column
+                # remains a compatibility hint, never the modern relationship.
+                for trigger in ("material_relations_insert_endpoints", "material_relations_update_endpoints", "characters_delete_material_relations"):
+                    connection.execute(f"DROP TRIGGER IF EXISTS {trigger}")
+                connection.execute("DROP INDEX IF EXISTS idx_characters_work")
+                connection.execute("ALTER TABLE characters RENAME TO characters_v3")
+                connection.execute("CREATE TABLE characters (id TEXT PRIMARY KEY, work_id TEXT REFERENCES works(id) ON DELETE SET NULL, values_json TEXT NOT NULL, revision INTEGER NOT NULL DEFAULT 1 CHECK(revision > 0), sort_order INTEGER NOT NULL)")
+                connection.execute("INSERT INTO characters SELECT * FROM characters_v3")
+                connection.execute("DROP TABLE characters_v3")
+                connection.execute("CREATE INDEX idx_characters_work ON characters(work_id)")
+                for operation in ("INSERT", "UPDATE OF source_table,source_id,target_table,target_id"):
+                    name = "insert" if operation == "INSERT" else "update"
+                    checks = " ".join(f"SELECT CASE WHEN NEW.{side}_table = '{table}' AND NOT EXISTS(SELECT 1 FROM {table} WHERE id = NEW.{side}_id) THEN RAISE(ABORT,'material relation endpoint missing') END;" for side in ("source", "target") for table in TABLES)
+                    connection.execute(f"CREATE TRIGGER material_relations_{name}_endpoints BEFORE {operation} ON material_relations BEGIN {checks} END")
+                connection.execute("CREATE TRIGGER characters_delete_material_relations AFTER DELETE ON characters BEGIN DELETE FROM material_relations WHERE (source_table='characters' AND source_id=OLD.id) OR (target_table='characters' AND target_id=OLD.id); END")
+                connection.execute("CREATE TABLE library_links (source_table TEXT NOT NULL,source_id TEXT NOT NULL,field TEXT NOT NULL,position INTEGER NOT NULL,target_table TEXT NOT NULL,target_id TEXT NOT NULL,payload_json TEXT NOT NULL,PRIMARY KEY(source_table,source_id,field,position))")
+                connection.execute("CREATE INDEX idx_library_links_target ON library_links(target_table,target_id)")
+                connection.execute("CREATE TABLE legacy_values (table_key TEXT NOT NULL,record_id TEXT NOT NULL,values_json TEXT NOT NULL,PRIMARY KEY(table_key,record_id))")
+                self._upgrade_legacy_rows(connection)
+                self._rebuild_library_links(connection)
+                connection.execute("INSERT INTO schema_migrations VALUES (4, ?)", (datetime.now(timezone.utc).isoformat(),))
+
     def _stats(self, connection: sqlite3.Connection) -> dict[str, int]:
         return {table: connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] for table in (*TABLES, "work_cliches")}
 
@@ -228,7 +291,7 @@ class DataStore:
 
     def meta(self) -> dict[str, Any]:
         counts = self.stats()
-        return {"tables": [{"key": table, **spec, "count": counts[table]} for table, spec in TABLES.items()], "version": VERSION}
+        return {"tables": [{"key": table, **spec, "count": counts[table]} for table, spec in TABLES.items()], "version": VERSION, "schema_version": 4}
 
     def _row(self, connection: sqlite3.Connection, table: str, identifier: str) -> sqlite3.Row:
         require_table(table)
@@ -239,6 +302,8 @@ class DataStore:
 
     def _render(self, connection: sqlite3.Connection, table: str, row: sqlite3.Row) -> dict[str, Any]:
         values = json.loads(row["values_json"])
+        if modern_values(table, values):
+            return {"id": row["id"], "values": values, "revision": row["revision"]}
         if table == "works":
             relations = {relation["cliche_id"]: relation for relation in connection.execute("SELECT * FROM work_cliches WHERE work_id = ? ORDER BY work_position,cliche_id", (row["id"],))}
             output: list[str] = []
@@ -286,33 +351,63 @@ class DataStore:
             connection.execute("BEGIN")
             return self._all(connection, table)
 
-    def list_records(self, table: str, q: str = "", offset: int = 0, limit: int = 50, work_id: str | None = None, cliche_id: str | None = None) -> dict[str, Any]:
+    def list_records(self, table: str, q: str = "", offset: int = 0, limit: int = 50, work_id: str | None = None, cliche_id: str | None = None, filters: dict[str,Any] | None = None, sort_by: str | None = None, sort_direction: str = "asc") -> dict[str, Any]:
         require_table(table)
         if offset < 0 or limit < 1 or limit > 500:
-            raise DataError(422, "分页范围无效（limit 为 1–500）")
+            raise DataError(422,"分页范围无效（limit 为 1–500）")
+        if sort_direction not in {"asc","desc"}:
+            raise DataError(422,"排序方向必须为 asc 或 desc")
+        clauses: list[str] = []; parameters: list[Any] = []
+        if work_id:
+            if table == "works":
+                clauses.append("r.id=?"); parameters.append(work_id)
+            else:
+                legacy = "SELECT id FROM characters WHERE work_id=?" if table == "characters" else "SELECT cliche_id FROM work_cliches WHERE work_id=?"
+                clauses.append(f"r.id IN (SELECT target_id FROM library_links WHERE source_table='works' AND source_id=? AND target_table=? UNION SELECT source_id FROM library_links WHERE target_table='works' AND target_id=? AND source_table=? UNION {legacy})")
+                parameters.extend((work_id,table,work_id,table,work_id))
+        if cliche_id:
+            if table == "cliches":
+                clauses.append("r.id=?"); parameters.append(cliche_id)
+            else:
+                legacy = "SELECT work_id FROM work_cliches WHERE cliche_id=?" if table == "works" else "SELECT ch.id FROM characters ch JOIN work_cliches wc ON wc.work_id=ch.work_id WHERE wc.cliche_id=?"
+                clauses.append(f"r.id IN (SELECT target_id FROM library_links WHERE source_table='cliches' AND source_id=? AND target_table=? UNION SELECT source_id FROM library_links WHERE target_table='cliches' AND target_id=? AND source_table=? UNION {legacy})")
+                parameters.extend((cliche_id,table,cliche_id,table,cliche_id))
+        if q:
+            # SQLite casefold is intentionally supplied by Python for Unicode.
+            clauses.append("EXISTS(SELECT 1 FROM json_each(r.values_json) j WHERE instr(casefold(j.value),?)>0)");parameters.append(q.casefold())
+        for key,value in (filters or {}).items():
+            if key == "work_ids":
+                if table != "works" or not isinstance(value,(list,tuple,set)) or any(not isinstance(item,str) for item in value):
+                    raise DataError(422,"work_ids 必须为作品编号列表")
+                clauses.append("r.id IN (SELECT value FROM json_each(?))");parameters.append(_json(list(value)))
+                continue
+            field = {"category":"类别","seen":"用户是否完整体验过","看过":"用户是否完整体验过"}.get(key,key)
+            if field not in TABLES[table]["columns"]:
+                raise DataError(422,f"不支持的筛选字段：{key}")
+            if field == "用户是否完整体验过" and value == "unknown":
+                clauses.append("COALESCE(json_extract(r.values_json,?), '') NOT IN ('是','否')");parameters.append('$."'+field+'"')
+            elif value != "":
+                clauses.append("json_extract(r.values_json,?)=?");parameters.extend(('$."'+field+'"',value))
+        order = "r.sort_order,r.id"
+        if sort_by:
+            if sort_by not in {"id",*TABLES[table]["columns"]}:
+                raise DataError(422,"排序字段无效")
+            direction = "DESC" if sort_direction == "desc" else "ASC"
+            if sort_by == "id": order = f"r.id {direction}"
+            else:
+                # Field is selected from a fixed schema allowlist; bind its JSON path.
+                order = f"json_extract(r.values_json,?) COLLATE NOCASE {direction},r.id"
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
         with self.connect() as connection:
+            connection.create_function("casefold",1,lambda value:str(value).casefold(),deterministic=True)
             connection.execute("BEGIN")
-            items = self._all(connection, table)
-            if work_id:
-                if table == "characters":
-                    items = [item for item in items if item["values"]["作品ID"] == work_id]
-                elif table == "cliches":
-                    ids = {row[0] for row in connection.execute("SELECT cliche_id FROM work_cliches WHERE work_id = ?", (work_id,))}
-                    items = [item for item in items if item["id"] in ids]
-                else:
-                    items = [item for item in items if item["id"] == work_id]
-            if cliche_id:
-                ids = {row[0] for row in connection.execute("SELECT work_id FROM work_cliches WHERE cliche_id = ?", (cliche_id,))}
-                if table == "works":
-                    items = [item for item in items if item["id"] in ids]
-                elif table == "characters":
-                    items = [item for item in items if item["values"]["作品ID"] in ids]
-                else:
-                    items = [item for item in items if item["id"] == cliche_id]
-            if q:
-                needle = q.casefold()
-                items = [item for item in items if any(needle in value.casefold() for value in item["values"].values())]
-            return {"items": items[offset:offset + limit], "total": len(items), "offset": offset, "limit": limit}
+            total = connection.execute(f"SELECT COUNT(*) FROM {table} r{where}",parameters).fetchone()[0]
+            rows_parameters = list(parameters)
+            if sort_by and sort_by != "id": rows_parameters.append('$."'+sort_by+'"')
+            rows = connection.execute(f"SELECT r.* FROM {table} r{where} ORDER BY {order} LIMIT ? OFFSET ?",(*rows_parameters,limit,offset))
+            items = [self._render(connection,table,row) for row in rows]
+            categories = [row[0] for row in connection.execute("SELECT DISTINCT json_extract(values_json,'$.类别') category FROM works WHERE COALESCE(json_extract(values_json,'$.类别'),'') != '' ORDER BY category")]
+            return {"items":items,"total":total,"offset":offset,"limit":limit,"facets":{"categories":categories},"summary":{"matches":total,**self._stats(connection)}}
 
     def relations(self, table: str, identifier: str) -> dict[str, list[dict[str, Any]]]:
         """Return direct, labelled edges; sharing a work never creates an edge.
@@ -325,6 +420,8 @@ class DataStore:
         with self.connect() as connection:
             connection.execute("BEGIN")
             row = self._row(connection, table, identifier)
+            if modern_values(table,json.loads(row["values_json"])):
+                return self._modern_relations(connection,table,identifier)
             result = {key: [] for key in TABLES}
             result["edges"] = []
             targets: dict[tuple[str, str], dict[str, Any]] = {}
@@ -491,6 +588,15 @@ class DataStore:
         order = self._next_order(connection, table)
         version = connection.execute("SELECT revision FROM record_versions WHERE table_key = ? AND record_id = ?", (table, identifier)).fetchone()
         revision = version[0] + 1 if version else 1
+        if modern_values(table, values):
+            if table == "characters":
+                connection.execute("INSERT INTO characters (id,work_id,values_json,sort_order,revision) VALUES (?,NULL,?,?,?)", (identifier, _json(values), order, revision))
+            elif table == "works":
+                connection.execute("INSERT INTO works (id,values_json,cliche_layout,sort_order,revision) VALUES (?,?,'[]',?,?)", (identifier, _json(values), order, revision))
+            else:
+                connection.execute("INSERT INTO cliches (id,values_json,sort_order,revision) VALUES (?,?,?,?)", (identifier, _json(values), order, revision))
+            self._remember_version(connection, table, identifier, revision)
+            return identifier
         if table == "characters":
             self._validate_character(connection, values)
             connection.execute("INSERT INTO characters (id,work_id,values_json,sort_order,revision) VALUES (?,?,?,?,?)", (identifier, values["作品ID"], _json(values), order, revision))
@@ -596,7 +702,10 @@ class DataStore:
         values = validate_values(table, values)
         with self.transaction() as connection:
             identifier = self._insert_raw(connection, table, values)
-            if table == "works":
+            if modern_values(table, values):
+                self._sync_modern_views(connection, table, identifier, {}, values)
+                self._rebuild_library_links(connection)
+            elif table == "works":
                 self._sync_work(connection, identifier, values[WORK_RELATION_FIELD])
             elif table == "cliches":
                 self._sync_cliche(connection, identifier, values["出现作品"])
@@ -609,6 +718,10 @@ class DataStore:
         if record_id(table, values) != identifier:
             raise DataError(422, "不能更改已有记录的 ID")
         previous = self._render(connection, table, row)["values"]
+        if modern_values(table, values):
+            connection.execute(f"UPDATE {table} SET values_json=?,revision=revision+1 WHERE id=?", (_json(values), identifier))
+            self._remember_version(connection, table, identifier, expected_revision + 1)
+            return
         label_changed = table == "works" and (previous["作品"] != values["作品"] or previous["版本与原作关系"] != values["版本与原作关系"])
         affected_labels = {work_label(previous), work_label(values)} if label_changed else set()
         affected_cliches = self._cliches_for_labels(connection, affected_labels) if label_changed else set()
@@ -634,10 +747,23 @@ class DataStore:
 
     def update_record(self, table: str, identifier: str, values: dict[str, str], expected_revision: int) -> dict[str, Any]:
         require_table(table)
-        patch = validate_values(table, values, partial=True)
         with self.transaction() as connection:
             current = self._render(connection, table, self._row(connection, table, identifier))["values"]
-            merged = {**current, **patch}
+            # Validate in the record's own schema; shared fields cannot imply a
+            # schema switch when editing an old compatibility record.
+            candidate = {**current, **values}
+            merged = validate_values(table, candidate)
+            patch = dict(values)
+            if table == "works" and "看过" in patch:
+                patch["用户是否完整体验过"] = patch.pop("看过")
+            if modern_values(table, current):
+                self._update_raw(connection, table, identifier, merged, expected_revision)
+                association_changed = any(current.get(field) != merged.get(field) for field in ASSOCIATIONS)
+                title_changed = table == "works" and current.get("作品") != merged.get("作品")
+                if association_changed or title_changed:
+                    self._sync_modern_views(connection, table, identifier, current, merged)
+                    self._rebuild_library_links(connection)
+                return self._render(connection, table, self._row(connection, table, identifier))
             if table == "characters" and merged["作品ID"] != current["作品ID"]:
                 target = json.loads(self._row(connection, "works", merged["作品ID"])["values_json"])
                 if "作品" not in patch:
@@ -657,6 +783,16 @@ class DataStore:
             row = self._row(connection, table, identifier)
             if row["revision"] != expected_revision:
                 raise DataError(409, "记录已被修改，请刷新后重试")
+            if modern_values(table, json.loads(row["values_json"])):
+                links = connection.execute("SELECT COUNT(*) FROM library_links WHERE (source_table=? AND source_id=?) OR (target_table=? AND target_id=?)", (table,identifier,table,identifier)).fetchone()[0]
+                manual = connection.execute("SELECT COUNT(*) FROM material_relations WHERE (source_table=? AND source_id=?) OR (target_table=? AND target_id=?)", (table,identifier,table,identifier)).fetchone()[0]
+                if (links or manual) and not cascade:
+                    raise DataError(409, f"存在 {links + manual} 条关联；请确认解除关联并删除")
+                self._remove_library_target(connection, table, identifier)
+                connection.execute(f"DELETE FROM {table} WHERE id=?", (identifier,))
+                connection.execute("DELETE FROM legacy_values WHERE table_key=? AND record_id=?", (table, identifier))
+                self._rebuild_library_links(connection)
+                return {"deleted": 1}
             related = 0
             cids: set[str] = set()
             wids: set[str] = set()
@@ -673,9 +809,222 @@ class DataStore:
             if related and not cascade:
                 raise DataError(409, f"存在 {related} 条关联；请确认级联删除")
             count = 1 + (connection.execute("SELECT COUNT(*) FROM characters WHERE work_id = ?", (identifier,)).fetchone()[0] if table == "works" else 0)
+            if table == "works":
+                connection.execute("DELETE FROM characters WHERE work_id=?", (identifier,))
             connection.execute(f"DELETE FROM {table} WHERE id = ?", (identifier,))
             self._bump(connection, "cliches", cids)
             self._bump(connection, "works", wids)
             for wid in wids:
                 self._normalize_work_layout(connection, wid)
             return {"deleted": count}
+
+    def _upgrade_legacy_rows(self, connection: sqlite3.Connection) -> None:
+        """Archive all visible v3 values before replacing any parent view."""
+        # Legacy reverse columns are rendered from authoritative relations and
+        # can differ from a stale values_json field after interactive edits.
+        snapshots = {table:{row["id"]:self._render(connection,table,row)["values"] for row in connection.execute(f"SELECT * FROM {table}").fetchall()} for table in TABLES}
+        for table in TABLES:
+            for row in connection.execute(f"SELECT * FROM {table}").fetchall():
+                old = snapshots[table][row["id"]]
+                if modern_values(table, old):
+                    continue
+                connection.execute("INSERT OR IGNORE INTO legacy_values VALUES (?,?,?)", (table,row["id"],_json(old)))
+                new = {column: old.get(column, "[]" if column in ASSOCIATIONS or column == "别名" else "") for column in TABLES[table]["columns"]}
+                if table == "works":
+                    new["热度权重"] = old.get("热度", "")
+                    new["关联角色"] = _json([r[0] for r in connection.execute("SELECT id FROM characters WHERE work_id=? ORDER BY sort_order,id", (row["id"],))])
+                    new["关联cliché"] = _json([r[0] for r in connection.execute("SELECT cliche_id FROM work_cliches WHERE work_id=? ORDER BY work_position,cliche_id", (row["id"],))])
+                elif table == "characters":
+                    new["关联作品"] = _json([{"作品ID":row["work_id"]}] if row["work_id"] else [])
+                else:
+                    new["clichéID"] = row["id"]
+                    new["cliché内容"] = re.sub(r"^C\d+[｜|：:]?", "", old.get("cliché内容", ""), count=1)
+                    new["cliché程度（%）"] = old.get("cliché程度", "")
+                    new["关联作品"] = _json([{"作品ID":r["work_id"],"关联内容":r["detail"]} for r in connection.execute("SELECT * FROM work_cliches WHERE cliche_id=? ORDER BY cliche_position,work_id", (row["id"],))])
+                connection.execute(f"UPDATE {table} SET values_json=? WHERE id=?", (_json(new),row["id"]))
+
+    def _library_rows(self, connection: sqlite3.Connection) -> dict[str, dict[str, dict[str, str]]]:
+        return {table: {row["id"]: json.loads(row["values_json"]) for row in connection.execute(f"SELECT id,values_json FROM {table}")} for table in TABLES}
+
+    @staticmethod
+    def _association_id(item: Any, id_field: str, label: str) -> str:
+        identifier = item if isinstance(item, str) else item.get(id_field)
+        if not isinstance(identifier, str) or not identifier:
+            raise DataError(422, f"{label} 缺少 {id_field}")
+        return identifier
+
+    def _rebuild_library_links(self, connection: sqlite3.Connection) -> None:
+        """Materialize ID-based links without discarding source order or payload."""
+        records = self._library_rows(connection)
+        links = []
+        work_cliches: dict[tuple[str,str], list[Any]] = {}
+        modern_work_ids = {identifier for identifier, values in records["works"].items() if modern_values("works", values)}
+        modern_cliche_ids = {identifier for identifier, values in records["cliches"].items() if modern_values("cliches", values)}
+        for table, rows in records.items():
+            for identifier, values in rows.items():
+                if not modern_values(table, values):
+                    continue
+                for field, (target_table, id_field) in ASSOCIATIONS.items():
+                    if field not in values:
+                        continue
+                    seen: set[tuple[str, str]] = set()
+                    for position, item in enumerate(association_items(values[field], f"{TABLES[table]['label']} {identifier} 的{field}")):
+                        target_id = self._association_id(item, id_field, f"{identifier} 的{field}")
+                        context = item.get("作品ID", "") if isinstance(item, dict) and target_table in {"characters","cliches"} else ""
+                        if (target_id,context) in seen:
+                            raise DataError(422, f"{identifier} 的{field}重复引用 {target_id}")
+                        seen.add((target_id,context))
+                        if target_id not in records[target_table]:
+                            raise DataError(422, f"{TABLES[table]['label']} {identifier} 的{field}引用 {TABLES[target_table]['label']} {target_id}，对应表缺少该 ID；两个文件疑似版本不一致")
+                        if table == target_table and identifier == target_id:
+                            raise DataError(422, f"{identifier} 不能关联自身")
+                        if table == target_table == "cliches":
+                            raise DataError(422, "桥段不能关联桥段")
+                        if isinstance(item, dict):
+                            if "作品名" in item and target_table == "works" and item["作品名"] != records["works"][target_id].get("作品", ""):
+                                raise DataError(422, f"{identifier} 的关联作品 {target_id} 名称与作品表不一致；两个文件疑似版本不一致")
+                            if "人物设定" in item and not isinstance(item["人物设定"], dict):
+                                raise DataError(422, f"{identifier} 的人物设定必须为 JSON 对象")
+                            if context and context not in records["works"]:
+                                raise DataError(422, f"{identifier} 的关联角色 {target_id} 引用作品 {context}，作品表缺少该 ID")
+                        links.append((table,identifier,field,position,target_table,target_id,_json(item)))
+                        if {table,target_table} == {"works","cliches"}:
+                            wid,cid = (identifier,target_id) if table == "works" else (target_id,identifier)
+                            edge = work_cliches.setdefault((wid,cid), ["",0,0])
+                            edge[1 if table == "works" else 2] = position
+                            if isinstance(item, dict) and item.get("关联内容") is not None:
+                                edge[0] = str(item["关联内容"])
+        def relation_context(source_table: str,target_table: str,payload_json: str) -> str:
+            payload = json.loads(payload_json)
+            return str(payload.get("作品ID","")) if {source_table,target_table} == {"characters","cliches"} and isinstance(payload,dict) else ""
+        claims = {(source_table,source_id,target_table,target_id,relation_context(source_table,target_table,payload)) for source_table,source_id,field,position,target_table,target_id,payload in links}
+        for source_table,source_id,target_table,target_id,context in claims:
+            if source_table == target_table:
+                continue
+            target = records[target_table][target_id]
+            reverse = REVERSE_FIELD[source_table]
+            if modern_values(target_table,target) and reverse in target and (target_table,target_id,source_table,source_id,context) not in claims:
+                suffix = f"（作品 {context}）" if context else ""
+                raise DataError(422,f"{source_id} 与 {target_id}{suffix} 的双向关联不一致；请使用同一版本的三张表，已有记录更新请选择显式更新")
+        connection.execute("DELETE FROM library_links")
+        connection.executemany("INSERT INTO library_links VALUES (?,?,?,?,?,?,?)", links)
+        # Compatibility view is generated from the same canonical IDs. No title
+        # matching is used, including when several works share a name.
+        for wid in modern_work_ids:
+            connection.execute("DELETE FROM work_cliches WHERE work_id=?", (wid,))
+        for cid in modern_cliche_ids:
+            connection.execute("DELETE FROM work_cliches WHERE cliche_id=?", (cid,))
+        connection.executemany("INSERT INTO work_cliches VALUES (?,?,?,?,?)", [(wid,cid,*edge) for (wid,cid),edge in work_cliches.items()])
+
+    def _write_library_values(self, connection: sqlite3.Connection, table: str, identifier: str, values: dict[str,str]) -> None:
+        previous = self._row(connection,table,identifier)
+        if json.loads(previous["values_json"]) == values:
+            return
+        connection.execute(f"UPDATE {table} SET values_json=?,revision=revision+1 WHERE id=?", (_json(values),identifier))
+        self._remember_version(connection,table,identifier,previous["revision"]+1)
+
+    def _sync_modern_views(self, connection: sqlite3.Connection, table: str, identifier: str, before: dict[str,str], after: dict[str,str]) -> None:
+        """A direct association edit updates its reverse view in the same transaction."""
+        reverse = REVERSE_FIELD[table]
+        if table == "works" and before.get("作品") != after.get("作品"):
+            for source_table,rows in self._library_rows(connection).items():
+                for source_id,target in rows.items():
+                    if "关联作品" not in target: continue
+                    items = association_items(target["关联作品"],"关联作品")
+                    changed = False
+                    for item in items:
+                        if isinstance(item,dict) and item.get("作品ID") == identifier and "作品名" in item:
+                            item["作品名"] = after.get("作品",""); changed = True
+                    if changed:
+                        target["关联作品"] = _json(items)
+                        self._write_library_values(connection,source_table,source_id,target)
+        for field,(target_table,id_field) in ASSOCIATIONS.items():
+            if field not in after or before.get(field,"[]") == after[field] or table == target_table:
+                continue
+            contextual = {table,target_table} == {"characters","cliches"}
+            def key(item: Any) -> tuple[str,str]:
+                return (self._association_id(item,id_field,field), str(item.get("作品ID","")) if contextual and isinstance(item,dict) else "")
+            old = {key(item):item for item in association_items(before.get(field,"[]"),field)}
+            new = {key(item):item for item in association_items(after[field],field)}
+            for target_id,context in old.keys() | new.keys():
+                target_row = self._row(connection,target_table,target_id)
+                target = json.loads(target_row["values_json"])
+                if not modern_values(target_table,target) or reverse not in target:
+                    continue
+                items = association_items(target[reverse],reverse)
+                own_id = TABLES[table]["id_field"]
+                def matches(item: Any) -> bool:
+                    return self._association_id(item,own_id,reverse) == identifier and (not contextual or (str(item.get("作品ID","")) if isinstance(item,dict) else "") == context)
+                existing = [item for item in items if matches(item)]
+                if (target_id,context) in new:
+                    payload = new[(target_id,context)]
+                    if not existing:
+                        addition: Any = {own_id:identifier} if table == "works" or contextual else identifier
+                        if contextual and context: addition["作品ID"] = context
+                        if isinstance(payload,dict) and isinstance(addition,dict) and "关联内容" in payload: addition["关联内容"] = payload["关联内容"]
+                        items.append(addition)
+                    elif isinstance(payload,dict) and "关联内容" in payload:
+                        for item in existing:
+                            if isinstance(item,dict) and "关联内容" in item: item["关联内容"] = payload["关联内容"]
+                else:
+                    items = [item for item in items if not matches(item)]
+                if items != association_items(target[reverse],reverse):
+                    target[reverse] = _json(items)
+                    self._write_library_values(connection,target_table,target_id,target)
+
+    def _remove_library_target(self, connection: sqlite3.Connection, table: str, identifier: str) -> None:
+        for source_table, rows in self._library_rows(connection).items():
+            for source_id, values in rows.items():
+                if not modern_values(source_table, values):
+                    continue
+                changed = False
+                for field,(target_table,id_field) in ASSOCIATIONS.items():
+                    if field not in values:
+                        continue
+                    items = association_items(values[field],field)
+                    keep = [item for item in items if not ((target_table == table and self._association_id(item,id_field,field) == identifier) or (table == "works" and isinstance(item,dict) and target_table in {"characters","cliches"} and item.get("作品ID") == identifier))]
+                    if keep != items:
+                        values[field] = _json(keep)
+                        changed = True
+                if changed and (source_table,source_id) != (table,identifier):
+                    self._write_library_values(connection,source_table,source_id,values)
+
+    def _modern_relations(self, connection: sqlite3.Connection, table: str, identifier: str) -> dict[str, Any]:
+        result: dict[str,Any] = {key:[] for key in TABLES}
+        result["edges"] = []
+        targets: dict[tuple[str,str],dict[str,Any]] = {}
+        links = connection.execute("SELECT * FROM library_links WHERE (source_table=? AND source_id=?) OR (target_table=? AND target_id=?) ORDER BY source_table,source_id,field,position", (table,identifier,table,identifier))
+        for link in links:
+            outgoing = link["source_table"] == table and link["source_id"] == identifier
+            target_table,target_id = (link["target_table"],link["target_id"]) if outgoing else (link["source_table"],link["source_id"])
+            if table == target_table == "cliches":
+                continue
+            payload = json.loads(link["payload_json"])
+            meta = payload if isinstance(payload,dict) else {}
+            description = str(meta.get("关联内容",meta.get("关联方式","")))
+            label = description or ("登场人物" if {table,target_table} == {"works","characters"} else "使用桥段" if "cliches" in {table,target_table} else "关联作品")
+            relation = {"id":f"library:{link['source_table']}:{link['source_id']}:{link['field']}:{link['position']}","type":link["field"],"label":label,"description":description,"metadata":meta,"direction":"outgoing" if outgoing else "incoming","source":"library_links","relation_type":link["field"]}
+            key = target_table,target_id
+            if key not in targets:
+                item = self._render(connection,target_table,self._row(connection,target_table,target_id))
+                item["relationships"] = []
+                targets[key] = item
+                result[target_table].append(item)
+            # Reverse arrays describe the same edge; prefer the rich payload.
+            if any(r["description"] == description and r["metadata"] == meta for r in targets[key]["relationships"]):
+                continue
+            targets[key]["relationships"].append(relation)
+            targets[key]["relationship"] = max(targets[key]["relationships"],key=lambda r:len(r["description"])+len(_json(r["metadata"])))
+            result["edges"].append({**relation,"source_table":link["source_table"],"source_id":link["source_id"],"target_table":link["target_table"],"target_id":link["target_id"]})
+        for link in connection.execute("SELECT * FROM material_relations WHERE (source_table=? AND source_id=?) OR (target_table=? AND target_id=?) ORDER BY id", (table,identifier,table,identifier)):
+            edge = self._render_material_relation(link)
+            outgoing = edge["source_table"] == table and edge["source_id"] == identifier
+            target_table,target_id = (edge["target_table"],edge["target_id"]) if outgoing else (edge["source_table"],edge["source_id"])
+            relation = {"id":edge["id"],"type":edge["relation_type"],"label":edge["relation_type"],"description":edge["description"],"metadata":edge["metadata"],"direction":"outgoing" if outgoing else "incoming","source":"explicit"}
+            key = target_table,target_id
+            if key not in targets:
+                item = self._render(connection,target_table,self._row(connection,target_table,target_id)); item["relationships"] = []
+                targets[key] = item; result[target_table].append(item)
+            targets[key]["relationships"].append(relation); targets[key]["relationship"] = relation
+            result["edges"].append({**edge,"direction":relation["direction"],"label":relation["label"]})
+        return result

@@ -28,6 +28,16 @@ export const settingCategories = [
 ];
 export const chapterTypes = ["日常", "战斗", "高潮", "角色个人回", "主线事件", "支线事件", "伏笔铺垫", "收束", "转折", "其他"];
 export const roleTags = ["主角", "女主角", "反派", "男配", "女配", "师长", "重要配角", "路人", "其他"];
+export function characterExperiences(character: ReferenceRecord, plot: unknown): ReferenceRecord[] {
+  const own = records(character.experiences);
+  if (own.length) return own;
+  const name = stringValue(character.name).trim();
+  if (!name) return [];
+  return records(record(plot).epochs).flatMap(epoch => records(epoch.periods).flatMap(period =>
+    records(period.events).filter(event => stringValue(event.subject).trim() === name)
+      .map(event => ({ chapter: stringValue(event.first_chapter || period.time), text: stringValue(event.description || event.name).trim() }))
+      .filter(fact => fact.text)));
+}
 export function sectionCount(state: ReferenceState | null, section: ReferenceSection) {
   const data = state?.sections[section];
   if (section === "plot") return records(record(data).epochs).reduce((n, e) => n + records(e.periods).reduce((sum, p) => sum + records(p.events).length, 0), 0);

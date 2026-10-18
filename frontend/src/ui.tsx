@@ -284,6 +284,7 @@ export function SelectField({
       <span>{label}</span>
       <select
         id={id}
+        aria-label={label}
         value={value}
         onChange={(e) => onChange(e.target.value)}
         disabled={disabled}

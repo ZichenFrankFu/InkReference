@@ -7,7 +7,7 @@ import "./volume-panel.css";
 
 type Volume = { title: string; start_chapter: number; end_chapter: number };
 type Plan = { revision: number; chapter_count: number; volumes: Volume[]; method: string };
-export function VolumePanel({ documentId, versionId, onDirty }: { documentId: string; versionId: string; onDirty?: (dirty: boolean) => void }) {
+export function VolumePanel({ documentId, versionId, onDirty, onActivity }: { documentId: string; versionId: string; onDirty?: (dirty: boolean) => void; onActivity?: (label: string) => void }) {
   const [plan, setPlan] = useState<Plan | null>(null), [rows, setRows] = useState<Volume[]>([]);
   const [busy, setBusy] = useState(""), [error, setError] = useState(""), [message, setMessage] = useState("");
   const [paste, setPaste] = useState(""), [showPaste, setShowPaste] = useState(false), [prompt, setPrompt] = useState("");
@@ -15,6 +15,7 @@ export function VolumePanel({ documentId, versionId, onDirty }: { documentId: st
   const [models, setModels] = useState<ModelProfile[]>([]), [profile, setProfile] = useState(""), [confirm, setConfirm] = useState(false);
   const ticket = useRef(0), base = `/documents/${documentId}/versions/${versionId}/volumes`;
   const onDirtyRef = useRef(onDirty); onDirtyRef.current = onDirty;
+  const activityRef = useRef(onActivity); activityRef.current = onActivity;
   const selected = models.find((model) => model.id === profile);
   const dirty = !!plan && JSON.stringify(rows) !== JSON.stringify(plan.volumes);
   useEffect(() => { onDirtyRef.current?.(dirty); }, [dirty]);
@@ -41,7 +42,7 @@ export function VolumePanel({ documentId, versionId, onDirty }: { documentId: st
   return <section className="volume-panel" aria-label="分卷规划" aria-busy={!!busy}>
     <div className="volume-toolbar"><div><h3>分卷</h3><span>{plan?.chapter_count ?? "—"} 章 · {rows.length} 卷</span>{dirty && <strong className="volume-unsaved">未保存</strong>}</div><div className="volume-primary-actions"><button className="button secondary compact-button" disabled={!!busy || !plan} onClick={detect}><Sparkles size={14} />自动识别分卷</button>{dirty && <button className="button primary compact-button" disabled={!!busy} onClick={save}><Save size={14} />保存分卷</button>}</div></div>
     {message && <div className="volume-feedback" role="status" aria-live="polite"><CheckCircle2 size={13} />{message}</div>}
-    {error && <Notice error>{error}</Notice>}{busy && <Busy label={busy} />}
+    {error && <Notice error>{error}</Notice>}
     <div className="volume-table"><div className="volume-row volume-head"><span>卷名</span><span>起始章</span><span>结束章</span><span /></div>
       {rows.map((row, index) => <div className="volume-row" key={index}><input aria-label={`第${index + 1}卷名称`} value={row.title} disabled={!!busy} onChange={(event) => update(index, { title: event.target.value })} /><input aria-label={`第${index + 1}卷起始章`} type="number" min={1} max={plan?.chapter_count} value={row.start_chapter} disabled={!!busy} onChange={(event) => update(index, { start_chapter: Number(event.target.value) })} /><input aria-label={`第${index + 1}卷结束章`} type="number" min={1} max={plan?.chapter_count} value={row.end_chapter} disabled={!!busy} onChange={(event) => update(index, { end_chapter: Number(event.target.value) })} /><button className="icon-button" aria-label={`删除第${index + 1}卷`} disabled={!!busy} onClick={() => setRows(rows.filter((_, position) => position !== index))}><Trash2 size={14} /></button></div>)}
     </div><button className="button secondary compact-button volume-add" disabled={!!busy || !plan} onClick={() => setRows([...rows, { title: `第${rows.length + 1}卷`, start_chapter: (rows.at(-1)?.end_chapter ?? 0) + 1, end_chapter: plan?.chapter_count ?? 1 }])}><Plus size={14} />添加分卷</button>
@@ -56,5 +57,5 @@ type Source = { id:string; filename:string; bytes?:number; original_bytes?:numbe
 export function SourceFiles({documentId,versionId}:{documentId:string;versionId?:string}) {
   const [files,setFiles]=useState<Source[]>([]),[busy,setBusy]=useState(true),[error,setError]=useState('');
   useEffect(()=>{let active=true;setBusy(true);studio<{items:Source[]}>(`/documents/${documentId}/sources`).then(data=>{if(active)setFiles(normalizeList(data));}).catch(e=>{if(active)setError(messageOf(e));}).finally(()=>{if(active)setBusy(false);});return()=>{active=false;};},[documentId,versionId]);
-  return <section className="source-files" aria-label="原始文件">{busy&&<Busy label="读取原始文件"/>}{error&&<Notice error>{error}</Notice>}{!busy&&!files.length&&<Empty icon={FileText} title="暂无原始文件"/>}{files.map((file,i)=><article className="source-file" key={file.id}><FileText size={22}/><div><strong>{file.filename}</strong><span>{i===0?'初始上传':'接续上传'}{file.original_bytes!==undefined||file.bytes!==undefined?` · ${((file.original_bytes??file.bytes??0)/1024).toFixed(1)} KB`:''}</span><code>{file.sha256||file.original_sha256}</code></div><a className="button" href={`/api/studio/documents/${documentId}/sources/${file.id}/download`} download><Download size={15}/>下载原件</a></article>)}</section>;
+  return <section className="source-files" aria-label="原始文件">{busy&&<Busy label="读取原始文件" inline/>}{error&&<Notice error>{error}</Notice>}{!busy&&!files.length&&<Empty icon={FileText} title="暂无原始文件"/>}{files.map((file,i)=><article className="source-file" key={file.id}><FileText size={22}/><div><strong>{file.filename}</strong><span>{i===0?'初始上传':'接续上传'}{file.original_bytes!==undefined||file.bytes!==undefined?` · ${((file.original_bytes??file.bytes??0)/1024).toFixed(1)} KB`:''}</span><code>{file.sha256||file.original_sha256}</code></div><a className="button" href={`/api/studio/documents/${documentId}/sources/${file.id}/download`} download><Download size={15}/>下载原件</a></article>)}</section>;
 }

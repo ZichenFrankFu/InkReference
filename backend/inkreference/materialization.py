@@ -5,7 +5,7 @@ import hashlib
 import json
 from datetime import datetime, timezone
 
-from .database import DataError, DataStore, character_version, work_label
+from .database import DataError, DataStore, character_version, modern_values, work_label
 
 
 class Materializer:
@@ -67,33 +67,53 @@ class Materializer:
                 work = self.store._render(connection, "works", self.store._row(connection, "works", work_id))["values"]
             else:
                 work_id = "WAI" + digest("work")
-                events = "\n".join(f"{item['name']}：{item['description']}" for item in results.get("events", []))
                 work = {
                     "作品ID": work_id, "作品": document.get("title") or document.get("filename") or "未命名作品",
-                    "版本与原作关系": "全文分析·" + run_id[:8],
-                    "两句话概括": results.get("summary", ""), "剧情补充说明": events,
+                    "两句话概括": results.get("summary", ""),
                 }
                 self.store._insert_raw(connection, "works", work)
                 work = self.store._render(connection, "works", self.store._row(connection, "works", work_id))["values"]
                 created_work = True
+                connection.execute("ATTACH DATABASE ? AS texts", (str(self.documents.db_path),))
+                linked = connection.execute("UPDATE texts.doc_documents SET work_id=? WHERE id=? AND work_id IS NULL", (work_id, run["document_id"]))
+                if linked.rowcount != 1:
+                    raise DataError(409, "文本的关联作品已变化，请刷新审核结果")
+            modern = modern_values("works", work)
             character_ids, cliche_ids = [], []
             for index, item in enumerate(results.get("characters", [])):
                 identifier = "KAI" + digest("character", index)
-                self.store._insert_raw(connection, "characters", {
+                values = {
                     "人物ID": identifier, "作品ID": work_id, "作品": work["作品"],
                     "版本": character_version(work.get("版本与原作关系", "")),
                     "角色": item["name"], "人物补充说明": item["description"],
-                })
+                } if not modern else {
+                    "人物ID": identifier, "角色": item["name"], "人物补充说明": item["description"],
+                    "关联作品": json.dumps([{"作品ID": work_id}], ensure_ascii=False),
+                }
+                self.store._insert_raw(connection, "characters", values)
+                if modern:
+                    saved = self.store._render(connection, "characters", self.store._row(connection, "characters", identifier))["values"]
+                    self.store._sync_modern_views(connection, "characters", identifier, {}, saved)
                 character_ids.append(identifier)
             for index, item in enumerate(results.get("cliches", [])):
                 identifier = "C" + str(int(digest("cliche", index), 16))
                 appearance = work_label(work) + f" ⟦ID:{work_id}⟧"
-                self.store._insert_raw(connection, "cliches", {
+                values = {
                     "cliché内容": f"{identifier}｜{item['name']}\n{item['description']}",
                     "出现作品": appearance,
-                })
-                self.store._sync_cliche(connection, identifier, appearance)
+                } if not modern else {
+                    "clichéID": identifier, "cliché内容": f"{item['name']}\n{item['description']}",
+                    "关联作品": json.dumps([{"作品ID": work_id, "作品名": work["作品"], "关联内容": item["description"]}], ensure_ascii=False),
+                }
+                self.store._insert_raw(connection, "cliches", values)
+                if modern:
+                    saved = self.store._render(connection, "cliches", self.store._row(connection, "cliches", identifier))["values"]
+                    self.store._sync_modern_views(connection, "cliches", identifier, {}, saved)
+                else:
+                    self.store._sync_cliche(connection, identifier, appearance)
                 cliche_ids.append(identifier)
+            if modern:
+                self.store._rebuild_library_links(connection)
             result = {"work_id": work_id, "created_work": created_work, "character_ids": character_ids, "cliche_ids": cliche_ids}
             connection.execute("INSERT INTO analysis_commits VALUES (?,?,?,?)", (
                 run_id, json.dumps(result, ensure_ascii=False), canonical_evidence, datetime.now(timezone.utc).isoformat(),

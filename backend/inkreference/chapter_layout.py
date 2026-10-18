@@ -169,6 +169,140 @@ def chapter_sequence(chapters: list[dict[str, Any]], *, missing_preview_limit: i
     return {"gaps": gaps, "duplicates": duplicates, "segments": segments}
 
 
+def duplicate_heading_repairs(chapters: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Find adjacent empty heading copies without merging real chapter bodies.
+
+    A repeated number by itself is not sufficient: both copies may contain
+    legitimate text. Only an empty heading immediately before a same-number
+    chapter is eligible, and the final chapter's entire body stays untouched.
+    The caller must present these candidates before changing the derived text.
+    """
+    repairs = []
+    cursor = 0
+    while cursor < len(chapters):
+        first = chapters[cursor]
+        if first.get("kind") != "chapter" or not isinstance(first.get("number"), int):
+            cursor += 1
+            continue
+        group = [first]
+        end = cursor
+        while end + 1 < len(chapters):
+            previous, following = chapters[end], chapters[end + 1]
+            body_start = int(previous.get("body_start", previous["start"])) - previous["start"]
+            if (previous.get("text", "")[body_start:].strip()
+                    or following.get("kind") != "chapter"
+                    or following.get("number") != first["number"]):
+                break
+            group.append(following)
+            end += 1
+        if len(group) > 1:
+            kept = group[-1]
+            title_source = kept if kept.get("title") else next((item for item in group if item.get("title")), kept)
+            body_start = int(kept.get("body_start", kept["start"])) - kept["start"]
+            repairs.append({"number": first["number"], "old_chapter_ids": [item["id"] for item in group],
+                            "title": title_source.get("title", ""),
+                            "body_characters": len(kept.get("text", "")[body_start:].strip()),
+                            "start": first["start"], "end": kept["body_start"],
+                            "replacement": title_source["raw_marker"],
+                            "removed_markers": [item["raw_marker"] for item in group[:-1]]})
+        cursor = end + 1
+    return repairs
+
+
+def renumber_after_deletion(text: str, chapters: list[dict[str, Any]], removed_ids: set[str],
+                            custom_formats: list[dict[str, Any]] | None = None) -> tuple[str, list[dict[str, Any]]]:
+    """Delete spans and shift later numbers in their original numbering run.
+
+    Existing missing-chapter gaps and separate volume restarts survive. A
+    duplicate copy does not consume a chapter number while another copy of
+    that logical number remains. Heading punctuation and numeral style remain
+    exact, and no body text is reassembled or normalized.
+    """
+    from .text_processing import heading_patterns
+    sequence = chapter_sequence(chapters)
+    segments = sequence["segments"]
+    retained: dict[int, set[int]] = {}
+    removed: dict[int, set[int]] = {}
+    for chapter in chapters:
+        if chapter["id"] not in segments:
+            continue
+        target = removed if chapter["id"] in removed_ids else retained
+        target.setdefault(segments[chapter["id"]], set()).add(chapter["number"])
+    deleted_numbers = {segment: numbers - retained.get(segment, set()) for segment, numbers in removed.items()}
+    patterns = dict(heading_patterns(custom_formats))
+    edits, changes = [], []
+    for chapter in chapters:
+        if chapter["id"] in removed_ids:
+            replacement = ""
+            # A standalone next-volume marker belongs to the following run,
+            # even though the chapter parser stores it at the previous span's
+            # tail. Deleting that chapter must not delete the volume boundary.
+            chapter_text = chapter.get("text", "")
+            body_offset = max(0, chapter.get("body_start", chapter["start"]) - chapter["start"])
+            for marker in _VOLUME.finditer(chapter_text, body_offset):
+                if not chapter_text[marker.end():].strip():
+                    replacement = chapter_text[marker.start():]
+            edits.append((chapter["start"], chapter["end"], replacement))
+            continue
+        segment = segments.get(chapter["id"])
+        if segment is None:
+            continue
+        number = chapter["number"]
+        shifted = number - sum(value < number for value in deleted_numbers.get(segment, set()))
+        if shifted == number:
+            continue
+        pattern = patterns.get(chapter.get("pattern"))
+        if pattern is None:
+            raise ValueError("chapter numbering pattern is unavailable")
+        marker = chapter["raw_marker"]
+        # Regexes were already validated by the parser. A custom expression
+        # receives the same bounded execution time during a number-only edit.
+        import regex
+        match = pattern.match(marker, timeout=2.0) if isinstance(pattern, regex.Pattern) else pattern.match(marker)
+        if match is None or match.lastindex is None or match.lastindex < 2:
+            raise ValueError("chapter numbering span is unavailable")
+        token = match.group(1)
+        if token and all(character in "０１２３４５６７８９" for character in token):
+            replacement = str(shifted).translate(str.maketrans("0123456789", "０１２３４５６７８９"))
+        elif token and all(character in "零〇一二两三四五六七八九十百千万" for character in token):
+            replacement = _chinese_number(shifted)
+        else:
+            replacement = str(shifted)
+        updated_marker = marker[:match.start(1)] + replacement + marker[match.end(1):]
+        verified = (pattern.fullmatch(updated_marker, timeout=2.0) if isinstance(pattern, regex.Pattern)
+                    else pattern.fullmatch(updated_marker))
+        if verified is None:
+            raise ValueError("renumbered heading no longer matches its format")
+        edits.append((chapter["start"] + match.start(1), chapter["start"] + match.end(1), replacement))
+        changes.append({"chapter_id": chapter["id"], "before": number, "after": shifted})
+    pieces, position = [], 0
+    for start, end, replacement in sorted(edits):
+        pieces.extend((text[position:start], replacement))
+        position = end
+    pieces.append(text[position:])
+    return "".join(pieces), changes
+
+
+def _chinese_number(number: int) -> str:
+    if number == 0:
+        return "零"
+    if number >= 10000:
+        high, low = divmod(number, 10000)
+        return _chinese_number(high) + "万" + (("零" if low < 1000 else "") + _chinese_number(low) if low else "")
+    digits = "零一二三四五六七八九"
+    result, pending_zero = "", False
+    for divisor, unit in ((1000, "千"), (100, "百"), (10, "十"), (1, "")):
+        value, number = divmod(number, divisor)
+        if value:
+            if pending_zero:
+                result += "零"
+            result += ("" if value == 1 and divisor == 10 and not result else digits[value]) + unit
+            pending_zero = False
+        elif result and number:
+            pending_zero = True
+    return result
+
+
 def expand_missing_chapters(chapters: list[dict[str, Any]], *, max_placeholders: int = 2000,
                             gaps: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     """Build a bounded directory with individually editable virtual gap items.

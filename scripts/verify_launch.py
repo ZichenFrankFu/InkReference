@@ -11,6 +11,7 @@ import sys
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 import zipfile
@@ -59,6 +60,11 @@ def main() -> int:
                         raise RuntimeError("The application did not serve its frontend.")
                 if len(request("/api/meta")["tables"]) != 3:
                     raise RuntimeError("The application did not initialize its library.")
+                work = request("/api/records/works", "POST", {"values": {
+                    "作品ID": "SMOKE-W", "作品": "合成启动作品", "类别": "合成类别", "用户是否完整体验过": "否",
+                }})
+                filtered = request("/api/records/works?category=" + urllib.parse.quote("合成类别") + "&seen=" + urllib.parse.quote("否"))
+                assert filtered["total"] == 1 and filtered["items"][0]["id"] == work["id"]
                 # Exercise lazily imported interchange packages in the frozen
                 # application, not just the Python build environment.
                 for format in ("db", "csv", "xlsx"):
@@ -86,6 +92,17 @@ def main() -> int:
                 assert version["text"] == source.decode("utf-8")
                 findings = request(f'/api/studio/documents/{upload["document_id"]}/versions/{upload["version_id"]}/findings')
                 assert any(item["kind"] == "author_note" for item in findings["items"])
+                link = request(f'/api/studio/documents/{upload["document_id"]}/catalog', "PUT", {
+                    "expected_work_id": None, "expected_version_id": upload["version_id"],
+                    "work_id": work["id"], "complete": True,
+                })
+                assert link["work_id"] == work["id"] and link["completion"]["version_id"] == upload["version_id"]
+                catalog = request(f'/api/studio/catalog/works/{work["id"]}')
+                assert catalog["documents"][0]["id"] == upload["document_id"]
+                preview = request(f'/api/studio/documents/{upload["document_id"]}/chapters/resegment/preview', "POST", {
+                    "base_version_id": upload["version_id"], "heading_formats": ["第N章"], "repair_duplicates": True,
+                })
+                assert preview["preview_token"] and preview["old"]["chapter_count"] == 1
                 repair = request("/api/studio/repair/capabilities")
                 assert repair["protocol"] == "inkreference.repair.v1" and repair["can_rebuild_cache"]
                 operation = request("/api/studio/repair/cache-rebuild", "POST", {
@@ -120,7 +137,8 @@ def main() -> int:
                     finally:
                         request(f"/api/studio/models/{profile_id}", "DELETE")
                 print(json.dumps({"health": "ok", "frontend": "ok", "database": "ok", "library_formats": ["db", "csv", "xlsx"],
-                                  "upload_pipeline": "ok", "quick_repair": "ok", "native_vault": security["vault_backend"], "credential_roundtrip": args.require_vault}))
+                                  "upload_pipeline": "ok", "catalog_link": "ok", "chapter_preview": "ok", "quick_repair": "ok",
+                                  "native_vault": security["vault_backend"], "credential_roundtrip": args.require_vault}))
             except Exception:
                 log.flush()
                 print(log_path.read_text(encoding="utf-8", errors="replace")[-12000:], file=sys.stderr)

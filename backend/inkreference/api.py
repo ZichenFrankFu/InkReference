@@ -282,8 +282,21 @@ def create_app(data_dir: str | Path | None = None, static_dir: str | Path | None
         limit: Annotated[int, Query(ge=1, le=500)] = 50,
         work_id: Annotated[str | None, Query(max_length=300)] = None,
         cliche_id: Annotated[str | None, Query(max_length=300)] = None,
+        category: Annotated[str | None, Query(max_length=300)] = None,
+        seen: Annotated[str | None, Query(max_length=100)] = None,
+        has_text: bool | None = None,
+        has_analysis: bool | None = None,
+        sort_by: Annotated[str | None, Query(max_length=100)] = None,
+        sort_direction: Literal["asc", "desc"] = "asc",
     ):
-        return runtime.store.list_records(table, q=q, offset=offset, limit=limit, work_id=work_id, cliche_id=cliche_id)
+        filters = {key: value for key, value in {"category": category, "seen": seen}.items() if value is not None}
+        if has_text is not None or has_analysis is not None:
+            if table != "works":
+                raise DataError(422, "文本与分析筛选仅适用于作品")
+            filters["work_ids"] = application.state.catalog_links().filter_work_ids(
+                has_text=has_text, has_analysis=has_analysis)
+        return runtime.store.list_records(table, q=q, offset=offset, limit=limit, work_id=work_id,
+            cliche_id=cliche_id, filters=filters, sort_by=sort_by, sort_direction=sort_direction)
 
     @application.get("/api/records/{table}/{record_id}/relations")
     def relations(table: TableName, record_id: str):
@@ -331,8 +344,10 @@ def create_app(data_dir: str | Path | None = None, static_dir: str | Path | None
                 if any(item["status"] in {"queued", "running"} and item.get("options", {}).get("work_id") == record_id
                        for item in runtime.studio.ingestions.list()):
                     raise DataError(409, "此作品有正在处理的全文，请等待完成或取消后再删除。")
-                if any(item.get("work_id") == record_id for item in runtime.studio.documents.list_documents()):
-                    raise DataError(409, "此作品已关联全文，请保留其作品 ID；仍可编辑作品字段。")
+                linked = [item for item in runtime.studio.documents.list_documents() if item.get("work_id") == record_id]
+                if linked:
+                    titles = "、".join(item.get("title") or item["id"] for item in linked[:3])
+                    raise DataError(409, f"此作品关联全文“{titles}”，请先在作品详情中解除关联。")
                 return runtime.store.delete_record(table, record_id, expected_revision, cascade=cascade)
         return runtime.store.delete_record(table, record_id, expected_revision, cascade=cascade)
 
@@ -409,6 +424,12 @@ def create_app(data_dir: str | Path | None = None, static_dir: str | Path | None
         from .library_exchange import library_formats as formats
         return formats()
 
+    @application.get("/api/library/export/legacy")
+    def export_legacy_library():
+        from .csvio import export_legacy_zip
+        return Response(export_legacy_zip(runtime.store), media_type="application/zip",
+            headers={"Content-Disposition": 'attachment; filename="InkReference-legacy-csv.zip"'})
+
     @application.post("/api/library/import/preview")
     async def preview_library(files: Annotated[list[UploadFile], File()]):
         from .library_exchange import parse_library_files, preview_library_import
@@ -470,6 +491,8 @@ def create_app(data_dir: str | Path | None = None, static_dir: str | Path | None
     install_studio_routes(application, runtime)
     from .repair_routes import install_repair_routes, repair_service
     install_repair_routes(application, runtime)
+    from .catalog_routes import install_catalog_routes
+    install_catalog_routes(application, runtime)
 
     # API typos must stay JSON 404s rather than falling through to the SPA.
     @application.api_route("/api/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])

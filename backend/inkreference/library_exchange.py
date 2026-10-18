@@ -1,8 +1,9 @@
 """Portable material-library bundles, separate from full project backups.
 
-The same five business tables and manifest travel in SQLite, CSV ZIP, or XLSX.
+Three core tables, nonempty auxiliary tables and a manifest travel together in
+SQLite, CSV ZIP, or XLSX.
 Parsing never executes SQL supplied by a file. All writes reuse DataStore's
-transaction, revision checks, and authoritative legacy relation synchronization.
+transaction, revision checks, and ID-based relationship synchronization.
 """
 from __future__ import annotations
 
@@ -24,11 +25,11 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from .csvio import ImportBatch, ImportTable, _apply_import, _csv_bytes, _decode, _snapshot
-from .database import TABLES, DataError, DataStore, character_version, parse_work_relations, record_id, validate_values
+from .database import TABLES, LEGACY_TABLES, ASSOCIATIONS, modern_values, association_items, DataError, DataStore, character_version, parse_work_relations, record_id, validate_values
 
 FORMAT = "InkReference material library"
 FORMAT_VERSION = 1
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 MAX_BYTES = 128 * 1024 * 1024
 MAX_EXPANDED_BYTES = 256 * 1024 * 1024
 MAX_ROWS = 200_000
@@ -36,8 +37,9 @@ MAX_CELL_BYTES = 32 * 1024 * 1024
 MAX_ZIP_FILES = 256
 RELATION_COLUMNS = ["work_id", "cliche_id", "detail", "work_position", "cliche_position"]
 MATERIAL_RELATION_COLUMNS = ["id", "source_table", "source_id", "target_table", "target_id", "relation_type", "description", "metadata_json"]
-COLUMNS = {**{key: list(spec["columns"]) for key, spec in TABLES.items()}, "work_cliches": RELATION_COLUMNS, "material_relations": MATERIAL_RELATION_COLUMNS}
-LABELS = {**{key: spec["label"] for key, spec in TABLES.items()}, "work_cliches": "作品与桥段关联", "material_relations": "素材关联说明"}
+COLUMNS = {**{key: list(spec["columns"]) for key, spec in TABLES.items()}, "material_relations": MATERIAL_RELATION_COLUMNS, "legacy_values": ["table_key","record_id","values_json"]}
+LEGACY_COLUMNS = {**{key:list(spec["columns"]) for key,spec in LEGACY_TABLES.items()}, "work_cliches":RELATION_COLUMNS,"material_relations":MATERIAL_RELATION_COLUMNS}
+LABELS = {**{key: spec["label"] for key, spec in TABLES.items()}, "work_cliches": "作品与桥段关联", "material_relations": "素材关联说明", "legacy_values":"旧版字段归档"}
 LEGACY_NAMES = {"works": "works_library_v8.csv", "characters": "character_database_v8.csv", "cliches": "cliche_database_v8.csv"}
 CELL_REF = "__INKREFERENCE_TEXT__:"
 BAD_XML = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
@@ -57,14 +59,14 @@ class ExchangeBatch(ImportBatch):
 def library_formats() -> dict[str, Any]:
     return {
         "default": "db", "schema_version": SCHEMA_VERSION,
-        "tables": [{"table": key, "label": LABELS[key], "filename": f"{key}.csv", "columns": value} for key, value in COLUMNS.items()],
+        "tables": [{"table": key, "label": LABELS[key], "filename": f"{key}.csv", "columns": value, "required": key in TABLES} for key, value in COLUMNS.items()],
         "formats": [
             {"format": "db", "label": "SQLite 数据库", "extension": ".db", "description": "一个 .db 文件包含全部素材表与关联说明"},
-            {"format": "csv", "label": "CSV 文件包", "extension": ".zip", "description": "ZIP 内含五张表和 manifest.json；也可同时选择这些文件"},
-            {"format": "xlsx", "label": "Excel 工作簿", "extension": ".xlsx", "description": "一个工作簿包含五张表和格式信息"},
+            {"format": "csv", "label": "CSV 文件包", "extension": ".zip", "description": "作品、角色、桥段三张 CSV；附加数据一并保留"},
+            {"format": "xlsx", "label": "Excel 工作簿", "extension": ".xlsx", "description": "一个工作簿包含作品、角色、桥段及附加数据"},
         ],
         "legacy_csv": [{"table": key, "filename": value} for key, value in LEGACY_NAMES.items()],
-        "guidance": ["推荐使用 .db，整库导入导出只需一个文件。", "CSV 请上传完整 ZIP，或同时选择五张 CSV 与 manifest.json；旧 v8 格式必须同时选择作品、人物、桥段三张 CSV。", "XLSX 请保留所有工作表及 _manifest；编号、日期与长文本按文本保存。"],
+        "guidance": ["推荐使用 .db，整库导入导出只需一个文件。", "CSV 请同时选择作品、角色、桥段三张表，或上传完整 ZIP；导出包中的附加文件也应保留。", "XLSX 请保留所有工作表及 _manifest；编号、日期与长文本按文本保存。"],
     }
 
 
@@ -77,8 +79,9 @@ def _digest(rows: list[dict[str, str]]) -> str:
 
 
 def _required(batch: ExchangeBatch) -> list[dict[str, Any]]:
-    keys = TABLES if batch.legacy else COLUMNS
-    return [{"table": key, "label": LABELS[key], "filename": LEGACY_NAMES[key] if batch.legacy else f"{key}.csv", "present": key in batch.filenames} for key in keys]
+    keys = batch.manifest["tables"] if batch.manifest else TABLES
+    old_headers = any(not modern_values(item.table,row) for item in batch.tables for row in item.rows)
+    return [{"table": key, "label": LABELS[key], "filename": LEGACY_NAMES[key] if old_headers and key in LEGACY_NAMES else f"{key}.csv", "present": key in batch.filenames} for key in keys]
 
 
 def _error(batch: ExchangeBatch, message: str) -> None:
@@ -120,20 +123,20 @@ def _zip_entries(data: bytes, *, xlsx: bool = False) -> dict[str, bytes]:
 
 
 def _manifest(value: Any) -> dict[str, Any]:
-    if not isinstance(value, dict) or value.get("format") != FORMAT or value.get("format_version") != FORMAT_VERSION:
-        raise DataError(422, "manifest.json / _manifest 不是受支持的 InkReference 素材库格式，请重新导出完整素材库。")
-    if value.get("schema_version") != SCHEMA_VERSION:
-        raise DataError(422, f"素材库结构版本为 {value.get('schema_version')}，当前要求 {SCHEMA_VERSION}；请使用匹配版本的应用重新导出所有表。")
-    if not isinstance(value.get("bundle_id"), str) or not value["bundle_id"] or not isinstance(value.get("tables"), dict):
-        raise DataError(422, "素材库格式信息缺少 bundle_id 或 tables；请重新导出完整文件包。")
-    if set(value["tables"]) != set(COLUMNS):
-        missing = set(COLUMNS) - set(value["tables"])
-        extra = set(value["tables"]) - set(COLUMNS)
-        raise DataError(422, f"格式信息中的表不完整；缺少：{'、'.join(sorted(missing)) or '无'}；未知：{'、'.join(sorted(extra)) or '无'}。")
-    for table, columns in COLUMNS.items():
-        info = value["tables"][table]
-        if not isinstance(info, dict) or info.get("columns") != columns:
-            raise DataError(422, f"{table} 的格式信息与当前字段不符，请重新导出包含全部表的同一批文件。")
+    if not isinstance(value,dict) or value.get("format") != FORMAT or value.get("format_version") != FORMAT_VERSION:
+        raise DataError(422,"manifest.json / _manifest 不是受支持的 InkReference 素材库格式")
+    if value.get("schema_version") not in {3,4}:
+        raise DataError(422,f"素材库结构版本为 {value.get('schema_version')}，当前支持 3、4；请使用匹配版本应用重新导出全部表")
+    if not isinstance(value.get("bundle_id"),str) or not value["bundle_id"] or not isinstance(value.get("tables"),dict):
+        raise DataError(422,"格式信息缺少 bundle_id 或 tables")
+    columns = LEGACY_COLUMNS if value["schema_version"] == 3 else COLUMNS
+    missing = set(TABLES) - set(value["tables"])
+    extra = set(value["tables"]) - set(columns)
+    if missing or extra:
+        raise DataError(422,f"格式信息中的表不完整；缺少：{'、'.join(sorted(missing)) or '无'}；未知：{'、'.join(sorted(extra)) or '无'}")
+    for table,info in value["tables"].items():
+        if not isinstance(info,dict) or info.get("columns") != columns[table]:
+            raise DataError(422,f"{table} 的格式信息与字段不符；请重新选择同批文件")
     return value
 
 
@@ -207,7 +210,7 @@ def _parse_csv(batch: ExchangeBatch, files: list[tuple[str, bytes]]) -> None:
             if {"_bundle_id", "_schema_version"} & set(header):
                 batch.legacy = False
             plain = [field for field in header if field not in {"_bundle_id", "_schema_version"}]
-            matches = [table for table, columns in COLUMNS.items() if set(plain) == set(columns)]
+            matches = list(dict.fromkeys(table for specs in (COLUMNS,LEGACY_COLUMNS) for table,columns in specs.items() if set(plain) == set(columns)))
             if len(matches) != 1:
                 raise DataError(422, _header_error(filename, header))
             table = matches[0]
@@ -220,16 +223,16 @@ def _parse_csv(batch: ExchangeBatch, files: list[tuple[str, bytes]]) -> None:
                 for number, row in enumerate(rows, 2):
                     if "_bundle_id" in row and row["_bundle_id"] != batch.manifest["bundle_id"]:
                         raise DataError(422, f"{filename} 第 {number} 行与 manifest.json 的导出批次不一致；{filename} 与 manifest.json 疑似来自不同版本，请重新选择同一次导出的完整文件包。")
-                    if "_schema_version" in row and row["_schema_version"] != str(SCHEMA_VERSION):
+                    if "_schema_version" in row and row["_schema_version"] != str(batch.manifest["schema_version"]):
                         raise DataError(422, f"{filename} 第 {number} 行结构版本与 manifest.json 不一致；请重新导出所有表。")
-            _add_table(batch, table, filename, [{key: row[key] for key in COLUMNS[table]} for row in rows])
+            _add_table(batch, table, filename, [{key: row[key] for key in plain} for row in rows])
         except (DataError, csv.Error, UnicodeError) as exc:
             _error(batch, str(exc) if filename in str(exc) else f"{filename}：{exc}")
     if len(set(versions.values())) > 1:
         pairs = [f"{name}（v{version}）" for name, version in versions.items()]
         _error(batch, f"{' 与 '.join(pairs)} 的版本疑似不一致；请选用同一版本的全部文件。")
     if not batch.legacy and not batch.manifest:
-        _error(batch, "缺少必要文件 manifest.json；请将 works.csv、characters.csv、cliches.csv、work_cliches.csv、material_relations.csv 与 manifest.json 一起导入，或直接选择完整 ZIP。")
+        _error(batch, "缺少必要文件 manifest.json；请保留导出包中的格式信息，或同时选择原始作品、角色、桥段三张 CSV。")
 
 
 def _parse_db(batch: ExchangeBatch, filename: str, data: bytes) -> None:
@@ -255,13 +258,14 @@ def _parse_db(batch: ExchangeBatch, filename: str, data: bytes) -> None:
             names = {name for kind, name, _ in schema if kind == "table"}
             if "_manifest" not in names:
                 raise DataError(422, f"{filename} 缺少 _manifest 格式表；请从 InkReference 的“导出素材库 → DB”重新导出。项目工作数据库请使用项目恢复入口。")
-            if names - set(COLUMNS) - {"_manifest"}:
-                raise DataError(422, f"{filename} 含未知表：{'、'.join(sorted(names - set(COLUMNS) - {'_manifest'}))}；请选择完整素材库导出文件。")
+            if names - set(COLUMNS) - set(LEGACY_COLUMNS) - {"_manifest"}:
+                raise DataError(422, f"{filename} 含未知表：{'、'.join(sorted(names - set(COLUMNS) - set(LEGACY_COLUMNS) - {'_manifest'}))}；请选择完整素材库导出文件。")
             info = connection.execute('SELECT "json" FROM "_manifest" LIMIT 2').fetchall()
             if len(info) != 1 or not isinstance(info[0][0], str):
                 raise DataError(422, f"{filename} 的 _manifest 必须有一条文本格式信息。")
             batch.manifest = _manifest(json.loads(info[0][0]))
-            for table, columns in COLUMNS.items():
+            for table,info in batch.manifest["tables"].items():
+                columns = info["columns"]
                 if table not in names:
                     continue
                 found = [row[1] for row in connection.execute(f'PRAGMA table_info("{table}")')]
@@ -304,11 +308,26 @@ def _parse_xlsx(batch: ExchangeBatch, filename: str, data: bytes) -> None:
     workbook = load_workbook(io.BytesIO(data), read_only=True, data_only=False, keep_links=False)
     try:
         names = set(workbook.sheetnames)
-        allowed = set(COLUMNS) | {"_manifest", "_long_text"}
+        allowed = set(COLUMNS) | set(LEGACY_COLUMNS) | {"_manifest", "_long_text", "作品", "角色", "桥段", "cliche"}
         if names - allowed:
             raise DataError(422, f"{filename} 有未知工作表：{'、'.join(sorted(names - allowed))}；请保留同一素材库的全部工作表。")
         if "_manifest" not in names:
-            raise DataError(422, f"{filename} 缺少必要工作表 _manifest；请使用 InkReference 导出的完整工作簿。")
+            batch.legacy = True
+            for sheet in workbook:
+                iterator = sheet.iter_rows()
+                header = [cell.value for cell in next(iterator,[])]
+                if not header or any(not isinstance(column,str) or not column for column in header) or len(header) != len(set(header)):
+                    raise DataError(422,f"{filename} / {sheet.title} 缺少有效表头或存在重复字段；请每个字段仅保留一列。")
+                matches = [table for table,spec in TABLES.items() if set(header) == set(spec["columns"])]
+                if len(matches) != 1:
+                    raise DataError(422,_header_error(f"{filename} / {sheet.title}",header))
+                rows = []
+                for index,cells in enumerate(iterator,2):
+                    if all(cell.value is None for cell in cells): continue
+                    if index > MAX_ROWS + 1: raise DataError(413,"工作表行数过多")
+                    rows.append({column:_excel_string(cell,f"{filename} / {sheet.title}!{cell.coordinate}",batch.warnings) for column,cell in zip(header,cells)})
+                _add_table(batch,matches[0],f"{filename} / {sheet.title}",rows)
+            return
         meta_rows = list(workbook["_manifest"].iter_rows(max_row=2, max_col=1))
         if not meta_rows or not isinstance(meta_rows[0][0].value, str) or (len(meta_rows) > 1 and meta_rows[1][0].value is not None):
             raise DataError(422, f"{filename} 的 _manifest 格式信息损坏。")
@@ -341,7 +360,8 @@ def _parse_xlsx(batch: ExchangeBatch, filename: str, data: bytes) -> None:
                 raise DataError(413, f"_long_text 的 {key} 超过 32 MB。")
             decoded[key] = value
         used: set[str] = set()
-        for table, columns in COLUMNS.items():
+        for table,info in batch.manifest["tables"].items():
+            columns = info["columns"]
             if table not in names:
                 continue
             sheet = workbook[table]
@@ -363,7 +383,7 @@ def _parse_xlsx(batch: ExchangeBatch, filename: str, data: bytes) -> None:
                     raise DataError(422, f"{filename} / {table} 第 {index} 行字段数不符。")
                 bundle = _excel_string(cells[-2], f"{filename} / {table}!{cells[-2].coordinate}", batch.warnings)
                 schema = _excel_string(cells[-1], f"{filename} / {table}!{cells[-1].coordinate}", batch.warnings)
-                if bundle != batch.manifest["bundle_id"] or schema != str(SCHEMA_VERSION):
+                if bundle != batch.manifest["bundle_id"] or schema != str(batch.manifest["schema_version"]):
                     raise DataError(422, f"{filename} / {table} 第 {index} 行与 _manifest 的批次或结构版本不符；{table} 与 _manifest 工作表疑似来自不同版本，请重新选择同次导出的完整工作簿。")
                 values = {}
                 for column, cell in zip(columns, cells):
@@ -383,86 +403,97 @@ def _parse_xlsx(batch: ExchangeBatch, filename: str, data: bytes) -> None:
         workbook.close()
 
 
+def _normalize_legacy_batch(batch: ExchangeBatch) -> None:
+    if not any(not modern_values(item.table,row) for item in batch.tables for row in item.rows):
+        return
+    if any(modern_values(item.table,row) for item in batch.tables for row in item.rows):
+        raise DataError(422,"作品、角色、桥段文件疑似版本不一致；请勿混合旧版 v8 与新版三表")
+    with tempfile.TemporaryDirectory(prefix="inkreference-legacy-") as directory:
+        store = DataStore(Path(directory)/"migration.db")
+        with store.transaction() as connection:
+            _apply_import(store,connection,batch,"update")
+            for row in batch.relation_tables.get("material_relations",[]):
+                store._upsert_material_relation(connection,row)
+            store._upgrade_legacy_rows(connection)
+            store._rebuild_library_links(connection)
+            for item in batch.tables:
+                item.rows = [record["values"] for record in store._all(connection,item.table)]
+            archives = [dict(row) for row in connection.execute("SELECT * FROM legacy_values ORDER BY table_key,record_id")]
+        batch.relation_tables.pop("work_cliches",None)
+        batch.relation_tables["legacy_values"] = archives
+        batch.filenames["legacy_values"] = "旧版字段归档（自动迁移）"
+        # Digests belonged to old views; preserve all raw payloads in the archive.
+        batch.manifest = None
+        batch.legacy = True
+        batch.warnings.append("旧版字段已保留在归档，主表转换为当前三表结构。")
+
+
 def _validate_complete(batch: ExchangeBatch) -> None:
     for item in _required(batch):
         if not item["present"]:
-            _error(batch, f"缺少必要{'工作表' if batch.format == 'xlsx' else '表/文件'}：{item['label']}（{item['filename']}）。请选用同一批次的全部表，空表也应保留表头。")
-    if not batch.manifest and not batch.legacy:
+            _error(batch,f"缺少必要{'工作表' if batch.format == 'xlsx' else '表/文件'}：{item['label']}（{item['filename']}）。请同时选择作品、角色、桥段三张表。")
+    if batch.errors:
         return
-    rows_by_table = {item.table: item.rows for item in batch.tables}
-    changed_tables: set[str] = set()
-    if batch.manifest:
-        for table, rows in {**rows_by_table, **batch.relation_tables}.items():
-            info = batch.manifest["tables"][table]
-            if info.get("sha256") != _digest(rows) or info.get("rows") != len(rows):
-                changed_tables.add(table)
-    indexes = {table: {record_id(table, row): row for row in rows_by_table.get(table, [])} for table in TABLES}
-    # Validate all incoming references independently of local records: a complete
-    # bundle must not accidentally borrow a missing parent from the current DB.
-    if set(TABLES) <= set(batch.filenames):
-        for child in rows_by_table.get("characters", []):
-            parent = indexes["works"].get(child["作品ID"])
-            pair = f"{batch.filenames['characters']} 与 {batch.filenames['works']}"
-            if not parent:
-                _error(batch, f"{pair} 疑似版本不一致：人物 {child['人物ID']} 引用作品 {child['作品ID']}，作品表缺少该 ID。")
-            elif child["作品"] and child["作品"] != parent["作品"]:
-                _error(batch, f"{pair} 疑似版本不一致：人物 {child['人物ID']} 的作品名称“{child['作品']}”与作品 {child['作品ID']} 的“{parent['作品']}”不符。")
-            elif (batch.legacy or changed_tables & {"works", "characters"}) and child["版本"] and parent["版本与原作关系"] and character_version(parent["版本与原作关系"]) != child["版本"]:
-                # Edition strings are intentionally lossless and can differ in
-                # provenance suffix. Only flag for review, do not rewrite them.
-                batch.warnings.append(f"{pair}：人物 {child['人物ID']} 的版本“{child['版本']}”与作品版本“{parent['版本与原作关系']}”不同，请核对是否为同一版。")
-        for wid, work in indexes["works"].items():
-            for cid in parse_work_relations(work["典型桥段（剧透）"])[1]:
-                if cid not in indexes["cliches"]:
-                    _error(batch, f"{batch.filenames['works']} 与 {batch.filenames['cliches']} 疑似版本不一致：作品 {wid} 引用桥段 {cid}，桥段表缺少该 ID。")
-    if batch.manifest:
-        all_rows = {**rows_by_table, **batch.relation_tables}
-        for table, rows in all_rows.items():
-            info = batch.manifest["tables"][table]
-            if info.get("sha256") != _digest(rows) or info.get("rows") != len(rows):
-                batch.warnings.append(f"{batch.filenames[table]} 的内容或行数与导出时不同，可能经过编辑；请核对预览中的关联与版本提示。")
-        _validate_relation_rows(batch, indexes)
-
-
-def _validate_relation_rows(batch: ExchangeBatch, indexes: dict[str, dict[str, dict[str, str]]]) -> None:
-    seen: set[tuple[str, str]] = set()
-    detail_map = {(wid, cid): detail for wid, work in indexes["works"].items() for cid, detail in parse_work_relations(work["典型桥段（剧透）"])[1].items()}
-    for row in batch.relation_tables.get("work_cliches", []):
-        key = row["work_id"], row["cliche_id"]
-        label = batch.filenames.get("work_cliches", "work_cliches.csv")
-        if key in seen:
-            _error(batch, f"{label} 重复关联：作品 {key[0]} / 桥段 {key[1]}。")
-        seen.add(key)
-        for table, identifier in zip(("works", "cliches"), key):
-            if identifier not in indexes[table]:
-                _error(batch, f"{label} 与 {batch.filenames.get(table, table)} 疑似版本不一致：关联引用的 {LABELS[table]} ID {identifier} 不存在。")
-        for field_name in ("work_position", "cliche_position"):
-            if not re.fullmatch(r"\d{1,10}", row[field_name]):
-                _error(batch, f"{label} 的 {key[0]} / {key[1]} 字段 {field_name} 应为非负整数。")
-        if key not in detail_map or detail_map[key] != row["detail"]:
-            _error(batch, f"{label} 与 {batch.filenames.get('works', 'works.csv')} 对作品 {key[0]} / 桥段 {key[1]} 的关联说明不一致；请检查是否混用版本。")
-    if seen != set(detail_map):
-        for wid, cid in sorted(set(detail_map) - seen):
-            _error(batch, f"work_cliches.csv 缺少 works.csv 中的关联：作品 {wid} / 桥段 {cid}；这两个文件疑似版本不一致。")
-    relation_ids: set[str] = set()
-    for row in batch.relation_tables.get("material_relations", []):
-        rid = row["id"]
-        if not rid or rid in relation_ids:
-            _error(batch, f"material_relations.csv 存在空或重复关联 ID：{rid}。")
-        relation_ids.add(rid)
-        for prefix in ("source", "target"):
-            table, identifier = row[f"{prefix}_table"], row[f"{prefix}_id"]
-            if table not in TABLES or identifier not in indexes.get(table, {}):
-                _error(batch, f"material_relations.csv 与 {batch.filenames.get(table, table + '.csv')} 疑似版本不一致：关联 {rid} 引用 {table}/{identifier}，对应记录不存在。")
+    try:
+        _normalize_legacy_batch(batch)
+    except DataError as error:
+        raise DataError(error.status_code,f"{' 与 '.join(batch.filenames.get(table,table+'.csv') for table in TABLES)} 疑似版本不一致：{error}") from error
+    indexes = {item.table:{record_id(item.table,row):row for row in item.rows} for item in batch.tables}
+    for table,rows in indexes.items():
+        for identifier,values in rows.items():
+            for field,(target_table,id_field) in ASSOCIATIONS.items():
+                if field not in values: continue
+                for item in association_items(values[field],f"{identifier} 的{field}"):
+                    target_id = DataStore._association_id(item,id_field,field)
+                    target = indexes.get(target_table,{}).get(target_id)
+                    pair = f"{batch.filenames[table]} 与 {batch.filenames.get(target_table,target_table+'.csv')}"
+                    if target is None:
+                        _error(batch,f"{pair} 疑似版本不一致：{identifier} 引用 {target_id}，{LABELS[target_table]}表缺少该 ID。")
+                        continue
+                    if isinstance(item,dict) and target_table == "works" and "作品名" in item and item["作品名"] != target.get("作品",""):
+                        _error(batch,f"{pair} 疑似版本不一致：{target_id} 的关联作品名与作品表不符。")
+                    reverse_field = {"works":"关联作品","characters":"关联角色","cliches":"关联cliché"}[table]
+                    # Work-to-work relations can be directional (adaptation,
+                    # sequel); all cross-type membership views are symmetric.
+                    if table == target_table or reverse_field not in target: continue
+                    reverse_id = TABLES[table]["id_field"]
+                    contextual = {table,target_table} == {"characters","cliches"}
+                    context = str(item.get("作品ID","")) if contextual and isinstance(item,dict) else ""
+                    reverse_items = [other for other in association_items(target[reverse_field],reverse_field)
+                                     if DataStore._association_id(other,reverse_id,reverse_field) == identifier
+                                     and (not contextual or (str(other.get("作品ID","")) if isinstance(other,dict) else "") == context)]
+                    suffix = f"（作品 {context}）" if context else ""
+                    if not reverse_items:
+                        _error(batch,f"{pair} 疑似版本不一致：{identifier} → {target_id}{suffix} 的双向关联不一致，另一张表未包含该关联。")
+                    if isinstance(item,dict) and "关联内容" in item:
+                        for other in reverse_items:
+                            if isinstance(other,dict) and "关联内容" in other and other["关联内容"] != item["关联内容"]:
+                                _error(batch,f"{pair} 疑似版本不一致：{identifier} 与 {target_id}{suffix} 的关联内容不同，请选择同一版本文件。")
+    for row in batch.relation_tables.get("material_relations",[]):
         if row["source_table"] == row["target_table"] == "cliches":
-            _error(batch, f"material_relations.csv 关联 {rid} 为桥段关联桥段；请移除该关联。")
+            _error(batch,f"material_relations.csv 关联 {row['id']} 为桥段关联桥段；请移除该关联。")
         if not row["relation_type"].strip():
-            _error(batch, f"material_relations.csv 关联 {rid} 缺少 relation_type 关联含义。")
+            _error(batch,f"material_relations.csv 关联 {row['id']} 缺少关联含义")
         try:
-            if not isinstance(json.loads(row["metadata_json"]), dict):
-                raise ValueError()
-        except (ValueError, TypeError):
-            _error(batch, f"material_relations.csv 关联 {rid} 的 metadata_json 应为 JSON 对象。")
+            if not isinstance(json.loads(row["metadata_json"]),dict): raise ValueError()
+        except (ValueError,TypeError):
+            _error(batch,f"material_relations.csv 关联 {row['id']} 的 metadata_json 必须为 JSON 对象")
+        for side in ("source","target"):
+            table = row[f"{side}_table"]; identifier = row[f"{side}_id"]
+            if identifier not in indexes.get(table,{}):
+                _error(batch,f"material_relations.csv 与 {batch.filenames.get(table,table)} 疑似版本不一致：关联 {row['id']} 引用缺失的 {identifier}。")
+    for row in batch.relation_tables.get("legacy_values",[]):
+        if row["table_key"] not in TABLES or row["record_id"] not in indexes.get(row["table_key"],{}):
+            _error(batch,"旧版字段归档引用不存在的主表 ID")
+        try:
+            if not isinstance(json.loads(row["values_json"]),dict): raise ValueError()
+        except (ValueError,TypeError):
+            _error(batch,"旧版字段归档 values_json 必须为 JSON 对象")
+    if batch.manifest:
+        for table,rows in {**{item.table:item.rows for item in batch.tables},**batch.relation_tables}.items():
+            info = batch.manifest["tables"][table]
+            if info.get("sha256") != _digest(rows) or info.get("rows") != len(rows):
+                batch.warnings.append(f"{batch.filenames[table]} 与导出时不同，可能经过编辑；请核对预览中的关联。")
 
 
 def parse_library_files(files: list[tuple[str, bytes]]) -> ExchangeBatch:
@@ -504,7 +535,7 @@ def parse_library_files(files: list[tuple[str, bytes]]) -> ExchangeBatch:
 def _relation_snapshot(connection: sqlite3.Connection) -> str:
     relations = {}
     names = {row[0] for row in connection.execute("SELECT name FROM sqlite_schema WHERE type='table'")}
-    for table in ("work_cliches", "material_relations"):
+    for table in ("work_cliches", "material_relations", "library_links", "legacy_values"):
         if table in names:
             relations[table] = [dict(row) for row in connection.execute(f'SELECT * FROM "{table}" ORDER BY 1,2')]
     return hashlib.sha256(_json(relations).encode("utf-8")).hexdigest()
@@ -537,6 +568,10 @@ def _apply(store: DataStore, connection: sqlite3.Connection, batch: ExchangeBatc
             raise DataError(409, f"素材关联 ID 已存在：{row['id']}；请选择跳过或显式更新。")
         store._upsert_material_relation(connection, row, conflict_policy=policy)
         relation_counts["relations_updated" if existing is not None else "relations_imported"] += 1
+    for row in batch.relation_tables.get("legacy_values",[]):
+        previous = connection.execute("SELECT values_json FROM legacy_values WHERE table_key=? AND record_id=?",(row["table_key"],row["record_id"])).fetchone()
+        if previous is None or policy == "update":
+            connection.execute("INSERT INTO legacy_values VALUES (?,?,?) ON CONFLICT(table_key,record_id) DO UPDATE SET values_json=excluded.values_json",(row["table_key"],row["record_id"],row["values_json"]))
     return {**result, **relation_counts}
 
 
@@ -557,6 +592,8 @@ def preview_library_import(store: DataStore, batch: ExchangeBatch) -> dict[str, 
             for table, rows in batch.relation_tables.items():
                 if table == "material_relations":
                     existing = sum(source.execute("SELECT 1 FROM material_relations WHERE id=?", (row["id"],)).fetchone() is not None for row in rows)
+                elif table == "legacy_values":
+                    existing = sum(source.execute("SELECT 1 FROM legacy_values WHERE table_key=? AND record_id=?",(row["table_key"],row["record_id"])).fetchone() is not None for row in rows)
                 else:
                     existing = sum(source.execute("SELECT 1 FROM work_cliches WHERE work_id=? AND cliche_id=?", (row["work_id"], row["cliche_id"])).fetchone() is not None for row in rows)
                 tables.append({"table": table, "filename": batch.filenames[table], "rows": len(rows), "new": len(rows) - existing, "existing": existing})
@@ -596,8 +633,10 @@ def _collect(store: DataStore) -> tuple[dict[str, list[dict[str, str]]], dict[st
     with store.connect() as connection:
         connection.execute("BEGIN")
         rows = {table: [item["values"] for item in store._all(connection, table)] for table in TABLES}
-        rows["work_cliches"] = [{column: str(row[column]) for column in RELATION_COLUMNS} for row in connection.execute("SELECT * FROM work_cliches ORDER BY work_id,work_position,cliche_id")]
         rows["material_relations"] = [{column: str(row[column]) for column in MATERIAL_RELATION_COLUMNS} for row in connection.execute("SELECT * FROM material_relations ORDER BY id")]
+        rows["legacy_values"] = [dict(row) for row in connection.execute("SELECT * FROM legacy_values ORDER BY table_key,record_id")]
+        if not rows["material_relations"]: rows.pop("material_relations")
+        if not rows["legacy_values"]: rows.pop("legacy_values")
     total_text_bytes = 0
     for table, values in rows.items():
         if len(values) > MAX_ROWS:
@@ -611,7 +650,7 @@ def _collect(store: DataStore) -> tuple[dict[str, list[dict[str, str]]], dict[st
         if total_text_bytes > MAX_BYTES:
             raise DataError(413, "素材文本总量超过 128 MB，请拆分素材库后导出。")
     manifest = {"format": FORMAT, "format_version": FORMAT_VERSION, "schema_version": SCHEMA_VERSION, "bundle_id": uuid.uuid4().hex,
-                "created_at": datetime.now(timezone.utc).isoformat(), "encoding": "UTF-8", "tables": {table: {"columns": columns, "rows": len(rows[table]), "sha256": _digest(rows[table])} for table, columns in COLUMNS.items()}}
+                "created_at": datetime.now(timezone.utc).isoformat(), "encoding": "UTF-8", "tables": {table: {"columns": columns, "rows": len(rows[table]), "sha256": _digest(rows[table])} for table in rows for columns in [COLUMNS[table]]}}
     return rows, manifest
 
 
@@ -619,7 +658,8 @@ def _export_db(rows: dict[str, list[dict[str, str]]], manifest: dict[str, Any]) 
     with closing(sqlite3.connect(":memory:")) as connection:
         connection.execute('CREATE TABLE "_manifest" ("json" TEXT NOT NULL)')
         connection.execute('INSERT INTO "_manifest" VALUES (?)', (_json(manifest),))
-        for table, columns in COLUMNS.items():
+        for table in rows:
+            columns = COLUMNS[table]
             declaration = ",".join('"' + column.replace('"', '""') + '" TEXT NOT NULL' for column in columns)
             connection.execute(f'CREATE TABLE "{table}" ({declaration})')
             placeholders = ",".join("?" for _ in columns)
@@ -631,7 +671,8 @@ def _export_db(rows: dict[str, list[dict[str, str]]], manifest: dict[str, Any]) 
 def _export_csv(rows: dict[str, list[dict[str, str]]], manifest: dict[str, Any]) -> bytes:
     target = io.BytesIO()
     with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as archive:
-        for table, columns in COLUMNS.items():
+        for table in rows:
+            columns = COLUMNS[table]
             extended = [{**row, "_bundle_id": manifest["bundle_id"], "_schema_version": str(SCHEMA_VERSION)} for row in rows[table]]
             archive.writestr(f"{table}.csv", _csv_bytes([*columns, "_bundle_id", "_schema_version"], extended))
         archive.writestr("manifest.json", _json(manifest).encode("utf-8"))
@@ -644,7 +685,8 @@ def _export_xlsx(rows: dict[str, list[dict[str, str]]], manifest: dict[str, Any]
     from openpyxl.styles import Font, PatternFill
     workbook = Workbook(write_only=True)
     long_rows: list[list[str]] = []
-    for table, columns in COLUMNS.items():
+    for table in rows:
+        columns = COLUMNS[table]
         sheet = workbook.create_sheet(table)
         sheet.freeze_panes = "A2"
         header = []

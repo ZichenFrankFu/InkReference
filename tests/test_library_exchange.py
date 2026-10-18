@@ -86,20 +86,20 @@ def test_empty_library_exports_keep_every_table(tmp_path, fmt):
 def test_literal_formula_dates_unknowns_newlines_and_non_bmp(tmp_path, populated, fmt):
     row = populated.get_record("works", "W950")
     text = '=SUM(A1:A2)\r\n𰻞emoji😀\n引号"，未知与【待确认】\r仅回车'
-    populated.update_record("works", row["id"], {"剧情补充说明": text, "发布日期": "2020-03", "热度": "00000012345678901234567890"}, row["revision"])
+    populated.update_record("works", row["id"], {"两句话概括": text, "发布日期": "2020-03", "热度权重": "00000012345678901234567890"}, row["revision"])
     target, _ = roundtrip(tmp_path, populated, fmt)
     result = target.get_record("works", "W950")["values"]
-    assert result["剧情补充说明"] == text
+    assert result["两句话概括"] == text
     assert result["发布日期"] == "2020-03"
-    assert result["热度"] == "00000012345678901234567890"
+    assert result["热度权重"] == "00000012345678901234567890"
 
 
 def test_xlsx_long_and_xml_control_text_are_lossless(tmp_path, populated):
     row = populated.get_record("works", "W950")
     text = ("长文本😀\n" * 10000) + "\x08不可见控制字符"
-    populated.update_record("works", row["id"], {"剧情补充说明": text}, row["revision"])
+    populated.update_record("works", row["id"], {"两句话概括": text}, row["revision"])
     target, raw = roundtrip(tmp_path, populated, "xlsx")
-    assert target.get_record("works", "W950")["values"]["剧情补充说明"] == text
+    assert target.get_record("works", "W950")["values"]["两句话概括"] == text
     book = load_workbook(io.BytesIO(raw), read_only=True)
     assert book["_long_text"].sheet_state == "hidden"
     assert book["_manifest"].sheet_state == "hidden"
@@ -111,13 +111,13 @@ def test_xlsx_formula_exported_as_text_and_import_formula_rejected(populated):
     populated.update_record("works", row["id"], {"两句话概括": "=1+1"}, row["revision"])
     raw = export_library(populated, "xlsx")
     book = load_workbook(io.BytesIO(raw))
-    cell = book["works"]["H4"]
+    cell = book["works"]["G4"]
     assert cell.value == "=1+1" and cell.data_type == "s"
     cell.value = "=2+2"
     output = io.BytesIO()
     book.save(output)
     batch = parse_library_files([("edited.xlsx", output.getvalue())])
-    assert "works!H4" in " ".join(batch.errors)
+    assert "works!G4" in " ".join(batch.errors)
     assert "公式" in " ".join(batch.errors)
 
 
@@ -224,14 +224,14 @@ def test_relation_changes_since_preview_are_detected(populated):
 def test_typed_relation_failure_rolls_back_material_updates(tmp_path, populated):
     target, _ = roundtrip(tmp_path, populated, "db")
     row = populated.get_record("works", "W950")
-    populated.update_record("works", row["id"], {"热度": "changed"}, row["revision"])
+    populated.update_record("works", row["id"], {"热度权重": "changed"}, row["revision"])
     batch = parse_library_files([("library.db", export_library(populated, "db"))])
     assert not preview_library_import(target, batch)["errors"]
     # A server-side mutation after preview still cannot leave partial writes.
     batch.relation_tables["material_relations"][0]["target_id"] = "MISSING"
     with pytest.raises(DataError):
         commit_library_import(target, batch, "update")
-    assert target.get_record("works", "W950")["values"]["热度"] == "0"
+    assert target.get_record("works", "W950")["values"]["热度权重"] == "0"
 
 
 def test_cliche_to_cliche_relation_rejected_with_id(populated):
@@ -243,13 +243,13 @@ def test_cliche_to_cliche_relation_rejected_with_id(populated):
     assert "R001" in errors and "桥段关联桥段" in errors
 
 
-def test_work_cliche_authoritative_detail_mismatch_names_files(populated):
+def test_work_cliche_bidirectional_mismatch_names_files(populated):
     files = dict(unpack_csv(export_library(populated, "csv")))
-    rows = list(csv.DictReader(io.StringIO(files["work_cliches.csv"].decode("utf-8-sig"))))
-    rows[0]["detail"] = "C007：另一个版本"
-    files["work_cliches.csv"] = csv_data(list(rows[0]), rows)
+    rows = list(csv.DictReader(io.StringIO(files["works.csv"].decode("utf-8-sig"))))
+    rows[0]["关联cliché"] = "[]"
+    files["works.csv"] = csv_data(list(rows[0]), rows)
     errors = " ".join(parse_library_files(list(files.items())).errors)
-    assert "work_cliches.csv" in errors and "works.csv" in errors and "W900" in errors
+    assert "cliches.csv" in errors and "works.csv" in errors and "W900" in errors
 
 
 def test_db_read_only_import_rejects_trigger_and_unknown_tables(tmp_path, populated):
@@ -315,7 +315,7 @@ def test_formats_document_all_five_tables_and_default_db():
 def test_canonical_three_csv_cannot_be_downgraded_to_legacy(populated):
     files = [(name, raw) for name, raw in unpack_csv(export_library(populated, "csv")) if name in {"works.csv", "characters.csv", "cliches.csv"}]
     errors = " ".join(parse_library_files(files).errors)
-    assert "manifest.json" in errors and "material_relations.csv" in errors and "work_cliches.csv" in errors
+    assert "manifest.json" in errors
 
 
 def test_xlsx_mixed_worksheet_bundle_detected(populated):
@@ -332,9 +332,9 @@ def test_xlsx_mixed_worksheet_bundle_detected(populated):
 def test_xlsx_non_bmp_excel_utf16_cell_limit(tmp_path, populated):
     row = populated.get_record("works", "W950")
     text = "😀" * 20000
-    populated.update_record("works", row["id"], {"剧情补充说明": text}, row["revision"])
+    populated.update_record("works", row["id"], {"两句话概括": text}, row["revision"])
     target, raw = roundtrip(tmp_path, populated, "xlsx")
-    assert target.get_record("works", "W950")["values"]["剧情补充说明"] == text
+    assert target.get_record("works", "W950")["values"]["两句话概括"] == text
     book = load_workbook(io.BytesIO(raw), read_only=True)
     assert "_long_text" in book.sheetnames
     book.close()

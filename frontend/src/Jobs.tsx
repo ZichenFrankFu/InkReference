@@ -149,6 +149,18 @@ export default function Jobs({ initialId, navigate }: Props) {
     }
   }, [initialId, choose, load]);
   useEffect(() => {
+    const focus = (event?: Event) => {
+      let target = (event as CustomEvent | undefined)?.detail;
+      if (!target) {
+        try { target = JSON.parse(sessionStorage.getItem("inkreference.catalog-focus") || "null"); } catch { return; }
+      }
+      if (target?.section === "jobs" && target.documentId) setMode("reference");
+    };
+    focus();
+    window.addEventListener("inkreference:catalog-focus", focus);
+    return () => window.removeEventListener("inkreference:catalog-focus", focus);
+  }, []);
+  useEffect(() => {
     const timer = window.setInterval(() => {
       const run = selectedRef.current;
       if (run && ["queued", "running", "cancelling"].includes(run.status)) {

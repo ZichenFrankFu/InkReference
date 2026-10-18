@@ -148,4 +148,4 @@ def test_schema_two_upgrade_retains_values_and_authoritative_v8_links(store):
     assert {table: upgraded.all_records(table) for table in before} == before
     assert upgraded.list_material_relations() == []
     with upgraded.connect() as connection:
-        assert [row[0] for row in connection.execute("SELECT version FROM schema_migrations ORDER BY version")] == [1, 2, 3]
+        assert [row[0] for row in connection.execute("SELECT version FROM schema_migrations ORDER BY version")] == [1, 2, 3, 4]

@@ -28,7 +28,9 @@ from urllib.parse import unquote, urlsplit
 from xml.etree import ElementTree as ET
 
 from .database import DataError
-from .chapter_layout import chapter_label, chapter_body_span, expand_missing_chapters, normalize_chapter_body, normalize_document_chapter_bodies
+from .chapter_layout import (chapter_label, chapter_body_span, chapter_sequence, duplicate_heading_repairs,
+                             expand_missing_chapters, normalize_chapter_body, normalize_document_chapter_bodies,
+                             renumber_after_deletion)
 from .chapter_preprocessing import AUTHOR_KEYWORDS, annotate_chapters, chapter_proposals, chapter_title_span, validate_settings
 from .text_processing import analyze_text, chunk_text, diagnose_text, split_chapters
 
@@ -38,6 +40,8 @@ MAX_MEMBER_BYTES = 20 * 1024 * 1024
 MAX_ARCHIVE_MEMBERS = 2000
 SUPPORTED_FORMATS = {".txt", ".md", ".srt", ".docx", ".epub"}
 ENCODING_CHOICES = ["utf-8", "gb18030", "utf-16-le", "utf-16-be", "big5"]
+HISTORY_LIMIT = 10
+READ_VIEW_LIMIT = 3
 # Use the stored exact codepoint count, rather than SQLite length(text), which
 # stops at a literal NUL. This does not fetch original BLOBs or full version text.
 _CURRENT_CHARACTERS_SQL = ("COALESCE((SELECT characters FROM doc_version_views WHERE version_id=doc_documents.latest_version_id), "
@@ -367,7 +371,8 @@ def _normalized_slice(text: str, source_start: int) -> tuple[str, list[int]]:
 
 
 def _prepare(source: str, previous: str, options: dict[str, Any], *, normalize: bool = True,
-             normalize_layout: bool = False, progress: Callable[[str, int, int], None] | None = None) -> dict[str, Any]:
+             normalize_layout: bool = False, progress: Callable[[str, int, int], None] | None = None,
+             chapter_analysis: dict[str, Any] | None = None) -> dict[str, Any]:
     if progress:
         progress("chapter_parse", 0, 1)
     if normalize:
@@ -378,8 +383,9 @@ def _prepare(source: str, previous: str, options: dict[str, Any], *, normalize: 
         from .text_processing import split_chapters
         result = {"cleaned_text": source, "cleaned_sha256": _sha(source.encode("utf-8")),
                   "diagnostics": diagnose_text(source), "transformations": [],
-                  "chapter_analysis": split_chapters(source, fallback_chars=options["fallback_chars"],
-                       heading_formats=options.get("heading_formats"), custom_formats=options.get("custom_formats"))}
+                  "chapter_analysis": chapter_analysis if chapter_analysis is not None else split_chapters(
+                       source, fallback_chars=options["fallback_chars"], heading_formats=options.get("heading_formats"),
+                       custom_formats=options.get("custom_formats"))}
     if normalize_layout:
         normalized = normalize_document_chapter_bodies(result["cleaned_text"], result["chapter_analysis"]["chapters"])
         if normalized != result["cleaned_text"]:
@@ -454,8 +460,8 @@ class DocumentStore:
                     id TEXT PRIMARY KEY, document_id TEXT NOT NULL REFERENCES doc_documents(id),
                     filename TEXT NOT NULL, format TEXT NOT NULL, encoding TEXT NOT NULL,
                     original BLOB NOT NULL, original_sha256 TEXT NOT NULL,
-                    source_text TEXT NOT NULL, version_id TEXT NOT NULL REFERENCES doc_versions(id),
-                    created_at TEXT NOT NULL
+                    source_text TEXT NOT NULL, version_id TEXT REFERENCES doc_versions(id) ON DELETE SET NULL,
+                    created_at TEXT NOT NULL, mode TEXT NOT NULL DEFAULT 'unknown'
                 );
                 CREATE TRIGGER IF NOT EXISTS doc_source_immutable
                 BEFORE UPDATE ON doc_sources
@@ -477,7 +483,12 @@ class DocumentStore:
                 );
                 CREATE INDEX IF NOT EXISTS doc_chapter_views_version ON doc_chapter_views(version_id,chapter_order);
                 CREATE TABLE IF NOT EXISTS doc_ingestions (
-                    key TEXT PRIMARY KEY, document_id TEXT NOT NULL REFERENCES doc_documents(id)
+                    key TEXT PRIMARY KEY, document_id TEXT NOT NULL REFERENCES doc_documents(id),
+                    source_id TEXT, mode TEXT, original_sha256 TEXT
+                );
+                CREATE TABLE IF NOT EXISTS doc_version_meta (
+                    version_id TEXT PRIMARY KEY REFERENCES doc_versions(id) ON DELETE CASCADE,
+                    has_source_provenance INTEGER NOT NULL, active_source_ids_json TEXT
                 );
                 CREATE TRIGGER IF NOT EXISTS doc_original_immutable
                 BEFORE UPDATE OF original,original_sha256,source_text,filename,encoding,format ON doc_documents
@@ -486,6 +497,37 @@ class DocumentStore:
                 BEFORE UPDATE ON doc_versions
                 BEGIN SELECT RAISE(ABORT, 'document version is immutable'); END;
             """)
+            connection.execute("BEGIN IMMEDIATE")
+            source_columns = {row["name"]: row for row in connection.execute("PRAGMA table_info(doc_sources)")}
+            if source_columns["version_id"]["notnull"] or "mode" not in source_columns:
+                # Source bytes survive independently of discarded text
+                # snapshots. Copy inside SQLite rather than loading BLOBs.
+                connection.execute("DROP TRIGGER IF EXISTS doc_source_immutable")
+                connection.execute("DROP INDEX IF EXISTS doc_sources_document")
+                connection.execute("ALTER TABLE doc_sources RENAME TO doc_sources_legacy")
+                connection.execute("""CREATE TABLE doc_sources (
+                    id TEXT PRIMARY KEY, document_id TEXT NOT NULL REFERENCES doc_documents(id),
+                    filename TEXT NOT NULL, format TEXT NOT NULL, encoding TEXT NOT NULL,
+                    original BLOB NOT NULL, original_sha256 TEXT NOT NULL, source_text TEXT NOT NULL,
+                    version_id TEXT REFERENCES doc_versions(id) ON DELETE SET NULL,
+                    created_at TEXT NOT NULL, mode TEXT NOT NULL DEFAULT 'unknown')""")
+                mode_column = ",mode" if "mode" in source_columns else ""
+                connection.execute("INSERT INTO doc_sources(id,document_id,filename,format,encoding,original,original_sha256,source_text,version_id,created_at" + mode_column + ") "
+                                   "SELECT id,document_id,filename,format,encoding,original,original_sha256,source_text,version_id,created_at" + mode_column + " FROM doc_sources_legacy")
+                connection.execute("DROP TABLE doc_sources_legacy")
+                connection.execute("CREATE INDEX doc_sources_document ON doc_sources(document_id,created_at)")
+            # Only pointer/provenance metadata can change. The actual original
+            # file, decoded source and original identity remain immutable.
+            connection.execute("DROP TRIGGER IF EXISTS doc_source_immutable")
+            connection.execute("""CREATE TRIGGER doc_source_immutable
+                BEFORE UPDATE OF id,document_id,filename,format,encoding,original,original_sha256,source_text,created_at ON doc_sources
+                BEGIN SELECT RAISE(ABORT, 'document source is immutable'); END""")
+            ingestion_columns = {row["name"] for row in connection.execute("PRAGMA table_info(doc_ingestions)")}
+            for column in ("source_id", "mode", "original_sha256"):
+                if column not in ingestion_columns:
+                    connection.execute(f"ALTER TABLE doc_ingestions ADD COLUMN {column} TEXT")
+            if "active_source_ids_json" not in {row["name"] for row in connection.execute("PRAGMA table_info(doc_version_meta)")}:
+                connection.execute("ALTER TABLE doc_version_meta ADD COLUMN active_source_ids_json TEXT")
 
     @contextlib.contextmanager
     def _connection(self) -> Iterator[sqlite3.Connection]:
@@ -571,7 +613,8 @@ class DocumentStore:
             version = self._insert_version(connection, identifier, None, 1, source, payload)
             connection.execute("UPDATE doc_documents SET latest_version_id=? WHERE id=?", (version["id"], identifier))
             if idempotency_key is not None:
-                connection.execute("INSERT INTO doc_ingestions VALUES (?,?)", (idempotency_key, identifier))
+                connection.execute("INSERT INTO doc_ingestions(key,document_id,mode,original_sha256) VALUES (?,?,'new',?)",
+                                   (idempotency_key, identifier, _sha(raw)))
             return self._meta(self._document(connection, identifier))
 
     def create_collection(self, title: str) -> dict[str, Any]:
@@ -603,7 +646,9 @@ class DocumentStore:
                    "created_at": now}
         connection.execute("INSERT INTO doc_versions VALUES (?,?,?,?,?,?)",
                            (identifier, document_id, parent_id, number, _json(version), now))
+        DocumentStore._record_version_metadata(connection, version)
         DocumentStore._write_views(connection, version, payload.get("_review_proposals"), payload.get("_review_diagnostics"))
+        DocumentStore._prune_history(connection, document_id)
         return version
 
     def get_document(self, document_id: str) -> dict[str, Any]:
@@ -615,7 +660,122 @@ class DocumentStore:
             document["versions"] = [dict(row) for row in connection.execute(
                 "SELECT id,parent_version_id,version_number,created_at FROM doc_versions WHERE document_id=? ORDER BY version_number",
                 (document_id,))]
+            protected = self._protected_versions(connection, document_id, document["latest_version_id"])
+            for version in document["versions"]:
+                version["protected"] = version["id"] in protected
+            document["history_limit"] = HISTORY_LIMIT
+            document["read_view_limit"] = READ_VIEW_LIMIT
             return document
+
+    @staticmethod
+    def _protected_versions(connection: sqlite3.Connection, document_id: str,
+                            current_version_id: str | None = None) -> set[str]:
+        """Keep originals and externally pinned analysis versions, not parents.
+
+        Parent IDs are provenance labels, not a request to keep every ancestor.
+        The current and retained snapshots carry their active source IDs, so
+        removing an ordinary old parent never breaks source reconstruction.
+        """
+        protected = set()
+        initial = connection.execute("SELECT id FROM doc_versions WHERE document_id=? ORDER BY version_number LIMIT 1",
+                                     (document_id,)).fetchone()
+        if initial:
+            protected.add(initial[0])
+        if current_version_id is None:
+            current = connection.execute("SELECT latest_version_id FROM doc_documents WHERE id=?", (document_id,)).fetchone()
+            current_version_id = current[0] if current else None
+        if current_version_id:
+            protected.add(current_version_id)
+        excluded = {"doc_versions", "doc_version_views", "doc_chapter_views", "doc_sources", "doc_version_meta",
+                    "reference_volume_plans", "ing_jobs", "conv_imports"}
+        # Unknown legacy upload modes still need their original snapshot for
+        # a one-time lazy metadata repair. New upload originals never pin a
+        # complete book merely because their bytes are preserved.
+        protected.update(row[0] for row in connection.execute(
+            "SELECT version_id FROM doc_sources WHERE document_id=? AND mode='unknown' AND version_id IS NOT NULL",
+            (document_id,)))
+        # The workbench's reference and job schemas evolve independently.
+        # Discover only scalar version-reference columns, never their payloads.
+        tables = [row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")]
+        for table in tables:
+            if table in excluded or table.startswith("sqlite_"):
+                continue
+            quoted = '"' + table.replace('"', '""') + '"'
+            columns = {row[1] for row in connection.execute(f"PRAGMA table_info({quoted})")}
+            if table == "reference_analysis_history" and "commits_json" in columns:
+                protected.update(row[0] for row in connection.execute(
+                    "SELECT DISTINCT json_extract(commit_row.value,'$[7]') FROM reference_analysis_history h, "
+                    "json_each(h.commits_json,'$.commits') AS commit_row WHERE h.document_id=?",
+                    (document_id,)) if row[0])
+            references = columns & {"version_id", "source_version_id", "cleaned_version_id", "text_version_id"}
+            for column in references:
+                clause = " WHERE document_id=?" if "document_id" in columns else ""
+                values = (document_id,) if clause else ()
+                protected.update(row[0] for row in connection.execute(f'SELECT DISTINCT "{column}" FROM {quoted}{clause}', values) if row[0])
+        return protected
+
+    @staticmethod
+    def _prune_history(connection: sqlite3.Connection, document_id: str) -> dict[str, int]:
+        protected = DocumentStore._protected_versions(connection, document_id)
+        rows = connection.execute("SELECT v.id,v.parent_version_id,m.has_source_provenance AS sources "
+                                  "FROM doc_versions v LEFT JOIN doc_version_meta m ON m.version_id=v.id "
+                                  "WHERE v.document_id=? ORDER BY v.version_number DESC", (document_id,)).fetchall()
+        keep = {row["id"] for row in rows[:HISTORY_LIMIT]} | protected
+        # Pre-migration snapshots without materialized source provenance may
+        # still walk their parents. Keep only those exceptional legacy chains.
+        by_id = {row["id"]: row for row in rows}
+        pending = [identity for identity in keep if identity in by_id and not by_id[identity]["sources"]]
+        while pending:
+            parent = by_id[pending.pop()]["parent_version_id"]
+            if parent in by_id and parent not in keep:
+                keep.add(parent)
+                if not by_id[parent]["sources"]:
+                    pending.append(parent)
+        removed = [row["id"] for row in rows if row["id"] not in keep]
+        connection.executemany("DELETE FROM doc_versions WHERE id=?", ((identity,) for identity in removed))
+        # Volume plans are small derived per-version records rather than pins.
+        tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if "reference_volume_plans" in tables:
+            connection.execute("DELETE FROM reference_volume_plans WHERE document_id=? AND version_id NOT IN "
+                               "(SELECT id FROM doc_versions WHERE document_id=?)", (document_id, document_id))
+        cached = [row["id"] for row in rows[:READ_VIEW_LIMIT]]
+        if cached:
+            placeholders = ",".join("?" for _ in cached)
+            for table in ("doc_chapter_views", "doc_version_views"):
+                # Historical read models rebuild lazily if the user opens one.
+                version_filter = ("document_id=?" if table == "doc_version_views" else
+                                  "version_id IN (SELECT id FROM doc_versions WHERE document_id=?)")
+                connection.execute(f"DELETE FROM {table} WHERE {version_filter} AND version_id NOT IN ({placeholders})",
+                                   (document_id, *cached))
+        return {"removed_versions": len(removed), "retained_versions": len(rows) - len(removed)}
+
+    @staticmethod
+    def _record_version_metadata(connection: sqlite3.Connection, version: dict[str, Any]) -> None:
+        connection.execute("INSERT OR REPLACE INTO doc_version_meta VALUES (?,?,?)",
+                           (version["id"], int("active_source_ids" in version),
+                            _json(version["active_source_ids"]) if "active_source_ids" in version else None))
+        for change in version.get("changes", []):
+            stage = change.get("stage")
+            if stage not in {"append_source", "replace_source"} or not change.get("source_id"):
+                continue
+            mode = "replace" if stage == "replace_source" else "append"
+            connection.execute("UPDATE doc_sources SET mode=? WHERE id=? AND mode='unknown'", (mode, change["source_id"]))
+            if change.get("ingestion_key"):
+                connection.execute("UPDATE doc_ingestions SET source_id=?,mode=?,original_sha256=? WHERE key=? AND mode IS NULL",
+                                   (change["source_id"], mode, change.get("original_sha256"), change["ingestion_key"]))
+
+    @staticmethod
+    def _limit_read_views(connection: sqlite3.Connection, document_id: str, requested_version_id: str) -> None:
+        cached = {requested_version_id}
+        cached.update(row[0] for row in connection.execute(
+            "SELECT id FROM doc_versions WHERE document_id=? ORDER BY version_number DESC LIMIT ?",
+            (document_id, READ_VIEW_LIMIT - 1)))
+        placeholders = ",".join("?" for _ in cached)
+        for table in ("doc_chapter_views", "doc_version_views"):
+            clause = ("document_id=?" if table == "doc_version_views" else
+                      "version_id IN (SELECT id FROM doc_versions WHERE document_id=?)")
+            connection.execute(f"DELETE FROM {table} WHERE {clause} AND version_id NOT IN ({placeholders})",
+                               (document_id, *cached))
 
     def get_version(self, document_id: str, version_id: str | None = None) -> dict[str, Any]:
         with self._connection() as connection:
@@ -628,7 +788,11 @@ class DocumentStore:
                                      (document_id, version_id)).fetchone()
             if row is None:
                 raise DataError(404, "全文版本不存在")
-            return json.loads(row["payload_json"])
+            version = json.loads(row["payload_json"])
+            marker = connection.execute("SELECT has_source_provenance,active_source_ids_json FROM doc_version_meta WHERE version_id=?", (version["id"],)).fetchone()
+            if marker is None or marker["has_source_provenance"] and marker["active_source_ids_json"] is None:
+                self._record_version_metadata(connection, version)
+            return version
 
     @staticmethod
     def version_summary(version: dict[str, Any]) -> dict[str, Any]:
@@ -720,6 +884,7 @@ class DocumentStore:
                 if stored is None:
                     raise DataError(404, "全文版本不存在")
                 self._write_views(connection, json.loads(stored["payload_json"]))
+                self._limit_read_views(connection, document_id, version_id)
                 row = connection.execute(f"SELECT {column} FROM doc_version_views WHERE version_id=?", (version_id,)).fetchone()
             return json.loads(row[column])
 
@@ -728,6 +893,18 @@ class DocumentStore:
 
     def get_version_navigation(self, document_id: str, version_id: str | None = None) -> dict[str, Any]:
         return self._view(document_id, version_id, "navigation_json")
+
+    def chapter_previews(self, document_id: str, version_id: str, *, preview_chars: int = 200) -> list[dict[str, Any]]:
+        """Bounded chapter heads for volume planning, without full snapshots."""
+        if type(preview_chars) is not int or not 0 <= preview_chars <= 1000:
+            raise DataError(422, "章节预览长度需为 0 至 1000")
+        self.get_version_summary(document_id, version_id)
+        with self._connection() as connection:
+            return [{"id": row["chapter_id"], "title": row["title"] or "", "text": row["preview"]}
+                    for row in connection.execute(
+                        "SELECT chapter_id,json_extract(metadata_json,'$.title') AS title,substr(text,1,?) AS preview "
+                        "FROM doc_chapter_views WHERE version_id=? AND COALESCE(json_extract(metadata_json,'$.placeholder'),0)=0 "
+                        "ORDER BY chapter_order", (preview_chars, version_id))]
 
     def rebuild_read_views(self, document_id: str, version_id: str | None = None) -> dict[str, Any]:
         """Atomically rebuild one derived read model from its immutable snapshot."""
@@ -744,6 +921,7 @@ class DocumentStore:
             connection.execute("DELETE FROM doc_chapter_views WHERE version_id=?", (selected,))
             connection.execute("DELETE FROM doc_version_views WHERE version_id=?", (selected,))
             self._write_views(connection, version)
+            self._limit_read_views(connection, document_id, selected)
             summary = connection.execute("SELECT summary_json FROM doc_version_views WHERE version_id=?", (selected,)).fetchone()
             return json.loads(summary["summary_json"])
 
@@ -1134,8 +1312,10 @@ class DocumentStore:
         except UnicodeError:
             raise DataError(422, "文本包含无效 Unicode 字符") from None
 
-    def resegment(self, document_id: str, base_version_id: str,
-                  heading_formats: list[str], custom_formats: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    def _resegment_candidate(self, document_id: str, base_version_id: str,
+                             heading_formats: list[str], custom_formats: list[dict[str, Any]] | None,
+                             repair_duplicates: bool) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+        self._assert_current(document_id, base_version_id)
         base = self.get_version(document_id, base_version_id)
         options = self._version_options(base, heading_formats=heading_formats,
                                         custom_formats=custom_formats if custom_formats is not None else base["options"].get("custom_formats", []))
@@ -1143,8 +1323,81 @@ class DocumentStore:
         available = {name for name, _ in heading_patterns(options["custom_formats"])}
         if set(heading_formats) - available:
             raise DataError(422, "选中的章节格式不存在")
-        prepared = _prepare(base["text"], base["text"], options, normalize=False, normalize_layout=True)
-        return self._commit_prepared(document_id, base, prepared, change={"stage": "chapter_resegment", "count": len(prepared["chapters"])})
+        parsed = split_chapters(base["text"], heading_formats=heading_formats,
+                                custom_formats=options["custom_formats"], fallback_chars=options["fallback_chars"])
+        initial_chapters = [{**chapter, "id": f"chapter-{index + 1}"} for index, chapter in enumerate(parsed["chapters"])]
+        repairs = duplicate_heading_repairs(initial_chapters)
+        updated = base["text"]
+        if repair_duplicates and repairs:
+            pieces, position = [], 0
+            for repair in repairs:
+                pieces.extend((updated[position:repair["start"]], repair["replacement"]))
+                position = repair["end"]
+            pieces.append(updated[position:])
+            updated = "".join(pieces)
+        prepared = _prepare(updated, base["text"], options, normalize=False, normalize_layout=True,
+                            chapter_analysis=parsed if updated == base["text"] else None)
+
+        def directory(chapters):
+            return [{"chapter_id": item["id"], "number": item.get("number"), "title": item.get("title", ""),
+                     "kind": item.get("kind"), "start": item["start"], "end": item["end"],
+                     "body_characters": len(item.get("content", "").strip())} for item in chapters]
+
+        def counts(chapters):
+            sequence = chapter_sequence(chapters)
+            return {"chapter_count": len(chapters),
+                    "empty_chapter_count": sum(item.get("kind") == "chapter" and not item.get("content", "").strip() for item in chapters),
+                    "duplicate_chapter_count": len(sequence["duplicates"])}
+
+        old_directory, new_directory = directory(base["chapters"]), directory(prepared["chapters"])
+        changes = []
+        for index in range(max(len(old_directory), len(new_directory))):
+            before = old_directory[index] if index < len(old_directory) else None
+            after = new_directory[index] if index < len(new_directory) else None
+            if before != after:
+                changes.append({"kind": "changed" if before and after else "added" if after else "removed",
+                                "before": before, "after": after})
+        token = _sha(_json({"document_id": document_id, "base_version_id": base_version_id,
+                            "options": options, "repair_duplicates": repair_duplicates,
+                            "candidate_sha256": prepared["sha256"], "directory": new_directory}).encode())
+        preview = {"document_id": document_id, "base_version_id": base_version_id, "preview_token": token,
+                   "conflict": bool(changes), "old": counts(base["chapters"]), "new": counts(prepared["chapters"]),
+                   "changes": changes[:500], "change_count": len(changes), "changes_truncated": len(changes) > 500,
+                   "duplicate_repairs": [{key: value for key, value in repair.items() if key not in {"replacement", "start", "end"}}
+                                         for repair in repairs[:500]], "duplicate_repair_count": len(repairs),
+                   "duplicate_repairs_truncated": len(repairs) > 500, "repair_duplicates": repair_duplicates}
+        return base, prepared, preview
+
+    def preview_resegment(self, document_id: str, base_version_id: str,
+                          heading_formats: list[str], custom_formats: list[dict[str, Any]] | None = None,
+                          *, repair_duplicates: bool = False) -> dict[str, Any]:
+        # Candidate payloads are request-local. No second whole-book snapshot
+        # stays resident or enters version history merely for opening a dialog.
+        return self._resegment_candidate(document_id, base_version_id, heading_formats, custom_formats,
+                                         repair_duplicates)[2]
+
+    def resegment(self, document_id: str, base_version_id: str,
+                  heading_formats: list[str], custom_formats: list[dict[str, Any]] | None = None,
+                  *, conflict_policy: str | None = None, preview_token: str | None = None,
+                  repair_duplicates: bool = False, require_confirmation: bool = False) -> dict[str, Any]:
+        if conflict_policy not in {None, "keep_old", "use_new"}:
+            raise DataError(422, "请选择保留旧版或以新版为准")
+        base, prepared, preview = self._resegment_candidate(document_id, base_version_id, heading_formats,
+                                                            custom_formats, repair_duplicates)
+        if preview_token is not None and preview_token != preview["preview_token"]:
+            raise DataError(409, {"code": "chapter_preview_changed", "message": "识别结果已变化，请重新预览", "preview": preview})
+        if require_confirmation and preview["conflict"] and (conflict_policy is None or preview_token is None):
+            raise DataError(409, {"code": "chapter_resegment_conflict", "message": "章节目录有变化，请选择保留旧版或以新版为准", "preview": preview})
+        if conflict_policy == "keep_old":
+            self._assert_current(document_id, base_version_id)
+            return base
+        if prepared["sha256"] == base["sha256"] and prepared["options"] == self._version_options(base):
+            self._assert_current(document_id, base_version_id)
+            return base
+        return self._commit_prepared(document_id, base, prepared,
+                                     change={"stage": "chapter_resegment", "count": len(prepared["chapters"]),
+                                             "duplicate_repairs": preview["duplicate_repairs"] if repair_duplicates else [],
+                                             "previous_chapter_count": preview["old"]["chapter_count"]})
 
     def update_preprocess_settings(self, document_id: str, base_version_id: str,
                                    author_keywords: list[str] | None = None,
@@ -1242,11 +1495,18 @@ class DocumentStore:
             raise DataError(422, "请选择要删除的章节")
         if len(chapter_ids) != len(set(chapter_ids)):
             raise DataError(422, "删除章节不能重复")
+        self._assert_current(document_id, base_version_id)
         base = self.get_version(document_id, base_version_id)
-        ranges = [(self._chapter(base, identifier)["start"], self._chapter(base, identifier)["end"]) for identifier in chapter_ids]
-        updated = _without_ranges(base["text"], ranges)
+        for identifier in chapter_ids:
+            self._chapter(base, identifier)
+        try:
+            updated, renumbered = renumber_after_deletion(base["text"], base["chapters"], set(chapter_ids),
+                                                         base["options"].get("custom_formats", []))
+        except (ValueError, TimeoutError):
+            raise DataError(422, "章节编号无法安全调整，请检查当前章节格式；内容尚未保存") from None
         prepared = _prepare(updated, base["text"], self._version_options(base), normalize=False)
-        return self._commit_prepared(document_id, base, prepared, change={"stage": "chapter_delete", "chapter_ids": chapter_ids, "count": len(chapter_ids)})
+        return self._commit_prepared(document_id, base, prepared, change={"stage": "chapter_delete", "chapter_ids": chapter_ids,
+                                                                      "count": len(chapter_ids), "renumbered": renumbered})
 
     def restore_version(self, document_id: str, base_version_id: str, target_version_id: str) -> dict[str, Any]:
         base = self.get_version(document_id, base_version_id)
@@ -1277,20 +1537,45 @@ class DocumentStore:
             cursor = self.get_version(document_id, parent) if parent else None
         return ["original", *reversed(source_ids)]
 
-    def ingestion_result(self, key: str) -> dict[str, Any] | None:
-        """Find a durable upload/append commit after a worker/link crash."""
+    def _ingestion_record(self, key: str) -> dict[str, Any] | None:
         with self._connection() as connection:
-            row = connection.execute("SELECT document_id FROM doc_ingestions WHERE key=?", (key,)).fetchone()
+            row = connection.execute("SELECT * FROM doc_ingestions WHERE key=?", (key,)).fetchone()
             if row is None:
                 return None
             document_id = row["document_id"]
-            versions = connection.execute("SELECT payload_json FROM doc_versions WHERE document_id=? ORDER BY version_number", (document_id,))
-            for item in versions:
-                version = json.loads(item["payload_json"])
-                if any(change.get("ingestion_key") == key for change in version.get("changes", [])):
-                    return {"document_id": document_id, "version_id": version["id"]}
-            initial = connection.execute("SELECT id FROM doc_versions WHERE document_id=? ORDER BY version_number LIMIT 1", (document_id,)).fetchone()
-            return {"document_id": document_id, "version_id": initial["id"]}
+            record = dict(row)
+            if record["mode"] is None:
+                # Old stores did not persist upload receipts separately. Only
+                # a replay of that key pays this one-time migration cost; normal
+                # startup, navigation and every subsequent save avoid it.
+                for item in connection.execute("SELECT json_extract(payload_json,'$.changes') AS changes FROM doc_versions "
+                                               "WHERE document_id=? ORDER BY version_number", (document_id,)):
+                    change = next((value for value in json.loads(item["changes"] or "[]") if value.get("ingestion_key") == key), None)
+                    if change is not None:
+                        record.update(source_id=change.get("source_id"), mode="replace" if change.get("stage") == "replace_source" else "append",
+                                      original_sha256=change.get("original_sha256"))
+                        break
+                if record["mode"] is None:
+                    original = connection.execute("SELECT original_sha256 FROM doc_documents WHERE id=?", (document_id,)).fetchone()
+                    record.update(mode="new", original_sha256=original[0])
+                connection.execute("UPDATE doc_ingestions SET source_id=?,mode=?,original_sha256=? WHERE key=?",
+                                   (record["source_id"], record["mode"], record["original_sha256"], key))
+                if record["source_id"]:
+                    connection.execute("UPDATE doc_sources SET mode=? WHERE id=? AND mode='unknown'",
+                                       (record["mode"], record["source_id"]))
+            if record["mode"] == "new":
+                selected = connection.execute("SELECT id FROM doc_versions WHERE document_id=? ORDER BY version_number LIMIT 1", (document_id,)).fetchone()
+                version_id = selected[0]
+            else:
+                selected = connection.execute("SELECT version_id FROM doc_sources WHERE document_id=? AND id=?", (document_id, record["source_id"])).fetchone()
+                version_id = selected[0] if selected and selected[0] else connection.execute(
+                    "SELECT latest_version_id FROM doc_documents WHERE id=?", (document_id,)).fetchone()[0]
+            return {**record, "version_id": version_id}
+
+    def ingestion_result(self, key: str) -> dict[str, Any] | None:
+        """Resolve a durable receipt without deserializing a book's history."""
+        record = self._ingestion_record(key)
+        return {"document_id": record["document_id"], "version_id": record["version_id"]} if record else None
 
     def append(self, document_id: str, base_version_id: str, filename: str, raw: bytes,
                encoding: str = "auto", *, idempotency_key: str | None = None,
@@ -1334,14 +1619,12 @@ class DocumentStore:
         else:
             source, used_encoding = _decode(raw, encoding)
         if idempotency_key:
-            existing = self.ingestion_result(idempotency_key)
+            existing = self._ingestion_record(idempotency_key)
             if existing:
-                version = self.get_version(existing["document_id"], existing["version_id"])
-                matches = [change for change in version.get("changes", []) if change.get("ingestion_key") == idempotency_key]
-                if (existing["document_id"] != document_id or not matches or matches[0].get("original_sha256") != _sha(raw)
-                        or matches[0].get("stage") != f"{mode}_source"):
+                if (existing["document_id"] != document_id or existing["original_sha256"] != _sha(raw)
+                        or existing["mode"] != mode):
                     raise DataError(409, "同一导入幂等键对应了不同原件或操作")
-                return version
+                return self.get_version(existing["document_id"], existing["version_id"])
         base = self.get_version(document_id, base_version_id)
         from .text_processing import clean_text
         new_text = source if preserve_text else clean_text(source)["cleaned_text"]
@@ -1369,34 +1652,51 @@ class DocumentStore:
                 raise DataError(409, "全文已有新版本，请刷新后重新选择更新或补充")
             version = self._insert_version(connection, document_id, base_version_id, base["version_number"] + 1,
                                            combined_source, prepared)
-            connection.execute("INSERT INTO doc_sources VALUES (?,?,?,?,?,?,?,?,?,?)",
+            connection.execute("INSERT INTO doc_sources VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                                (source_id, document_id, filename, suffix[1:], used_encoding, raw, _sha(raw),
-                                source, version["id"], _now()))
+                                source, version["id"], _now(), mode))
             connection.execute("UPDATE doc_documents SET latest_version_id=? WHERE id=?", (version["id"], document_id))
             if idempotency_key:
-                connection.execute("INSERT INTO doc_ingestions VALUES (?,?)", (idempotency_key, document_id))
+                connection.execute("INSERT INTO doc_ingestions VALUES (?,?,?,?,?)",
+                                   (idempotency_key, document_id, source_id, mode, _sha(raw)))
             return version
 
     def list_sources(self, document_id: str) -> list[dict[str, Any]]:
-        version = self.get_version(document_id)
-        active = set(self._active_source_ids(document_id, version))
         with self._connection() as connection:
-            document = self._document(connection, document_id)
+            document = connection.execute(f"SELECT {_META_COLUMNS} FROM doc_documents WHERE id=?", (document_id,)).fetchone()
+            if document is None:
+                raise DataError(404, "全文文档不存在")
+            cached = connection.execute("SELECT active_source_ids_json FROM doc_version_meta WHERE version_id=?",
+                                        (document["latest_version_id"],)).fetchone()
+        active = set(json.loads(cached[0])) if cached and cached[0] is not None else None
+        if active is None:
+            # Only a pre-metadata project needs the one-time legacy lineage
+            # read. Ordinary source navigation never loads a book or BLOB.
+            version = self.get_version(document_id, document["latest_version_id"])
+            active = set(self._active_source_ids(document_id, version))
+            with self._connection() as connection:
+                connection.execute("UPDATE doc_version_meta SET active_source_ids_json=? WHERE version_id=?",
+                                   (_json(sorted(active)), version["id"]))
+        with self._connection() as connection:
             originals = [] if document["format"] == "collection" else [
                 {"id": "original", "filename": document["filename"], "format": document["format"],
                  "encoding": document["encoding"], "original_sha256": document["original_sha256"],
-                 "original_bytes": len(document["original"]), "created_at": document["created_at"], "version_id": None, "mode": "new"}]
+                 "original_bytes": document["original_bytes"], "created_at": document["created_at"], "version_id": None, "mode": "new"}]
             originals.extend(dict(row) for row in connection.execute(
-                "SELECT id,filename,format,encoding,original_sha256,length(original) AS original_bytes,version_id,created_at "
+                "SELECT id,filename,format,encoding,original_sha256,length(original) AS original_bytes,version_id,created_at,mode "
                 "FROM doc_sources WHERE document_id=? ORDER BY created_at,id", (document_id,)))
             for source in originals:
-                if source["version_id"]:
+                if source["version_id"] and source.get("mode") == "unknown":
                     row = connection.execute(
-                        "SELECT json_extract(change.value,'$.stage') AS stage FROM doc_versions, "
+                        "SELECT json_extract(change.value,'$.stage') AS stage,json_extract(change.value,'$.ingestion_key') AS ingestion_key FROM doc_versions, "
                         "json_each(doc_versions.payload_json,'$.changes') AS change "
                         "WHERE document_id=? AND doc_versions.id=? AND json_extract(change.value,'$.source_id')=? LIMIT 1",
                         (document_id, source["version_id"], source["id"])).fetchone()
                     source["mode"] = "replace" if row and row["stage"] == "replace_source" else "append"
+                    connection.execute("UPDATE doc_sources SET mode=? WHERE id=? AND mode='unknown'", (source["mode"], source["id"]))
+                    if row and row["ingestion_key"]:
+                        connection.execute("UPDATE doc_ingestions SET source_id=?,mode=?,original_sha256=? WHERE key=? AND mode IS NULL",
+                                           (source["id"], source["mode"], source["original_sha256"], row["ingestion_key"]))
                 source["active"] = source["id"] in active
                 source["superseded"] = source["id"] not in active
                 source["derived_format"] = "txt" if source["encoding"] == "utf-8-converted" else None

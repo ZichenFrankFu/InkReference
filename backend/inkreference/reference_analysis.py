@@ -27,6 +27,7 @@ OBJECT_SECTIONS = {"plot", "style", "rhythm", "opening", "metadata"}
 SECTIONS = ARRAY_SECTIONS | OBJECT_SECTIONS
 DEFAULT_SECTIONS = {"plot": {"logline": "", "epochs": []}, "characters": [], "settings": [],
                     "style": {}, "rhythm": {}, "opening": {}, "metadata": {}, "setting_features": [], "raw_entries": []}
+ANALYSIS_HISTORY_LIMIT = 10
 
 
 def _dump(value: Any) -> str:
@@ -270,6 +271,10 @@ class ReferenceAnalysisStore:
             db.execute("CREATE TABLE IF NOT EXISTS reference_analysis_history (document_id TEXT NOT NULL,revision INTEGER NOT NULL,structure_type TEXT NOT NULL,sections_json TEXT NOT NULL,updated_at TEXT NOT NULL,PRIMARY KEY(document_id,revision))")
             if "commits_json" not in {row[1] for row in db.execute("PRAGMA table_info(reference_analysis_history)")}:
                 db.execute("ALTER TABLE reference_analysis_history ADD COLUMN commits_json TEXT NOT NULL DEFAULT '[]'")
+            db.execute("""DELETE FROM reference_analysis_history WHERE rowid IN (
+                SELECT rowid FROM (SELECT rowid,ROW_NUMBER() OVER (
+                PARTITION BY document_id ORDER BY revision DESC) AS age FROM reference_analysis_history)
+                WHERE age>?)""", (ANALYSIS_HISTORY_LIMIT,))
 
     @contextlib.contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -284,7 +289,9 @@ class ReferenceAnalysisStore:
         if self.documents:
             self.documents.get_document(document_id)
         db.execute("INSERT OR IGNORE INTO reference_analysis VALUES (?,0,'narrative',?,?)", (document_id, _dump(DEFAULT_SECTIONS), datetime.now(timezone.utc).isoformat()))
-        db.execute("INSERT OR IGNORE INTO reference_analysis_history (document_id,revision,structure_type,sections_json,updated_at,commits_json) SELECT document_id,revision,structure_type,sections_json,updated_at,? FROM reference_analysis WHERE document_id=?", (self._ledger(db, document_id), document_id))
+        snapshot_exists = db.execute("SELECT 1 FROM reference_analysis_history h JOIN reference_analysis a ON a.document_id=h.document_id AND a.revision=h.revision WHERE a.document_id=?", (document_id,)).fetchone()
+        if not snapshot_exists:
+            db.execute("INSERT OR IGNORE INTO reference_analysis_history (document_id,revision,structure_type,sections_json,updated_at,commits_json) SELECT document_id,revision,structure_type,sections_json,updated_at,? FROM reference_analysis WHERE document_id=?", (self._ledger(db, document_id), document_id))
 
     @staticmethod
     def _ledger(db: sqlite3.Connection, document_id: str) -> str:
@@ -294,6 +301,9 @@ class ReferenceAnalysisStore:
     def _write(self, db: sqlite3.Connection, document_id: str, sections: dict, structure_type: str) -> None:
         db.execute("UPDATE reference_analysis SET sections_json=?,structure_type=?,revision=revision+1,updated_at=? WHERE document_id=?", (_dump(sections), structure_type, datetime.now(timezone.utc).isoformat(), document_id))
         db.execute("INSERT INTO reference_analysis_history (document_id,revision,structure_type,sections_json,updated_at,commits_json) SELECT document_id,revision,structure_type,sections_json,updated_at,? FROM reference_analysis WHERE document_id=?", (self._ledger(db, document_id), document_id))
+        # Only recovery snapshots are bounded. Current facts and the authoritative
+        # per-chunk contribution ledger remain intact for idempotent approvals.
+        db.execute("DELETE FROM reference_analysis_history WHERE document_id=? AND revision NOT IN (SELECT revision FROM reference_analysis_history WHERE document_id=? ORDER BY revision DESC LIMIT ?)", (document_id, document_id, ANALYSIS_HISTORY_LIMIT))
 
     def _get(self, db: sqlite3.Connection, document_id: str) -> dict:
         row = db.execute("SELECT * FROM reference_analysis WHERE document_id=?", (document_id,)).fetchone()
