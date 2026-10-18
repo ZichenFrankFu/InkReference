@@ -1,18 +1,18 @@
-import { forwardRef, useImperativeHandle, useLayoutEffect, useRef, type ReactNode } from "react";
+import { forwardRef, useImperativeHandle, useLayoutEffect, useMemo, useRef, type ReactNode } from "react";
 import { preserveTextareaEdit, textareaText } from "./chapterText";
 
 export type TextHighlight = { id: string; start: number; end: number; label: string; kind: string; selected: boolean; removable: boolean };
 export type ChapterEditorHandle = { reveal: (start: number, end: number) => void; focus: () => void };
-type Props = { value: string; highlights: TextHighlight[]; readOnly: boolean; onChange: (value: string) => void };
+type Props = { value: string; highlights: TextHighlight[]; readOnly: boolean; placeholder?: string; onChange: (value: string) => void };
 
 // Native text input keeps IME composition, caret movement and undo intact. The
 // background layer only supplies marks, so the reader sees one editable text.
-const ChapterTextEditor = forwardRef<ChapterEditorHandle, Props>(function ChapterTextEditor({ value, highlights, readOnly, onChange }, ref) {
+const ChapterTextEditor = forwardRef<ChapterEditorHandle, Props>(function ChapterTextEditor({ value, highlights, readOnly, placeholder, onChange }, ref) {
   const input = useRef<HTMLTextAreaElement>(null);
   const background = useRef<HTMLDivElement>(null);
   const content = useRef<HTMLDivElement>(null);
-  const normalized = textareaText(value);
-  const points = Array.from(normalized.value);
+  const normalized = useMemo(() => textareaText(value), [value]);
+  const points = useMemo(() => Array.from(normalized.value), [normalized.value]);
   const mapped = highlights.map((mark) => ({ ...mark, start: normalized.sourceToDisplay[Math.min(mark.start, normalized.sourceToDisplay.length - 1)] || 0, end: normalized.sourceToDisplay[Math.min(mark.end, normalized.sourceToDisplay.length - 1)] || 0 }));
   const nodes: ReactNode[] = [];
   const starts = new Map<number, typeof mapped>(), ends = new Map<number, string[]>();
@@ -66,7 +66,7 @@ const ChapterTextEditor = forwardRef<ChapterEditorHandle, Props>(function Chapte
   }), [value]);
   return <div className={`chapter-live-editor ${readOnly ? "readonly" : ""}`}>
     <div ref={background} className="chapter-input-background" aria-hidden="true"><div ref={content} className="chapter-input-background-content">{nodes}{"\n"}</div></div>
-    <textarea ref={input} className="chapter-input-text" aria-label="章节正文" value={normalized.value} readOnly={readOnly} onChange={(event) => onChange(preserveTextareaEdit(value, event.target.value))} onScroll={sync} spellCheck={false} wrap="soft" autoCapitalize="off" autoComplete="off" autoCorrect="off" />
+    <textarea ref={input} className="chapter-input-text" aria-label="章节正文" placeholder={placeholder} value={normalized.value} readOnly={readOnly} onChange={(event) => onChange(preserveTextareaEdit(value, event.target.value))} onScroll={sync} spellCheck={false} wrap="soft" autoCapitalize="off" autoComplete="off" autoCorrect="off" />
   </div>;
 });
 export default ChapterTextEditor;

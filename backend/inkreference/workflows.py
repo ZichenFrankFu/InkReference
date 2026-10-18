@@ -20,11 +20,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator, TypedDict
 
-from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
-from langgraph.checkpoint.sqlite import SqliteSaver
-from langgraph.graph import END, START, StateGraph
-from langgraph.types import Command, interrupt
-from langsmith.run_helpers import tracing_context
 
 from .database import DataError
 from .skills import build_prompt, validate_result
@@ -117,6 +112,7 @@ class WorkflowRunner:
             db.execute("CREATE TABLE IF NOT EXISTS run_jobs (id TEXT PRIMARY KEY, document_id TEXT NOT NULL, version_id TEXT NOT NULL, workflow_id TEXT NOT NULL, workflow_version TEXT NOT NULL, profile_id TEXT NOT NULL, status TEXT NOT NULL, stage TEXT NOT NULL, total INTEGER NOT NULL, revision INTEGER NOT NULL DEFAULT 1, cancel_requested INTEGER NOT NULL DEFAULT 0, stop_kind TEXT NOT NULL DEFAULT 'cancelled', error TEXT, snapshots_json TEXT NOT NULL, results_json TEXT, materialization_json TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)")
             db.execute("CREATE TABLE IF NOT EXISTS run_chunks (run_id TEXT NOT NULL REFERENCES run_jobs(id) ON DELETE CASCADE, id TEXT NOT NULL, position INTEGER NOT NULL, start INTEGER NOT NULL, end INTEGER NOT NULL, text TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0, round_attempts INTEGER NOT NULL DEFAULT 0, result_json TEXT, error TEXT, PRIMARY KEY(run_id,id))")
             db.execute("CREATE INDEX IF NOT EXISTS run_chunks_order ON run_chunks(run_id,position)")
+            db.execute("CREATE INDEX IF NOT EXISTS run_jobs_document_version ON run_jobs(document_id,version_id,created_at,id)")
             db.execute("CREATE TABLE IF NOT EXISTS run_events (seq INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL REFERENCES run_jobs(id) ON DELETE CASCADE, time TEXT NOT NULL, stage TEXT NOT NULL, message TEXT NOT NULL, chunk_id TEXT)")
             db.execute("CREATE TABLE IF NOT EXISTS run_attempts (run_id TEXT NOT NULL, chunk_id TEXT NOT NULL, attempt INTEGER NOT NULL, status TEXT NOT NULL, input_estimate INTEGER NOT NULL, output_reserve INTEGER NOT NULL, call_id TEXT, content TEXT, usage_json TEXT, error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(run_id,chunk_id,attempt), FOREIGN KEY(run_id,chunk_id) REFERENCES run_chunks(run_id,id) ON DELETE CASCADE)")
 
@@ -284,6 +280,27 @@ class WorkflowRunner:
         with self._db() as db:
             return [self._render(db, row) for row in db.execute("SELECT * FROM run_jobs ORDER BY created_at DESC,id").fetchall()]
 
+    def list_run_summaries(self, *, document_id: str | None = None, version_id: str | None = None,
+                           limit: int = 100, run_id: str | None = None) -> list[dict[str, Any]]:
+        """Read progress without source snapshots, result bodies or per-chunk audit history."""
+        where, parameters = [], []
+        for column, value in (("document_id", document_id), ("version_id", version_id), ("id", run_id)):
+            if value is not None:
+                where.append(f"j.{column}=?")
+                parameters.append(value)
+        clause = " WHERE " + " AND ".join(where) if where else ""
+        parameters.append(limit)
+        with self._db() as db:
+            rows = db.execute("SELECT j.id,j.document_id,j.version_id,j.workflow_id,j.workflow_version,j.profile_id,"
+                              "j.status,j.stage,j.total,j.revision,j.error,j.created_at,j.updated_at,"
+                              "(SELECT COUNT(*) FROM run_chunks c WHERE c.run_id=j.id AND c.status='completed') AS completed "
+                              "FROM run_jobs j" + clause + " ORDER BY j.created_at DESC,j.id LIMIT ?", parameters).fetchall()
+            return [dict(row) | {"progress": row["completed"] / row["total"] if row["total"] else 0.0} for row in rows]
+
+    def has_active_runs(self) -> bool:
+        with self._db() as db:
+            return db.execute("SELECT 1 FROM run_jobs WHERE status IN ('queued','running','cancelling','approving') LIMIT 1").fetchone() is not None
+
     def chunk_prompt(self, run_id: str, chunk_id: str) -> dict[str, Any]:
         with self._db() as db:
             row = self._job(db, run_id)
@@ -370,6 +387,8 @@ class WorkflowRunner:
         return self.get_run(run_id)
 
     def _execute_chunk_owned(self, run_id: str, position: int) -> None:
+        from langgraph.graph import END, START, StateGraph
+        from langsmith.run_helpers import tracing_context
         try:
             run = self.get_run(run_id)
             self._audit_plan(run)
@@ -537,7 +556,8 @@ class WorkflowRunner:
             if worker is not threading.current_thread():
                 worker.join(max(0, deadline - time.monotonic()))
 
-    def _graph(self, saver: SqliteSaver) -> Any:
+    def _graph(self, saver: Any) -> Any:
+        from langgraph.graph import END, START, StateGraph
         graph = StateGraph(RunState)
         for name, node in (("prepare", self._prepare), ("extract", self._extract), ("validate", self._validate), ("advance", self._advance), ("pause", self._pause), ("review", self._review)):
             graph.add_node(name, node)
@@ -551,6 +571,10 @@ class WorkflowRunner:
         return graph.compile(checkpointer=saver, name="inkreference_reference_extraction")
 
     def _execute_owned(self, run_id: str) -> None:
+        from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
+        from langgraph.checkpoint.sqlite import SqliteSaver
+        from langgraph.types import Command
+        from langsmith.run_helpers import tracing_context
         key = self._key(run_id)
         try:
             run = self.get_run(run_id)
@@ -799,10 +823,12 @@ class WorkflowRunner:
         return {"cursor": cursor, "stop_reason": stop, "pending_error": "", "outcome": "", "raw_result": None}
 
     def _pause(self, state: RunState) -> RunState:
+        from langgraph.types import interrupt
         interrupt({"type": "execution_paused", "run_id": state["run_id"], "reason": state.get("stop_reason"), "error": state.get("pending_error", "")})
         return {"stop_reason": "", "pending_error": "", "raw_result": None, "outcome": ""}
 
     def _review(self, state: RunState) -> RunState:
+        from langgraph.types import interrupt
         with self._db(write=True) as db:
             row = self._job(db, state["run_id"])
             if self._next_cursor(db, state["run_id"]) != -1:

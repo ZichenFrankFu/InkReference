@@ -61,6 +61,7 @@ class ChapterEdit(BaseModel):
     base_version_id: str = Field(min_length=1, max_length=200)
     chapter_id: str = Field(min_length=1, max_length=200)
     body_text: str
+    title: str | None = Field(default=None, max_length=500)
 
 
 class ChapterSlice(BaseModel):
@@ -155,23 +156,55 @@ class ReferenceImport(ReferenceRevision):
 
 class Studio:
     def __init__(self, runtime):
-        from .workflows import WorkflowRunner
         self.lock = threading.RLock()
-        self.documents = DocumentStore(runtime.data_dir)
-        self.volumes = VolumeStore(runtime.data_dir, self.documents)
-        self.reference = ReferenceAnalysisStore(runtime.data_dir, documents=self.documents)
-        self.models = ModelService(runtime.data_dir)
-        self.skills = SkillStore(runtime.data_dir)
-        self.workflows = WorkflowStore(runtime.data_dir)
-        self.projects = ProjectStore(runtime.data_dir)
         self.data_dir = runtime.data_dir
-        self._conversions = None
-        self._ingestions = None
-        self.runner = WorkflowRunner(
-            runtime.data_dir, documents=self.documents, models=self.models,
-            skills=self.skills, workflows=self.workflows,
-            materializer=Materializer(runtime.store, self.documents),
-        )
+        self._runtime = runtime
+        self.documents = DocumentStore(self.data_dir)
+        self._volumes = self._reference = self._models = None
+        self._skills = self._workflows = self._projects = self._runner = None
+        self._conversions = self._ingestions = None
+
+    def _service(self, name, factory):
+        with self.lock:
+            attribute = "_" + name
+            instance = getattr(self, attribute)
+            if instance is None:
+                instance = factory()
+                setattr(self, attribute, instance)
+            return instance
+
+    @property
+    def volumes(self):
+        return self._service("volumes", lambda: VolumeStore(self.data_dir, self.documents))
+
+    @property
+    def reference(self):
+        return self._service("reference", lambda: ReferenceAnalysisStore(self.data_dir, documents=self.documents))
+
+    @property
+    def models(self):
+        return self._service("models", lambda: ModelService(self.data_dir))
+
+    @property
+    def skills(self):
+        return self._service("skills", lambda: SkillStore(self.data_dir))
+
+    @property
+    def workflows(self):
+        return self._service("workflows", lambda: WorkflowStore(self.data_dir))
+
+    @property
+    def projects(self):
+        return self._service("projects", lambda: ProjectStore(self.data_dir))
+
+    @property
+    def runner(self):
+        def create():
+            from .workflows import WorkflowRunner
+            return WorkflowRunner(self.data_dir, documents=self.documents, models=self.models,
+                                  skills=self.skills, workflows=self.workflows,
+                                  materializer=Materializer(self._runtime.store, self.documents))
+        return self._service("runner", create)
 
     @property
     def conversions(self):
@@ -190,7 +223,7 @@ class Studio:
             return self._ingestions
 
     def active_threads(self) -> list[threading.Thread]:
-        workers = self.runner.active_threads()
+        workers = self._runner.active_threads() if self._runner is not None else []
         if self._ingestions is not None:
             workers += self._ingestions.active_threads()
         if self._conversions is not None:
@@ -200,7 +233,7 @@ class Studio:
     def require_idle(self):
         if self._ingestions is not None and any(item["status"] in {"queued", "running"} for item in self.ingestions.list()):
             raise DataError(409, "请先完成或取消正在处理的全文上传，再导出项目。")
-        if any(run["status"] in {"queued", "running", "cancelling", "approving"} for run in self.runner.list_runs()):
+        if self.runner.has_active_runs():
             raise DataError(409, "请先暂停或完成正在运行的分析，再导出项目。")
         if any(item["status"] in {"queued", "running"} for item in self.conversions.list()):
             raise DataError(409, "请先完成或取消格式转换，再导出项目。")
@@ -289,18 +322,12 @@ def install_studio_routes(application, runtime):
         return runtime.studio.documents.get_document(document_id)
 
     @router.get("/documents/{document_id}/versions/{version_id}")
-    def version(document_id: str, version_id: str, include_text: bool = True):
-        result = runtime.studio.documents.get_version(document_id, version_id)
+    def version(document_id: str, version_id: str, include_text: bool = True, summary: bool = False):
+        if summary:
+            return runtime.studio.documents.get_version_summary(document_id, version_id)
         if not include_text:
-            result = dict(result)
-            result["characters"] = len(result["text"])
-            result.pop("text", None)
-            result.pop("source_text", None)
-            result.pop("diff", None)
-            # Span metadata suffices for navigation; original text is paged.
-            for key in ("chapters", "chunks"):
-                result[key] = [{k: v for k, v in item.items() if k not in {"text", "content"}} for item in result.get(key, [])]
-        return result
+            return runtime.studio.documents.get_version_navigation(document_id, version_id)
+        return runtime.studio.documents.get_version(document_id, version_id)
 
     @router.get("/documents/{document_id}/versions/{version_id}/text")
     def text(document_id: str, version_id: str, start: Annotated[int, Query(ge=0)] = 0, limit: Annotated[int, Query(ge=1, le=100000)] = 20000, kind: str = "cleaned"):
@@ -348,61 +375,72 @@ def install_studio_routes(application, runtime):
         return runtime.studio.documents.chapter_index(document_id, version_id)
 
     @router.get("/documents/{document_id}/versions/{version_id}/findings")
-    def findings(document_id: str, version_id: str):
-        return runtime.studio.documents.findings(document_id, version_id)
+    def findings(document_id: str, version_id: str, chapter_id: str | None = None,
+                 offset: Annotated[int, Query(ge=0)] = 0, limit: Annotated[int | None, Query(ge=1, le=10000)] = None):
+        return runtime.studio.documents.findings(document_id, version_id, chapter_id=chapter_id, start=offset, limit=limit)
 
     @router.get("/documents/{document_id}/versions/{version_id}/chapters/{chapter_id}")
     def chapter(document_id: str, version_id: str, chapter_id: str,
-                start: Annotated[int, Query(ge=0)] = 0, limit: Annotated[int, Query(ge=1, le=100000)] = 20000):
-        return runtime.studio.documents.get_chapter(document_id, version_id, chapter_id, start=start, limit=limit)
+                start: Annotated[int, Query(ge=0)] = 0, limit: Annotated[int, Query(ge=1, le=100000)] = 20000,
+                body_only: bool = False):
+        return runtime.studio.documents.get_chapter(document_id, version_id, chapter_id, start=start, limit=limit, body_only=body_only)
 
     @router.post("/documents/{document_id}/chapters/edit", status_code=201)
-    def edit_chapter(document_id: str, body: ChapterEdit):
+    def edit_chapter(document_id: str, body: ChapterEdit, summary: bool = False):
         with runtime.studio.lock:
-            return runtime.studio.documents.edit_chapter(document_id, body.base_version_id, body.chapter_id, body.body_text)
+            result = runtime.studio.documents.edit_chapter(document_id, body.base_version_id, body.chapter_id, body.body_text, title=body.title)
+            return runtime.studio.documents.version_summary(result) if summary else result
 
     @router.post("/documents/{document_id}/chapters/edit-slice", status_code=201)
-    def edit_chapter_slice(document_id: str, body: ChapterSlice):
+    def edit_chapter_slice(document_id: str, body: ChapterSlice, summary: bool = False):
         with runtime.studio.lock:
-            return runtime.studio.documents.edit_chapter_slice(document_id, body.base_version_id, body.chapter_id,
+            result = runtime.studio.documents.edit_chapter_slice(document_id, body.base_version_id, body.chapter_id,
                 body.start, body.end, body.text, body.expected_text)
+            return runtime.studio.documents.version_summary(result) if summary else result
 
     @router.post("/documents/{document_id}/chapters/resegment", status_code=201)
-    def resegment(document_id: str, body: ChapterAction):
+    def resegment(document_id: str, body: ChapterAction, summary: bool = False):
         with runtime.studio.lock:
-            return runtime.studio.documents.resegment(document_id, body.base_version_id, body.heading_formats, body.custom_formats)
+            result = runtime.studio.documents.resegment(document_id, body.base_version_id, body.heading_formats, body.custom_formats)
+            return runtime.studio.documents.version_summary(result) if summary else result
 
     @router.post("/documents/{document_id}/chapters/clean", status_code=201)
-    def clean_chapters(document_id: str, body: ChapterAction):
+    def clean_chapters(document_id: str, body: ChapterAction, summary: bool = False):
         with runtime.studio.lock:
-            return runtime.studio.documents.apply_chapter_cleaning(document_id, body.base_version_id, body.selections)
+            result = runtime.studio.documents.apply_chapter_cleaning(document_id, body.base_version_id, body.selections)
+            return runtime.studio.documents.version_summary(result) if summary else result
 
     @router.post("/documents/{document_id}/chapters/rename", status_code=201)
-    def rename_chapter(document_id: str, body: ChapterAction):
+    def rename_chapter(document_id: str, body: ChapterAction, summary: bool = False):
         with runtime.studio.lock:
-            return runtime.studio.documents.rename_chapter(document_id, body.base_version_id, body.chapter_id, body.title)
+            result = runtime.studio.documents.rename_chapter(document_id, body.base_version_id, body.chapter_id, body.title)
+            return runtime.studio.documents.version_summary(result) if summary else result
 
     @router.post("/documents/{document_id}/chapters/insert", status_code=201)
-    def insert_chapter(document_id: str, body: ChapterAction):
+    def insert_chapter(document_id: str, body: ChapterAction, summary: bool = False):
         with runtime.studio.lock:
-            return runtime.studio.documents.insert_chapter(document_id, body.base_version_id, body.after_chapter_id, body.heading, body.body_text)
+            result = runtime.studio.documents.insert_chapter(document_id, body.base_version_id, body.after_chapter_id, body.heading or body.title, body.body_text)
+            return runtime.studio.documents.version_summary(result) if summary else result
 
     @router.post("/documents/{document_id}/chapters/delete", status_code=201)
-    def delete_chapters(document_id: str, body: ChapterAction):
+    def delete_chapters(document_id: str, body: ChapterAction, summary: bool = False):
         with runtime.studio.lock:
-            return runtime.studio.documents.delete_chapters(document_id, body.base_version_id, body.chapter_ids)
+            result = runtime.studio.documents.delete_chapters(document_id, body.base_version_id, body.chapter_ids)
+            return runtime.studio.documents.version_summary(result) if summary else result
 
     @router.post("/documents/{document_id}/chapters/restore", status_code=201)
-    def restore_version(document_id: str, body: ChapterAction):
+    def restore_version(document_id: str, body: ChapterAction, summary: bool = False):
         if not body.target_version_id:
             raise DataError(422, "请选择要恢复的全文版本。")
         with runtime.studio.lock:
-            return runtime.studio.documents.restore_version(document_id, body.base_version_id, body.target_version_id)
+            result = runtime.studio.documents.restore_version(document_id, body.base_version_id, body.target_version_id)
+            return runtime.studio.documents.version_summary(result) if summary else result
 
     @router.post("/documents/{document_id}/chapters/settings", status_code=201)
-    def chapter_settings(document_id: str, body: ChapterAction):
+    def chapter_settings(document_id: str, body: ChapterAction, summary: bool = False):
         with runtime.studio.lock:
-            return runtime.studio.documents.update_preprocess_settings(document_id, body.base_version_id, author_keywords=body.author_keywords, garble_rules=body.garble_rules)
+            result = runtime.studio.documents.update_preprocess_settings(document_id, body.base_version_id, author_keywords=body.author_keywords, garble_rules=body.garble_rules)
+            return runtime.studio.documents.version_summary(result) if summary else result
 
     @router.get("/documents/{document_id}/versions/{version_id}/volumes")
     def volumes(document_id: str, version_id: str):
@@ -433,13 +471,26 @@ def install_studio_routes(application, runtime):
         return runtime.studio.volumes.model_detect(document_id, version_id, runtime.studio.models, **body.model_dump())
 
     @router.get("/documents/{document_id}/versions/{version_id}/download")
-    def cleaned(document_id: str, version_id: str):
+    def cleaned(document_id: str, version_id: str, format: str = "raw"):
+        if format not in {"raw", "clean"}:
+            raise DataError(422, "导出格式请选择 raw 或 clean。")
+        if format == "clean":
+            text = runtime.studio.documents.formatted_export(document_id, version_id)
+            return _file_response(text.encode("utf-8-sig"), f"cleaned-{version_id[:8]}.txt", "text/plain; charset=utf-8")
         result = runtime.studio.documents.get_version(document_id, version_id)
         return _file_response(result["text"].encode("utf-8-sig"), f"cleaned-{version_id[:8]}.txt", "text/plain; charset=utf-8")
 
     @router.get("/jobs")
-    def jobs():
-        return {"items": runtime.studio.runner.list_runs()}
+    def jobs(summary: bool = False, document_id: str | None = None, version_id: str | None = None,
+             limit: Annotated[int | None, Query(ge=1, le=1000)] = None):
+        if summary:
+            return {"items": runtime.studio.runner.list_run_summaries(document_id=document_id, version_id=version_id, limit=limit or 100)}
+        items = runtime.studio.runner.list_runs()
+        if document_id is not None:
+            items = [item for item in items if item["document_id"] == document_id]
+        if version_id is not None:
+            items = [item for item in items if item["version_id"] == version_id]
+        return {"items": items[:limit] if limit is not None else items}
 
     @router.get("/documents/{document_id}/reference")
     def reference(document_id: str):
@@ -506,7 +557,12 @@ def install_studio_routes(application, runtime):
             return runtime.studio.runner.start(result["id"], remote_consent=body.remote_consent) if body.start and not body.manual else result
 
     @router.get("/jobs/{run_id}")
-    def job(run_id: str):
+    def job(run_id: str, summary: bool = False):
+        if summary:
+            items = runtime.studio.runner.list_run_summaries(run_id=run_id, limit=1)
+            if not items:
+                raise DataError(404, "提取任务不存在")
+            return items[0]
         return runtime.studio.runner.get_run(run_id)
 
     @router.get("/jobs/{run_id}/chunks/{chunk_id}/prompt")

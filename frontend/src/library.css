@@ -7,7 +7,7 @@
 .studio-app .library-workspace .page-heading h1 { margin: 0; font-size: 27px; letter-spacing: -.6px; }
 .studio-app .library-workspace .page-heading .eyebrow { margin-bottom: 10px; }
 .studio-app .library-workspace .heading-create { flex-shrink: 0; }
-.studio-app .library-workspace .stats-grid { grid-template-columns: repeat(4,minmax(0,1fr)); gap: 12px; margin-bottom: 24px; }
+.studio-app .library-workspace .stats-grid { grid-template-columns: repeat(3,minmax(0,1fr)); gap: 12px; margin-bottom: 24px; }
 .studio-app .library-workspace .stat-card { min-width: 0; min-height: 100px; padding: 18px 16px; gap: 8px; }
 .studio-app .library-workspace .stat-card > div { min-width: 0; }
 .studio-app .library-workspace .stat-card > div > span { white-space: normal; line-height: 1.5; font-size: 12px; }
@@ -145,9 +145,9 @@
 @container library (max-width: 560px) {
   .studio-app .library-workspace .main-content { padding: 24px 15px; }
   .studio-app .library-workspace .page-heading h1 { font-size: 25px; }
-  .studio-app .library-workspace .stats-grid { grid-template-columns: repeat(2,minmax(0,1fr)); margin-bottom: 18px; }
-  .studio-app .library-workspace .stat-icon { display: flex; }
-  .studio-app .library-workspace .stat-card { min-height: 85px; padding: 14px; }
+  .studio-app .library-workspace .stats-grid { grid-template-columns: repeat(3,minmax(0,1fr)); margin-bottom: 18px; }
+  .studio-app .library-workspace .stat-card { min-height: 82px; padding: 12px 10px; }
+  .studio-app .library-workspace .stat-card strong { font-size: 23px; }
   .studio-app .library-workspace .list-toolbar { padding: 16px; }
   .studio-app .library-workspace .search-box { flex-basis: 100%; }
   .studio-app .library-workspace .toolbar-import,

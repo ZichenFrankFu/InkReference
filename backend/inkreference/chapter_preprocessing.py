@@ -16,6 +16,7 @@ from typing import Any, Callable
 import regex
 
 from .database import DataError
+from .chapter_layout import chapter_label, chapter_sequence
 from .text_processing import diagnose_text
 
 AUTHOR_KEYWORDS = [
@@ -189,40 +190,56 @@ def chapter_proposals(chapter: dict[str, Any], options: dict[str, Any]) -> list[
 
 
 def annotate_chapters(chapters: list[dict[str, Any]], options: dict[str, Any],
-                      progress: Callable[[int, int], None] | None = None) -> list[dict[str, Any]]:
-    lengths = [len(chapter["content"].strip()) for chapter in chapters if chapter["kind"] == "chapter"]
-    median = statistics.median(lengths) if lengths else 0
-    seen = Counter((chapter.get("pattern"), chapter.get("number")) for chapter in chapters
-                   if chapter.get("number") is not None and chapter["kind"] == "chapter")
-    last_number: dict[str, int] = {}
-    gaps = []
+                      progress: Callable[[int, int], None] | None = None,
+                      proposals_by_id: dict[str, list[dict[str, Any]]] | None = None) -> list[dict[str, Any]]:
+    """Annotate structure, reusing exact-version proposal scans when supplied.
+
+    Callers must invalidate changed chapter IDs and all entries after settings
+    changes. The mapping is populated for uncached chapters, making an edit cost
+    one chapter scan rather than repeatedly rescanning a whole novel.
+    """
+    cached_ids = set(proposals_by_id or {})
     for index, chapter in enumerate(chapters):
-        proposals = chapter_proposals(chapter, options)
+        identifier = chapter.get("id", f"chapter-{index + 1}")
+        cached_scan = identifier in cached_ids
+        # Editing copies metadata before invalidating that chapter's scan. The
+        # cache membership, rather than a metadata key alone, proves validity.
+        if not cached_scan or not isinstance(chapter.get("body_length"), int):
+            chapter["body_length"] = len(chapter["content"].strip())
+        if not cached_scan or not isinstance(chapter.get("char_count"), int):
+            chapter["char_count"] = sum(not c.isspace() for c in chapter["content"])
+    lengths = [chapter["body_length"] for chapter in chapters if chapter["kind"] == "chapter"]
+    median = statistics.median(lengths) if lengths else 0
+    structure = chapter_sequence(chapters)
+    gaps = structure["gaps"]
+    gaps_by_id = {gap["before_chapter_id"]: gap for gap in gaps}
+    for index, chapter in enumerate(chapters):
+        identifier = chapter.get("id", f"chapter-{index + 1}")
+        if proposals_by_id is not None and identifier in proposals_by_id:
+            proposals = proposals_by_id[identifier]
+        else:
+            proposals = chapter_proposals(chapter, options)
+            if proposals_by_id is not None:
+                proposals_by_id[identifier] = proposals
         counts = Counter(proposal["kind"] for proposal in proposals)
-        chapter.update(index=index, char_count=sum(not c.isspace() for c in chapter["content"]),
+        chapter.update(index=index,
+                       display_label=chapter_label(chapter),
                        proposal_count=sum(p["removable"] for p in proposals),
                        proposal_ids=[p["id"] for p in proposals if p["removable"]],
                        enabled_proposal_ids=[p["id"] for p in proposals if p["removable"] and p["enabled"]])
         issues = [{"kind": kind, "label": _LABELS[kind], "count": count,
                    "severity": "warning" if kind in {"author_note", "noise"} else "error"}
                   for kind, count in counts.items()]
-        size = len(chapter["content"].strip())
+        size = chapter["body_length"]
         if chapter["kind"] == "chapter" and median > 0 and (size < median * 0.3 or size > median * 3):
             issues.append({"kind": "length", "label": "篇幅过短" if size < median else "篇幅过长", "count": 1, "severity": "warning"})
-        pattern, number = chapter.get("pattern"), chapter.get("number")
-        if number is not None and pattern and chapter["kind"] == "chapter":
-            if seen[(pattern, number)] > 1:
-                issues.append({"kind": "duplicate", "label": "章节重号", "count": 1, "severity": "warning"})
-            previous = last_number.get(pattern)
-            if previous is not None and number - previous > 1:
-                gap = {"before_chapter_id": chapter["id"], "after_number": previous,
-                       "before_number": number, "expected_next": previous + 1,
-                       "missing_numbers": list(range(previous + 1, min(number, previous + 9))),
-                       "missing_count": number - previous - 1, "pattern": pattern}
-                gaps.append(gap)
-                issues.append({"kind": "gap", "label": f"缺 {number - previous - 1} 章", "count": number - previous - 1, "severity": "warning"})
-            last_number[pattern] = number
+        if identifier in structure["duplicates"]:
+            issues.append({"kind": "duplicate", "label": "章节重号", "count": 1, "severity": "warning"})
+        gap = gaps_by_id.get(identifier)
+        if gap:
+            issues.append({"kind": "gap", "label": f"缺 {gap['missing_count']} 章", "count": gap["missing_count"], "severity": "warning"})
         chapter["issues"] = issues
+        chapter["issue_count"] = int(bool(issues))
         if progress:
             progress(index + 1, len(chapters))
     return gaps

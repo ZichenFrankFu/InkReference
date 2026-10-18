@@ -28,6 +28,7 @@ from urllib.parse import unquote, urlsplit
 from xml.etree import ElementTree as ET
 
 from .database import DataError
+from .chapter_layout import chapter_label, chapter_body_span, expand_missing_chapters, normalize_chapter_body, normalize_document_chapter_bodies
 from .chapter_preprocessing import AUTHOR_KEYWORDS, annotate_chapters, chapter_proposals, validate_settings
 from .text_processing import analyze_text, chunk_text, diagnose_text
 
@@ -39,7 +40,8 @@ SUPPORTED_FORMATS = {".txt", ".md", ".srt", ".docx", ".epub"}
 ENCODING_CHOICES = ["utf-8", "gb18030", "utf-16-le", "utf-16-be", "big5"]
 # Use the stored exact codepoint count, rather than SQLite length(text), which
 # stops at a literal NUL. This does not fetch original BLOBs or full version text.
-_CURRENT_CHARACTERS_SQL = ("COALESCE((SELECT CAST(json_extract(payload_json,'$.coverage.characters') AS INTEGER) "
+_CURRENT_CHARACTERS_SQL = ("COALESCE((SELECT characters FROM doc_version_views WHERE version_id=doc_documents.latest_version_id), "
+                           "(SELECT CAST(json_extract(payload_json,'$.coverage.characters') AS INTEGER) "
                            "FROM doc_versions WHERE id=doc_documents.latest_version_id),length(source_text))")
 _META_COLUMNS = ("id,filename,title,work_id,format,encoding,original_sha256,latest_version_id,created_at,"
                  "length(original) AS original_bytes,length(source_text) AS source_characters,"
@@ -308,8 +310,64 @@ def _options(options: Any) -> dict[str, Any]:
     return validate_settings(result)
 
 
+def _display_diff(previous: str, text: str) -> tuple[str, bool]:
+    """Bound review-only diffs; never run a quadratic matcher on an entire book."""
+    if previous == text:
+        return "", False
+    before, after = previous.splitlines(keepends=True), text.splitlines(keepends=True)
+    prefix = 0
+    shared = min(len(before), len(after))
+    while prefix < shared and before[prefix] == after[prefix]:
+        prefix += 1
+    suffix = 0
+    while suffix < shared - prefix and before[-suffix - 1] == after[-suffix - 1]:
+        suffix += 1
+    begin = max(0, prefix - 2)
+    old_end = len(before) - max(0, suffix - 2)
+    new_end = len(after) - max(0, suffix - 2)
+    old, new = before[begin:old_end], after[begin:new_end]
+    # Exact texts and immutable history remain available independently of this
+    # bounded display. Very broad edits receive a visibly truncated preview.
+    if len(old) + len(new) > 4000 or sum(map(len, old)) + sum(map(len, new)) > 200000:
+        rendered = "--- base\n+++ cleaned\n@@ large change; review full version @@\n" + "".join("-" + line for line in old[:20]) + "".join("+" + line for line in new[:20])
+        return rendered[:200000], True
+    rendered = "".join(difflib.unified_diff(old, new, fromfile="base", tofile="cleaned", n=2))
+    return rendered[:200000], len(rendered) > 200000
+
+
+def _without_ranges(text: str, ranges: list[tuple[int, int]]) -> str:
+    """Copy retained spans once, including when thousands of marks are selected."""
+    pieces = []
+    cursor = 0
+    for start, end in sorted(ranges):
+        if start >= cursor:
+            pieces.append(text[cursor:start])
+        cursor = max(cursor, end)
+    pieces.append(text[cursor:])
+    return "".join(pieces)
+
+
+def _normalized_slice(text: str, source_start: int) -> tuple[str, list[int]]:
+    """Map body presentation codepoints back to the unchanged version span."""
+    newline_run = re.compile(r"((?>\r\n|\r|\n))(?:[ \t\u3000]*(?>\r\n|\r|\n))+")
+    parts: list[str] = []
+    mapping: list[int] = []
+    cursor = 0
+    for match in newline_run.finditer(text):
+        parts.append(text[cursor:match.start()])
+        mapping.extend(range(source_start + cursor, source_start + match.start()))
+        keep = match.group(1)
+        parts.append(keep)
+        mapping.extend(range(source_start + match.start(), source_start + match.start() + len(keep)))
+        cursor = match.end()
+    parts.append(text[cursor:])
+    mapping.extend(range(source_start + cursor, source_start + len(text)))
+    mapping.append(source_start + len(text))
+    return "".join(parts), mapping
+
+
 def _prepare(source: str, previous: str, options: dict[str, Any], *, normalize: bool = True,
-             progress: Callable[[str, int, int], None] | None = None) -> dict[str, Any]:
+             normalize_layout: bool = False, progress: Callable[[str, int, int], None] | None = None) -> dict[str, Any]:
     if progress:
         progress("chapter_parse", 0, 1)
     if normalize:
@@ -322,6 +380,18 @@ def _prepare(source: str, previous: str, options: dict[str, Any], *, normalize: 
                   "diagnostics": diagnose_text(source), "transformations": [],
                   "chapter_analysis": split_chapters(source, fallback_chars=options["fallback_chars"],
                        heading_formats=options.get("heading_formats"), custom_formats=options.get("custom_formats"))}
+    if normalize_layout:
+        normalized = normalize_document_chapter_bodies(result["cleaned_text"], result["chapter_analysis"]["chapters"])
+        if normalized != result["cleaned_text"]:
+            from .text_processing import split_chapters
+            result["transformations"].append({"stage": "body_layout", "count": 1,
+                                                "input_characters": len(result["cleaned_text"]),
+                                                "output_characters": len(normalized)})
+            result["cleaned_text"] = normalized
+            result["cleaned_sha256"] = _sha(normalized.encode())
+            result["diagnostics"] = diagnose_text(normalized)
+            result["chapter_analysis"] = split_chapters(normalized, fallback_chars=options["fallback_chars"],
+                heading_formats=options.get("heading_formats"), custom_formats=options.get("custom_formats"))
     if progress:
         progress("chapter_parse", 1, 1)
     text = result["cleaned_text"]
@@ -336,7 +406,8 @@ def _prepare(source: str, previous: str, options: dict[str, Any], *, normalize: 
                            "end": chapter["start"] + chunk["end"],
                            "id": f"{chapter['id']}-chunk-{index + 1}", "chapter_id": chapter["id"],
                            "chapter_index": chapter_index})
-    gaps = annotate_chapters(chapters, options,
+    proposals_by_id: dict[str, list[dict[str, Any]]] = {}
+    gaps = annotate_chapters(chapters, options, proposals_by_id=proposals_by_id,
                              progress=(lambda completed, total: progress("scan", completed, total)) if progress else None)
     reconstructed = "".join(chunk["text"] for chunk in chunks)
     coverage = {**result["chapter_analysis"]["coverage"],
@@ -344,19 +415,16 @@ def _prepare(source: str, previous: str, options: dict[str, Any], *, normalize: 
                 "chunk_count": len(chunks), "chapter_count": len(chapters)}
     if not coverage["complete"] or not coverage["chunks_complete"]:
         raise DataError(500, "章节或分块覆盖检查失败，未保存不完整版本")
-    diff_lines = list(difflib.unified_diff(previous.splitlines(keepends=True), text.splitlines(keepends=True),
-                                         fromfile="base", tofile="cleaned", n=2))
-    # The full texts remain queryable; cap display-only diff, never source data.
-    diff = "".join(diff_lines)
+    diff, diff_truncated = _display_diff(previous, text)
     return {"text": text, "sha256": result["cleaned_sha256"], "chapters": chapters,
             "chunks": chunks, "diagnostics": result["diagnostics"],
             "source_diagnostics": diagnose_text(source), "changes": result["transformations"],
-            "diff": diff[:200000], "diff_truncated": len(diff) > 200000,
+            "diff": diff, "diff_truncated": diff_truncated,
             "coverage": coverage, "pattern": result["chapter_analysis"]["pattern"],
             "fallback_used": result["chapter_analysis"]["fallback_used"],
             "heading_formats": result["chapter_analysis"]["heading_formats"],
             "candidates": result["chapter_analysis"]["candidates"], "gaps": gaps,
-            "options": options}
+            "options": options, "_review_proposals": proposals_by_id}
 
 
 class DocumentStore:
@@ -367,6 +435,7 @@ class DocumentStore:
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.db_path = self.data_dir / "workbench.sqlite3"
         with self._connection() as connection:
+            connection.execute("PRAGMA journal_mode=WAL")
             connection.executescript("""
                 CREATE TABLE IF NOT EXISTS doc_documents (
                     id TEXT PRIMARY KEY, filename TEXT NOT NULL, title TEXT NOT NULL,
@@ -393,6 +462,20 @@ class DocumentStore:
                 BEGIN SELECT RAISE(ABORT, 'document source is immutable'); END;
                 CREATE INDEX IF NOT EXISTS doc_sources_document ON doc_sources(document_id,created_at);
                 CREATE INDEX IF NOT EXISTS doc_versions_document ON doc_versions(document_id,version_number);
+                CREATE TABLE IF NOT EXISTS doc_version_views (
+                    version_id TEXT PRIMARY KEY REFERENCES doc_versions(id) ON DELETE CASCADE,
+                    document_id TEXT NOT NULL, characters INTEGER NOT NULL,
+                    summary_json TEXT NOT NULL, index_json TEXT NOT NULL, navigation_json TEXT NOT NULL,
+                    layout_version INTEGER NOT NULL DEFAULT 3
+                );
+                CREATE TABLE IF NOT EXISTS doc_chapter_views (
+                    version_id TEXT NOT NULL REFERENCES doc_versions(id) ON DELETE CASCADE,
+                    chapter_id TEXT NOT NULL, chapter_order INTEGER NOT NULL,
+                    metadata_json TEXT NOT NULL, text TEXT NOT NULL,
+                    proposals_json TEXT NOT NULL, diagnostics_json TEXT NOT NULL,
+                    PRIMARY KEY(version_id,chapter_id)
+                );
+                CREATE INDEX IF NOT EXISTS doc_chapter_views_version ON doc_chapter_views(version_id,chapter_order);
                 CREATE TABLE IF NOT EXISTS doc_ingestions (
                     key TEXT PRIMARY KEY, document_id TEXT NOT NULL REFERENCES doc_documents(id)
                 );
@@ -439,7 +522,7 @@ class DocumentStore:
 
     def upload(self, filename: str, raw: bytes, encoding: str = "auto", title: str = "",
                work_id: str | None = None, *, idempotency_key: str | None = None,
-               converted_text: str | None = None, preserve_text: bool = False,
+               converted_text: str | None = None, preserve_text: bool = False, normalize_layout: bool = False,
                progress: Callable[[str, int, int], None] | None = None) -> dict[str, Any]:
         if not isinstance(filename, str) or not filename or len(filename) > 255 or re.search(r"[\x00-\x1f]", filename):
             raise DataError(422, "文件名无效")
@@ -470,7 +553,7 @@ class DocumentStore:
             source, used_encoding = _decode(raw, encoding)
         identifier = uuid.uuid4().hex
         now = _now()
-        payload = _prepare(source, source, _options({}), normalize=not preserve_text, progress=progress)
+        payload = _prepare(source, source, _options({}), normalize=not preserve_text, normalize_layout=normalize_layout, progress=progress)
         payload["active_source_ids"] = ["original"]
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -514,12 +597,13 @@ class DocumentStore:
                           "sha256": payload["sha256"], "options": payload["options"],
                           "version_number": number})
         identifier = _sha(identity.encode("utf-8"))
-        version = {**payload, "id": identifier, "document_id": document_id,
+        version = {**{k: v for k, v in payload.items() if not k.startswith("_")}, "id": identifier, "document_id": document_id,
                    "parent_version_id": parent_id, "version_number": number,
                    "source_text": source, "source_sha256": _sha(source.encode("utf-8")),
                    "created_at": now}
         connection.execute("INSERT INTO doc_versions VALUES (?,?,?,?,?,?)",
                            (identifier, document_id, parent_id, number, _json(version), now))
+        DocumentStore._write_views(connection, version, payload.get("_review_proposals"), payload.get("_review_diagnostics"))
         return version
 
     def get_document(self, document_id: str) -> dict[str, Any]:
@@ -535,12 +619,115 @@ class DocumentStore:
 
     def get_version(self, document_id: str, version_id: str | None = None) -> dict[str, Any]:
         with self._connection() as connection:
-            document = self._document(connection, document_id)
+            if version_id is None:
+                document = connection.execute("SELECT latest_version_id FROM doc_documents WHERE id=?", (document_id,)).fetchone()
+                if document is None:
+                    raise DataError(404, "全文文档不存在")
+                version_id = document["latest_version_id"]
             row = connection.execute("SELECT payload_json FROM doc_versions WHERE document_id=? AND id=?",
-                                     (document_id, version_id or document["latest_version_id"])).fetchone()
+                                     (document_id, version_id)).fetchone()
             if row is None:
                 raise DataError(404, "全文版本不存在")
             return json.loads(row["payload_json"])
+
+    @staticmethod
+    def version_summary(version: dict[str, Any]) -> dict[str, Any]:
+        """A navigation response never carries copies of the entire book."""
+        heavy = {"text", "source_text", "chapters", "chunks", "diff", "diagnostics", "source_diagnostics"}
+        result = {key: value for key, value in version.items() if key not in heavy and not key.startswith("_")}
+        result.update(characters=version.get("coverage", {}).get("characters", len(version.get("text", ""))),
+                      chapter_count=version.get("coverage", {}).get("chapter_count", len(version.get("chapters", []))),
+                      diagnostics_count=len(version.get("diagnostics", [])),
+                      source_diagnostics_count=len(version.get("source_diagnostics", [])),
+                      placeholder_count=sum(gap.get("missing_count", 0) for gap in version.get("gaps", [])))
+        result["issue_chapter_count"] = result["placeholder_count"] + sum(
+            any(issue.get("kind") != "gap" for issue in chapter.get("issues", []))
+            for chapter in version.get("chapters", []))
+        return result
+
+    @staticmethod
+    def _write_views(connection: sqlite3.Connection, version: dict[str, Any],
+                     proposals_by_id: dict[str, list[dict[str, Any]]] | None = None,
+                     diagnostics_by_id: dict[str, list[dict[str, Any]]] | None = None) -> None:
+        """Persist small read models beside immutable analysis snapshots.
+
+        They are derived exclusively from the addressed snapshot. A restored or
+        pre-upgrade project can rebuild them without altering source versions.
+        """
+        options = DocumentStore._version_options(version)
+        chapters = [dict(chapter) for chapter in version.get("chapters", [])]
+        cache = {} if proposals_by_id is None else dict(proposals_by_id)
+        gaps = annotate_chapters(chapters, options, proposals_by_id=cache)
+        expanded = expand_missing_chapters(chapters, gaps=gaps)
+        # The missing chapters already have dedicated presentation items.
+        # Keep authoritative gaps in the snapshot/index metadata while avoiding
+        # a second warning on the real chapter immediately after a gap.
+        for chapter in expanded["chapters"]:
+            if not chapter.get("placeholder"):
+                chapter["issues"] = [issue for issue in chapter.get("issues", []) if issue.get("kind") != "gap"]
+                chapter["issue_count"] = int(bool(chapter["issues"]))
+        index = {"document_id": version["document_id"], "version_id": version["id"],
+                 "pattern": version.get("pattern"), "heading_formats": version.get("heading_formats", []),
+                 "candidates": version.get("candidates", []), "gaps": gaps, "options": options,
+                 "author_keyword_defaults": AUTHOR_KEYWORDS,
+                 "placeholder_count": expanded["placeholder_count"],
+                 "truncated_missing_count": expanded["truncated_missing_count"],
+                 "issue_chapter_count": sum(bool(chapter.get("issues")) for chapter in expanded["chapters"]),
+                 "chapters": [{k: v for k, v in chapter.items() if k not in {"text", "content"}}
+                              for chapter in expanded["chapters"]]}
+        summary = DocumentStore.version_summary(version)
+        summary["placeholder_count"] = sum(gap["missing_count"] for gap in gaps)
+        summary["issue_chapter_count"] = summary["placeholder_count"] + sum(
+            bool(chapter.get("issues")) for chapter in expanded["chapters"] if not chapter.get("placeholder"))
+        navigation = {**summary,
+                      "chapters": [{k: v for k, v in chapter.items() if k not in {"text", "content"}} for chapter in chapters],
+                      "chunks": [{k: v for k, v in chunk.items() if k not in {"text", "content"}}
+                                 for chunk in version.get("chunks", [])],
+                      "diagnostics": version.get("diagnostics", []),
+                      "source_diagnostics": version.get("source_diagnostics", [])}
+        connection.execute("INSERT OR REPLACE INTO doc_version_views VALUES (?,?,?,?,?,?,3)",
+                           (version["id"], version["document_id"], summary["characters"],
+                            _json(summary), _json(index), _json(navigation)))
+        rows = []
+        for order, chapter in enumerate(expanded["chapters"]):
+            metadata = {k: v for k, v in chapter.items() if k not in {"text", "content"}}
+            text = chapter.get("text", "")
+            rows.append((version["id"], chapter["id"], order, _json(metadata), text,
+                         _json(cache.get(chapter["id"], [])), _json(diagnostics_by_id[chapter["id"]] if diagnostics_by_id is not None and chapter["id"] in diagnostics_by_id else diagnose_text(text))))
+        connection.executemany("INSERT OR REPLACE INTO doc_chapter_views VALUES (?,?,?,?,?,?,?)", rows)
+
+    def _view(self, document_id: str, version_id: str | None, column: str) -> dict[str, Any]:
+        if column not in {"summary_json", "index_json", "navigation_json"}:
+            raise ValueError("unsupported read model")
+        with self._connection() as connection:
+            if version_id is None:
+                document = connection.execute("SELECT latest_version_id FROM doc_documents WHERE id=?", (document_id,)).fetchone()
+                if document is None:
+                    raise DataError(404, "全文文档不存在")
+                version_id = document["latest_version_id"]
+            row = connection.execute(f"SELECT {column} FROM doc_version_views WHERE version_id=? AND document_id=? AND layout_version=3",
+                                     (version_id, document_id)).fetchone()
+            if row is None:
+                # Serialize only the one-time lazy rebuild. Recheck after the
+                # lock so simultaneous summary/index reads do not rescan or
+                # contend while upgrading a deferred read transaction.
+                connection.execute("BEGIN IMMEDIATE")
+                concurrent = connection.execute(f"SELECT {column} FROM doc_version_views WHERE version_id=? AND document_id=? AND layout_version=3", (version_id, document_id)).fetchone()
+                if concurrent is not None:
+                    return json.loads(concurrent[column])
+                stored = connection.execute("SELECT payload_json FROM doc_versions WHERE id=? AND document_id=?",
+                                            (version_id, document_id)).fetchone()
+                if stored is None:
+                    raise DataError(404, "全文版本不存在")
+                self._write_views(connection, json.loads(stored["payload_json"]))
+                row = connection.execute(f"SELECT {column} FROM doc_version_views WHERE version_id=?", (version_id,)).fetchone()
+            return json.loads(row[column])
+
+    def get_version_summary(self, document_id: str, version_id: str | None = None) -> dict[str, Any]:
+        return self._view(document_id, version_id, "summary_json")
+
+    def get_version_navigation(self, document_id: str, version_id: str | None = None) -> dict[str, Any]:
+        return self._view(document_id, version_id, "navigation_json")
 
     def create_version(self, document_id: str, base_version_id: str, options: dict[str, Any],
                        manual_text: str | None = None) -> dict[str, Any]:
@@ -590,7 +777,9 @@ class DocumentStore:
         prepared.setdefault("active_source_ids", base.get("active_source_ids", self._active_source_ids(document_id, base)))
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            document = self._document(connection, document_id)
+            document = connection.execute("SELECT latest_version_id FROM doc_documents WHERE id=?", (document_id,)).fetchone()
+            if document is None:
+                raise DataError(404, "全文文档不存在")
             if document["latest_version_id"] != base["id"]:
                 raise DataError(409, "全文已有新版本，请刷新后再保存")
             version = self._insert_version(connection, document_id, base["id"], base["version_number"] + 1,
@@ -610,52 +799,187 @@ class DocumentStore:
         return _options({**base.get("options", {}), **changes})
 
     def chapter_index(self, document_id: str, version_id: str | None = None) -> dict[str, Any]:
-        version = self.get_version(document_id, version_id)
-        options = self._version_options(version)
-        chapters = [dict(chapter) for chapter in version["chapters"]]
-        gaps = annotate_chapters(chapters, options)
-        return {"document_id": document_id, "version_id": version["id"], "pattern": version.get("pattern"),
-                "heading_formats": version.get("heading_formats", []), "candidates": version.get("candidates", []),
-                "gaps": gaps, "options": options, "author_keyword_defaults": AUTHOR_KEYWORDS,
-                "chapters": [{k: v for k, v in chapter.items() if k not in {"text", "content"}} for chapter in chapters]}
+        return self._view(document_id, version_id, "index_json")
 
     def get_chapter(self, document_id: str, version_id: str, chapter_id: str,
-                    start: int = 0, limit: int = 20000) -> dict[str, Any]:
+                    start: int = 0, limit: int = 20000, *, body_only: bool = False) -> dict[str, Any]:
         if isinstance(start, bool) or not isinstance(start, int) or start < 0 or isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100000:
             raise DataError(422, "章节分页范围无效")
-        version = self.get_version(document_id, version_id)
-        chapter = dict(self._chapter(version, chapter_id))
-        text = chapter["text"]
-        body_offset = chapter["body_start"] - chapter["start"]
-        metadata = {k: v for k, v in chapter.items() if k not in {"text", "content"}}
-        return {**metadata, "chapter": metadata, "document_id": document_id, "version_id": version["id"],
-                "text": text[start:start + limit], "start": start, "end": min(start + limit, len(text)),
-                "total": len(text), "body_offset": body_offset, "body_total": len(text) - body_offset,
-                "editable_start": max(start, body_offset), "editable_end": min(start + limit, len(text)),
-                "editable_text": text[max(start, body_offset):min(start + limit, len(text))],
-                "body_text": text[body_offset:] if len(text) - body_offset <= 200000 else None,
-                "proposals": chapter_proposals(chapter, self._version_options(version)),
-                "diagnostics": diagnose_text(text), "offset_unit": "unicode_codepoints"}
+        # Ensure a legacy snapshot is materialized only once. The existence
+        # check is small; body reads do not deserialize the chapter directory.
+        with self._connection() as connection:
+            exists = connection.execute("SELECT 1 FROM doc_version_views WHERE version_id=? AND document_id=? AND layout_version=3", (version_id, document_id)).fetchone()
+        if exists is None:
+            self.get_version_summary(document_id, version_id)
+        with self._connection() as connection:
+            row = connection.execute("SELECT metadata_json,text,proposals_json,diagnostics_json FROM doc_chapter_views WHERE version_id=? AND chapter_id=?", (version_id, chapter_id)).fetchone()
+            if row is None:
+                raise DataError(404, "章节不存在")
+            metadata = json.loads(row["metadata_json"])
+            text = row["text"]
+            body_offset = metadata["body_start"] - metadata["start"]
+            body_start, body_end = chapter_body_span({**metadata, "text": text})
+            response = {**metadata, "chapter": metadata, "document_id": document_id, "version_id": version_id,
+                        "proposals": json.loads(row["proposals_json"]),
+                        "diagnostics": json.loads(row["diagnostics_json"]), "offset_unit": "unicode_codepoints"}
+            if body_only:
+                actual_start = min(body_end, max(start, body_start))
+                actual_end = min(actual_start + limit, body_end)
+                expected = text[actual_start:actual_end]
+                displayed, offsets = _normalized_slice(expected, actual_start)
+                return {**response, "text": displayed, "start": actual_start, "end": actual_end,
+                        "total": body_end, "source_total": len(text), "body_offset": body_start,
+                        "body_total": body_end - body_start, "editable_start": actual_start,
+                        "editable_end": actual_end, "editable_text": displayed, "expected_text": expected,
+                        "body_text": None,
+                        "source_offset_map": offsets, "next_start": actual_end if actual_end < body_end else None,
+                        "body_only": True}
+            return {**response, "text": text[start:start + limit], "start": start,
+                    "end": min(start + limit, len(text)), "total": len(text), "body_offset": body_offset,
+                    "body_total": len(text) - body_offset, "editable_start": max(start, body_offset),
+                    "editable_end": min(start + limit, len(text)),
+                    "editable_text": text[max(start, body_offset):min(start + limit, len(text))],
+                    "body_text": text[body_offset:] if len(text) - body_offset <= 200000 else None}
 
-    def edit_chapter(self, document_id: str, base_version_id: str, chapter_id: str, body_text: str) -> dict[str, Any]:
+    def _assert_current(self, document_id: str, base_version_id: str) -> None:
+        with self._connection() as connection:
+            document = connection.execute("SELECT latest_version_id FROM doc_documents WHERE id=?", (document_id,)).fetchone()
+            if document is None:
+                raise DataError(404, "全文文档不存在")
+            if document["latest_version_id"] != base_version_id:
+                raise DataError(409, "全文已有新版本，请刷新后再保存")
+
+    def _incremental_chapter_edit(self, document_id: str, base: dict[str, Any], chapter: dict[str, Any],
+                                  start: int, end: int, replacement: str) -> dict[str, Any]:
+        """Refresh only the edited chapter; retain downstream chunk identities."""
+        absolute_start, absolute_end = chapter["start"] + start, chapter["start"] + end
+        updated = base["text"][:absolute_start] + replacement + base["text"][absolute_end:]
+        delta = len(replacement) - (end - start)
+        chapters = []
+        changed = None
+        for item in base["chapters"]:
+            current = dict(item)
+            if item["id"] == chapter["id"]:
+                current["text"] = item["text"][:start] + replacement + item["text"][end:]
+                current["content"] = current["text"][current["body_start"] - current["start"]:]
+                current["end"] += delta
+                changed = current
+            elif item["start"] >= chapter["end"]:
+                for field in ("start", "end", "body_start"):
+                    current[field] += delta
+            chapters.append(current)
+        assert changed is not None
+        options = self._version_options(base)
+        # Small precomputed diagnostics do not carry any source text or full
+        # version. Invalidating one chapter keeps unchanged evidence exact.
+        with self._connection() as connection:
+            cached = connection.execute("SELECT chapter_id,proposals_json,diagnostics_json FROM doc_chapter_views WHERE version_id=?", (base["id"],)).fetchall()
+        proposals = {row["chapter_id"]: json.loads(row["proposals_json"]) for row in cached if row["chapter_id"] != chapter["id"]}
+        diagnostics = {row["chapter_id"]: json.loads(row["diagnostics_json"]) for row in cached if row["chapter_id"] != chapter["id"]}
+        diagnostics[chapter["id"]] = diagnose_text(changed["text"])
+        gaps = annotate_chapters(chapters, options, proposals_by_id=proposals)
+        chunks = []
+        changed_index = next(index for index, item in enumerate(chapters) if item["id"] == chapter["id"])
+        for item in base["chunks"]:
+            if item["chapter_id"] == chapter["id"]:
+                continue
+            current = dict(item)
+            if item["start"] >= chapter["end"]:
+                current["start"] += delta
+                current["end"] += delta
+            chunks.append(current)
+        for index, chunk in enumerate(chunk_text(changed["text"], options["chunk_chars"])):
+            chunks.append({**chunk, "start": changed["start"] + chunk["start"],
+                           "end": changed["start"] + chunk["end"],
+                           "id": f"{changed['id']}-chunk-{index + 1}", "chapter_id": changed["id"],
+                           "chapter_index": changed_index})
+        chunks.sort(key=lambda item: item["start"])
+        if "".join(item["text"] for item in chapters) != updated or "".join(item["text"] for item in chunks) != updated:
+            raise DataError(500, "正文覆盖检查失败，未保存不完整版本")
+        whole_diagnostics = []
+        for item in chapters:
+            # Legacy versions may have no read model. Only those missing
+            # cached entries need scanning, rather than every normal save.
+            if item["id"] not in diagnostics:
+                diagnostics[item["id"]] = diagnose_text(item["text"])
+            whole_diagnostics.extend({**finding, "start": item["start"] + finding["start"],
+                                      "end": item["start"] + finding["end"]} for finding in diagnostics[item["id"]])
+        whole_diagnostics.sort(key=lambda item: (item["start"], item["code"]))
+        diff, truncated = _display_diff(base["text"], updated)
+        return {"text": updated, "sha256": _sha(updated.encode()), "chapters": chapters, "chunks": chunks,
+                "diagnostics": whole_diagnostics, "source_diagnostics": base.get("source_diagnostics", []),
+                "changes": [], "diff": diff, "diff_truncated": truncated,
+                "coverage": {**base["coverage"], "characters": len(updated), "covered_characters": len(updated),
+                             "reconstructed_sha256": _sha(updated.encode()), "contiguous": True, "complete": True,
+                             "chunks_complete": True, "chunk_count": len(chunks), "chapter_count": len(chapters)},
+                "pattern": base.get("pattern"), "fallback_used": base.get("fallback_used", False),
+                "heading_formats": base.get("heading_formats", []), "candidates": base.get("candidates", []),
+                "gaps": gaps, "options": options, "_review_proposals": proposals,
+                "_review_diagnostics": diagnostics}
+
+    def _fill_missing(self, document_id: str, base: dict[str, Any], chapter_id: str,
+                      body_text: str, title: str | None = None) -> dict[str, Any]:
+        index = self.chapter_index(document_id, base["id"])
+        missing = next((item for item in index["chapters"] if item["id"] == chapter_id and item.get("placeholder")), None)
+        if missing is None or missing.get("gap_range"):
+            raise DataError(404, "缺失章节占位项不存在，请刷新目录")
+        title = "" if title is None else title.strip()
+        self._valid_text(title)
+        if len(title) > 80 or "\n" in title or "\r" in title:
+            raise DataError(422, "章节标题需为不超过 80 字的单行文本")
+        next_chapter = self._chapter(base, missing["before_chapter_id"])
+        position = next_chapter["start"]
+        style = "\r\n" if "\r\n" in next_chapter["text"] else "\n"
+        heading = chapter_label({"kind": "chapter", "number": missing["number"], "title": title})
+        body = normalize_chapter_body(body_text, trim_boundaries=True)
+        inserted = heading + style + body + style
+        prefix = base["text"][:position]
+        if prefix and not prefix.endswith(("\n", "\r")):
+            inserted = style + inserted
+        updated = prefix + inserted + base["text"][position:]
+        options = self._version_options(base)
+        # The canonical replacement may differ from an explicitly selected
+        # source format (e.g. Chapter N). Add 第N章 without discarding settings.
+        if options["heading_formats"] and "第N章" not in options["heading_formats"]:
+            options["heading_formats"] = [*options["heading_formats"], "第N章"]
+        prepared = _prepare(updated, base["text"], options, normalize=False)
+        heading_start = position + (len(style) if prefix and not prefix.endswith(("\n", "\r")) else 0)
+        recognized = next((chapter for chapter in prepared["chapters"]
+                           if chapter["start"] == heading_start and chapter.get("number") == missing["number"]
+                           and chapter.get("raw_marker", "").rstrip("\r") == heading
+                           and chapter.get("title") == title), None)
+        if recognized is None or len(prepared["chapters"]) != len(base["chapters"]) + 1:
+            raise DataError(422, "该标题未能识别为独立章节；请移除标题末尾的句号、问号等标点，或在「分卷与章节识别」中调整格式后重试。正文尚未保存。")
+        return self._commit_prepared(document_id, base, prepared,
+                                     change={"stage": "fill_missing_chapter", "chapter_id": chapter_id,
+                                             "number": missing["number"], "title": title, "count": 1})
+
+    def edit_chapter(self, document_id: str, base_version_id: str, chapter_id: str, body_text: str,
+                     *, title: str | None = None) -> dict[str, Any]:
         self._valid_text(body_text)
+        self._assert_current(document_id, base_version_id)
         base = self.get_version(document_id, base_version_id)
+        if chapter_id.startswith("missing-before-"):
+            return self._fill_missing(document_id, base, chapter_id, body_text, title)
+        if title is not None:
+            raise DataError(422, "请使用章节重命名修改已有标题")
         chapter = self._chapter(base, chapter_id)
-        # Only the addressed chapter body changes. All headings, prefix,
-        # trailing chapters and whitespace outside this span remain exact.
-        if chapter["raw_marker"] and body_text and not body_text.startswith("\n"):
-            body_text = "\n" + body_text
-        if chapter["end"] < len(base["text"]) and not body_text.endswith("\n"):
-            body_text += "\n"
-        updated = base["text"][:chapter["body_start"]] + body_text + base["text"][chapter["end"]:]
-        prepared = _prepare(updated, base["text"], self._version_options(base), normalize=False)
-        return self._commit_prepared(document_id, base, prepared, change={"stage": "chapter_edit", "chapter_id": chapter_id, "count": 1})
+        # Keep the exact source separator outside the editable body. In
+        # particular, a CRLF heading must never become CRCRLF after saving.
+        start, end = chapter_body_span(chapter)
+        replacement = normalize_chapter_body(body_text, trim_boundaries=True)
+        if replacement and chapter.get("raw_marker") and start == chapter["body_start"] - chapter["start"] and not chapter["text"][:start].endswith(("\n", "\r")):
+            replacement = "\n" + replacement
+        prepared = self._incremental_chapter_edit(document_id, base, chapter, start, end, replacement)
+        return self._commit_prepared(document_id, base, prepared,
+                                     change={"stage": "chapter_edit", "chapter_id": chapter_id, "count": 1})
 
     def edit_chapter_slice(self, document_id: str, base_version_id: str, chapter_id: str,
                            start: int, end: int, text: str, expected_text: str) -> dict[str, Any]:
-        """Replace one visible body page; never truncate the rest of a long chapter."""
+        """Replace one raw source span displayed by the body-only page editor."""
         self._valid_text(text)
         self._valid_text(expected_text)
+        self._assert_current(document_id, base_version_id)
         base = self.get_version(document_id, base_version_id)
         chapter = self._chapter(base, chapter_id)
         body_offset = chapter["body_start"] - chapter["start"]
@@ -664,23 +988,83 @@ class DocumentStore:
             raise DataError(422, "正文分页编辑范围无效")
         if chapter["text"][start:end] != expected_text:
             raise DataError(409, "正文内容已变化，请刷新后再保存")
-        absolute_start, absolute_end = chapter["start"] + start, chapter["start"] + end
-        updated = base["text"][:absolute_start] + text + base["text"][absolute_end:]
-        prepared = _prepare(updated, base["text"], self._version_options(base), normalize=False)
+        replacement = normalize_chapter_body(text)
+        # Legacy callers can include the heading separator in the requested
+        # span. Reintroduce its exact token when an edit removes it.
+        body_start, body_end = chapter_body_span(chapter)
+        if chapter.get("raw_marker") and start == body_offset and start < body_start:
+            # raw_marker can end with the CR half of CRLF in old snapshots.
+            # Match the existing separator instead of stacking CR + CRLF.
+            replacement = re.sub(r"^(?:[ \t\u3000]*(?>\r\n|\r|\n))+", "", replacement)
+            replacement = chapter["text"][body_offset:body_start] + replacement
+        elif (replacement and chapter.get("raw_marker") and start == body_offset
+              and not chapter["text"][:start].endswith(("\n", "\r"))
+              and not replacement.startswith(("\n", "\r"))):
+            replacement = "\n" + replacement
+        if end > body_end and chapter["end"] < len(base["text"]):
+            replacement = re.sub(r"(?:(?>\r\n|\r|\n)[ \t\u3000]*)+$", "", replacement)
+            replacement += chapter["text"][body_end:end]
+        prepared = self._incremental_chapter_edit(document_id, base, chapter, start, end, replacement)
         return self._commit_prepared(document_id, base, prepared,
                                      change={"stage": "chapter_page_edit", "chapter_id": chapter_id,
                                              "start": start, "end": end, "count": 1})
 
-    def findings(self, document_id: str, version_id: str | None = None) -> dict[str, Any]:
-        version = self.get_version(document_id, version_id)
-        options = self._version_options(version)
+    def findings(self, document_id: str, version_id: str | None = None, *,
+                 chapter_id: str | None = None, start: int = 0, limit: int | None = None) -> dict[str, Any]:
+        if (type(start) is not int or start < 0 or
+                (limit is not None and (type(limit) is not int or not 1 <= limit <= 10000))):
+            raise DataError(422, "问题清单分页范围无效")
+        summary = self.get_version_summary(document_id, version_id)
+        with self._connection() as connection:
+            query = "SELECT metadata_json,proposals_json,text FROM doc_chapter_views WHERE version_id=?"
+            parameters: tuple = (summary["id"],)
+            if chapter_id is not None:
+                query += " AND chapter_id=?"
+                parameters += (chapter_id,)
+            rows = connection.execute(query + " ORDER BY chapter_order", parameters).fetchall()
+        if chapter_id is not None and not rows:
+            raise DataError(404, "章节不存在")
         items = []
-        for index, chapter in enumerate(version["chapters"]):
-            for proposal in chapter_proposals(chapter, options):
-                items.append({**proposal, "chapter_id": chapter["id"], "chapter_index": index,
-                              "chapter_title": chapter.get("raw_marker") or chapter.get("title") or f"第 {index + 1} 段"})
-        return {"document_id": document_id, "version_id": version["id"], "offset_unit": "unicode_codepoints",
-                "items": items, "total": len(items)}
+        issue_chapters = 0
+        for row in rows:
+            chapter = json.loads(row["metadata_json"])
+            proposals = json.loads(row["proposals_json"])
+            issue_chapters += bool(chapter.get("issues"))
+            for proposal in proposals:
+                items.append({**proposal, "chapter_id": chapter["id"], "chapter_index": chapter.get("index", 0),
+                              "chapter_title": chapter.get("display_label") or chapter_label(chapter),
+                              "context_before": row["text"][max(0, proposal["start"] - 40):proposal["start"]],
+                              "context_after": row["text"][proposal["end"]:proposal["end"] + 40]})
+        total = len(items)
+        return {"document_id": document_id, "version_id": summary["id"], "offset_unit": "unicode_codepoints",
+                "items": items[start:None if limit is None else start + limit], "total": total,
+                "start": start, "limit": limit, "issue_chapter_count": issue_chapters,
+                "next_start": start + limit if limit is not None and start + limit < total else None}
+
+    def formatted_export(self, document_id: str, version_id: str | None = None) -> str:
+        """Final TXT: one heading, a body without empty lines, explicit gaps."""
+        summary = self.get_version_summary(document_id, version_id)
+        with self._connection() as connection:
+            rows = connection.execute("SELECT metadata_json,text FROM doc_chapter_views WHERE version_id=? ORDER BY chapter_order",
+                                      (summary["id"],)).fetchall()
+        sections = []
+        for row in rows:
+            chapter = json.loads(row["metadata_json"])
+            chapter["text"] = row["text"]
+            if chapter.get("gap_range"):
+                # Hostile million-chapter gaps remain explicit and bounded.
+                sections.append(f"{chapter_label(chapter)}（缺失，待补充）")
+            elif chapter.get("placeholder"):
+                sections.append(chapter_label(chapter))
+            elif chapter.get("raw_marker"):
+                begin, end = chapter_body_span(chapter)
+                body = normalize_chapter_body(chapter["text"][begin:end], trim_boundaries=True)
+                sections.append(chapter_label(chapter) + ("\n" + body if body else ""))
+            else:
+                body = normalize_chapter_body(chapter["text"], trim_boundaries=True)
+                if body:
+                    sections.append(body)
+        return "\n".join(sections) + ("\n" if sections else "")
 
     @staticmethod
     def _valid_text(text: Any) -> None:
@@ -700,7 +1084,7 @@ class DocumentStore:
         available = {name for name, _ in heading_patterns(options["custom_formats"])}
         if set(heading_formats) - available:
             raise DataError(422, "选中的章节格式不存在")
-        prepared = _prepare(base["text"], base["text"], options, normalize=False)
+        prepared = _prepare(base["text"], base["text"], options, normalize=False, normalize_layout=True)
         return self._commit_prepared(document_id, base, prepared, change={"stage": "chapter_resegment", "count": len(prepared["chapters"])})
 
     def update_preprocess_settings(self, document_id: str, base_version_id: str,
@@ -745,17 +1129,15 @@ class DocumentStore:
                                 "characters": proposal["end"] - proposal["start"]})
         if not ranges:
             raise DataError(422, "尚未选择要清理的内容")
-        updated = base["text"]
-        for start, end in sorted(ranges, reverse=True):
-            updated = updated[:start] + updated[end:]
+        updated = _without_ranges(base["text"], ranges)
         prepared = _prepare(updated, base["text"], options, normalize=False)
         return self._commit_prepared(document_id, base, prepared,
                                      change={"stage": "reviewed_chapter_cleaning", "count": len(removed), "removed": removed})
 
     def rename_chapter(self, document_id: str, base_version_id: str, chapter_id: str, title: str) -> dict[str, Any]:
         self._valid_text(title)
-        if not title.strip() or len(title) > 100 or "\n" in title or "\r" in title:
-            raise DataError(422, "章节标题需为 1 至 100 字的单行文本")
+        if not title.strip() or len(title) > 80 or "\n" in title or "\r" in title:
+            raise DataError(422, "章节标题需为 1 至 80 字的单行文本")
         base = self.get_version(document_id, base_version_id)
         chapter = self._chapter(base, chapter_id)
         marker = chapter["raw_marker"]
@@ -764,11 +1146,18 @@ class DocumentStore:
         # Preserve the numeral/punctuation prefix and replace title only.
         old_title = chapter["title"]
         if old_title and marker.rstrip().endswith(old_title):
-            new_marker = marker[:marker.rfind(old_title)] + title.strip()
+            title_start = marker.rfind(old_title)
+            new_marker = marker[:title_start] + title.strip() + marker[title_start + len(old_title):]
         else:
-            new_marker = marker.rstrip() + " " + title.strip()
+            trailing = marker[len(marker.rstrip()):]
+            new_marker = marker.rstrip() + " " + title.strip() + trailing
         updated = base["text"][:chapter["start"]] + new_marker + base["text"][chapter["body_start"]:]
         prepared = _prepare(updated, base["text"], self._version_options(base), normalize=False)
+        recognized = next((item for item in prepared["chapters"]
+                           if item["start"] == chapter["start"] and item.get("number") == chapter.get("number")
+                           and item.get("raw_marker") == new_marker and item.get("title") == title.strip()), None)
+        if recognized is None or len(prepared["chapters"]) != len(base["chapters"]):
+            raise DataError(422, "该标题未能识别为独立章节；请移除标题末尾的句号、问号等标点，或在「分卷与章节识别」中调整格式后重试。标题尚未保存。")
         return self._commit_prepared(document_id, base, prepared, change={"stage": "chapter_rename", "chapter_id": chapter_id, "count": 1})
 
     def insert_chapter(self, document_id: str, base_version_id: str, after_chapter_id: str | None,
@@ -799,9 +1188,7 @@ class DocumentStore:
             raise DataError(422, "删除章节不能重复")
         base = self.get_version(document_id, base_version_id)
         ranges = [(self._chapter(base, identifier)["start"], self._chapter(base, identifier)["end"]) for identifier in chapter_ids]
-        updated = base["text"]
-        for start, end in sorted(ranges, reverse=True):
-            updated = updated[:start] + updated[end:]
+        updated = _without_ranges(base["text"], ranges)
         prepared = _prepare(updated, base["text"], self._version_options(base), normalize=False)
         return self._commit_prepared(document_id, base, prepared, change={"stage": "chapter_delete", "chapter_ids": chapter_ids, "count": len(chapter_ids)})
 
@@ -851,23 +1238,23 @@ class DocumentStore:
 
     def append(self, document_id: str, base_version_id: str, filename: str, raw: bytes,
                encoding: str = "auto", *, idempotency_key: str | None = None,
-               converted_text: str | None = None, preserve_text: bool = False,
+               converted_text: str | None = None, preserve_text: bool = False, normalize_layout: bool = False,
                progress: Callable[[str, int, int], None] | None = None) -> dict[str, Any]:
         return self._update_source(document_id, base_version_id, filename, raw, encoding, mode="append",
                                    idempotency_key=idempotency_key, converted_text=converted_text,
-                                   preserve_text=preserve_text, progress=progress)
+                                   preserve_text=preserve_text, normalize_layout=normalize_layout, progress=progress)
 
     def replace(self, document_id: str, base_version_id: str, filename: str, raw: bytes,
                 encoding: str = "auto", *, idempotency_key: str | None = None,
-                converted_text: str | None = None, preserve_text: bool = True,
+                converted_text: str | None = None, preserve_text: bool = True, normalize_layout: bool = False,
                 progress: Callable[[str, int, int], None] | None = None) -> dict[str, Any]:
         return self._update_source(document_id, base_version_id, filename, raw, encoding, mode="replace",
                                    idempotency_key=idempotency_key, converted_text=converted_text,
-                                   preserve_text=preserve_text, progress=progress)
+                                   preserve_text=preserve_text, normalize_layout=normalize_layout, progress=progress)
 
     def _update_source(self, document_id: str, base_version_id: str, filename: str, raw: bytes,
                        encoding: str, *, mode: str, idempotency_key: str | None,
-                       converted_text: str | None, preserve_text: bool,
+                       converted_text: str | None, preserve_text: bool, normalize_layout: bool,
                        progress: Callable[[str, int, int], None] | None) -> dict[str, Any]:
         if not isinstance(filename, str) or not filename or len(filename) > 255 or re.search(r"[\x00-\x1f]", filename):
             raise DataError(422, "文件名无效")
@@ -908,7 +1295,7 @@ class DocumentStore:
             combined_source = base["source_text"] + ("" if not base["source_text"] or base["source_text"].endswith("\n") else "\n") + source
         else:
             updated, combined_source = new_text, source
-        prepared = _prepare(updated, base["text"], self._version_options(base), normalize=False, progress=progress)
+        prepared = _prepare(updated, base["text"], self._version_options(base), normalize=False, normalize_layout=normalize_layout, progress=progress)
         source_id = uuid.uuid4().hex
         prepared["active_source_ids"] = ([*self._active_source_ids(document_id, base), source_id]
                                          if mode == "append" else [source_id])

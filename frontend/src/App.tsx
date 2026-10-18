@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useState } from "react";
+import { lazy, memo, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import {
   BookOpen,
   ChevronRight,
@@ -14,14 +14,14 @@ import {
   Settings2,
   SlidersHorizontal,
 } from "lucide-react";
-import Library from "./Library";
 import { Busy, Modal, Notice } from "./ui";
 import { download } from "./api";
 import { studio } from "./studio";
-const Documents = lazy(() => import("./Documents"));
-const Jobs = lazy(() => import("./Jobs"));
-const Workflows = lazy(() => import("./Workflows"));
-const Models = lazy(() => import("./Models"));
+const Library = memo(lazy(() => import("./Library")));
+const Documents = memo(lazy(() => import("./Documents")));
+const Jobs = memo(lazy(() => import("./Jobs")));
+const Workflows = memo(lazy(() => import("./Workflows")));
+const Models = memo(lazy(() => import("./Models")));
 type Section =
   | "library"
   | "documents"
@@ -62,18 +62,31 @@ export default function App() {
   const [section, setSection] = useState<Section>(initial);
   const [visited, setVisited] = useState<Section[]>([initial()]);
   const [mobile, setMobile] = useState(false);
-  const [collapsed, setCollapsed] = useState(false);
+  const [collapsed, setCollapsed] = useState(() => window.matchMedia("(max-width: 1100px)").matches);
+  useEffect(() => {
+    const media = window.matchMedia("(max-width: 1100px)");
+    const compact = () => setCollapsed(media.matches);
+    media.addEventListener("change", compact);
+    return () => media.removeEventListener("change", compact);
+  }, []);
   const [jobId, setJobId] = useState<string>();
   const [help, setHelp] = useState(false);
   const [modelReturn, setModelReturn] = useState<Section | null>(null);
-  const nav = (id: Section) => {
-    if (id === "models" && section !== "models") setModelReturn(section);
+  const sectionRef = useRef(section);
+  const nav = useCallback((id: Section) => {
+    setMobile(false);
+    if (id === sectionRef.current) return;
+    if (id === "models") setModelReturn(sectionRef.current);
+    sectionRef.current = id;
     setSection(id);
     setVisited((v) => (v.includes(id) ? v : [...v, id]));
     window.history.replaceState(null, "", `#${id}`);
-    setMobile(false);
     window.dispatchEvent(new Event(`inkreference:${id}-refresh`));
-  };
+  }, []);
+  const onDocumentJob = useCallback((id: string) => {
+    setJobId(id);
+    nav("jobs");
+  }, [nav]);
   useEffect(() => {
     const update = () => {
       const key = window.location.hash.slice(1);
@@ -82,7 +95,7 @@ export default function App() {
     };
     window.addEventListener("hashchange", update);
     return () => window.removeEventListener("hashchange", update);
-  }, [section]);
+  }, [nav]);
   const current = sections.find((s) => s.id === section);
   return (
     <div className={`app studio-app ${collapsed ? "sidebar-collapsed" : ""}`}>
@@ -190,10 +203,7 @@ export default function App() {
                 ) : page === "documents" ? (
                   <Documents
                     navigate={nav}
-                    onJob={(id) => {
-                      setJobId(id);
-                      nav("jobs");
-                    }}
+                    onJob={onDocumentJob}
                   />
                 ) : page === "jobs" ? (
                   <Jobs initialId={jobId} navigate={nav} />
@@ -212,7 +222,6 @@ export default function App() {
       {help && (
         <Modal title="InkReference" onClose={() => setHelp(false)}>
           <div className="modal-body">
-            <p>你的本地写作参考工作台。</p>
             <div className="about-row">
               <span>素材与全文</span>
               <p>整理作品、人物、桥段，保留全文原件、清洗版本与来源证据。</p>
@@ -224,7 +233,7 @@ export default function App() {
           </div>
           <div className="modal-footer">
             <button className="button primary" onClick={() => setHelp(false)}>
-              开始整理
+              关闭
             </button>
           </div>
         </Modal>

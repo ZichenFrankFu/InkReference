@@ -33,3 +33,13 @@
 @media (max-width: 430px) {
   .volume-panel { padding: 16px; }
 }
+.volume-primary-actions { display:flex; align-items:center; flex-wrap:wrap; gap:8px; }
+.document-structure { display:grid; gap:0; }
+.document-structure > .volume-panel { border-top:1px solid #e7edf7; }
+.volume-panel .volume-toolbar { margin-bottom:16px; }
+.volume-methods { margin-top:24px; border-top:1px solid #e8eef7; padding-top:15px; }
+.volume-methods > summary { cursor:pointer; color:#7488a6; font-size:11px; width:fit-content; padding:4px 0; }
+.volume-methods > summary:hover { color:#356ed0; }
+.volume-methods-body { padding-top:14px; }
+.volume-methods-body .volume-model { margin-bottom:0; }
+@container volume (max-width:400px) { .volume-primary-actions { width:100%; } .volume-primary-actions .button { flex:1; } }

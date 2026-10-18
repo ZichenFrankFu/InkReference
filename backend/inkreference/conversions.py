@@ -532,7 +532,7 @@ class ConversionStore:
 
     def import_to_document(self, identifier: str, documents, *, target_document_id: str | None = None,
                            base_version_id: str | None = None, mode: str | None = None,
-                           progress: Callable[[str, int, int], None] | None = None) -> dict[str, Any]:
+                           progress: Callable[[str, int, int], None] | None = None, normalize_layout: bool = False) -> dict[str, Any]:
         """Commit converted TXT to a fixed target, preserving its binary origin.
 
         A durable target binding plus document ingestion key closes both crash
@@ -546,7 +546,8 @@ class ConversionStore:
             target_id = target_document_id if target_document_id is not None else meta["options"].get("target_document_id")
             base_id = base_version_id if base_version_id is not None else meta["options"].get("base_version_id")
             _options({"mode": selected_mode, "target_document_id": target_id, "base_version_id": base_id})
-            target = _json({"mode": selected_mode, "target_document_id": target_id, "base_version_id": base_id})
+            target = _json({"mode": selected_mode, "target_document_id": target_id, "base_version_id": base_id,
+                            **({"normalize_layout": True} if normalize_layout else {})})
             with self._connection() as connection:
                 connection.execute("BEGIN IMMEDIATE")
                 binding = connection.execute("SELECT * FROM conv_imports WHERE job_id=?", (identifier,)).fetchone()
@@ -569,12 +570,12 @@ class ConversionStore:
                     document = documents.upload(filename, raw, encoding="utf-8",
                                                 title=meta["options"]["title"] or Path(filename).stem,
                                                 work_id=meta["options"]["work_id"], idempotency_key=key,
-                                                converted_text=plain, preserve_text=True, progress=progress)
+                                                converted_text=plain, preserve_text=True, progress=progress, normalize_layout=normalize_layout)
                     committed = documents.ingestion_result(key)
                 else:
                     writer = documents.replace if selected_mode == "replace" else documents.append
                     version = writer(target_id, base_id, filename, raw, encoding="utf-8", idempotency_key=key,
-                                     converted_text=plain, preserve_text=True, progress=progress)
+                                     converted_text=plain, preserve_text=True, progress=progress, normalize_layout=normalize_layout)
                     committed = {"document_id": target_id, "version_id": version["id"]}
             with self._connection() as connection:
                 connection.execute("UPDATE conv_jobs SET imported_document_id=?,updated_at=? WHERE id=?",

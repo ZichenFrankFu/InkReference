@@ -52,28 +52,24 @@ const TABLES: {
   label: string;
   singular: string;
   icon: typeof BookOpen;
-  description: string;
 }[] = [
   {
     key: "works",
     label: "作品库",
     singular: "作品",
     icon: BookOpen,
-    description: "记录故事，梳理每个版本的独特之处。",
   },
   {
     key: "characters",
     label: "人物库",
     singular: "人物",
     icon: UsersRound,
-    description: "从开场身份到人物弧光，留下可回看的线索。",
   },
   {
     key: "cliches",
     label: "桥段库",
     singular: "桥段",
     icon: Layers3,
-    description: "收集叙事手法，在不同作品之间发现联系。",
   },
 ];
 const emptyStats: Stats = {
@@ -84,7 +80,7 @@ const emptyStats: Stats = {
 };
 const nf = new Intl.NumberFormat("zh-CN");
 const labelFor = (key: string) =>
-  TABLES.find((t) => t.key === key)?.label || ({ work_cliches: "作品与桥段关联", material_relations: "素材关系" } as Record<string, string>)[key] || key;
+  TABLES.find((t) => t.key === key)?.label || ({ work_cliches: "作品桥段表", material_relations: "素材关系" } as Record<string, string>)[key] || key;
 const titleOf = (item: Item, table: TableKey) =>
   item.values[
     table === "works" ? "作品" : table === "characters" ? "角色" : "cliché内容"
@@ -926,7 +922,7 @@ export default function Library() {
   const [refresh, setRefresh] = useState(0);
   const [selection, setSelection] = useState<Selection | null>(null);
   const [dirty, setDirty] = useState(false);
-  const [modal, setModal] = useState<"import" | "export" | "about" | null>(
+  const [modal, setModal] = useState<"import" | "export" | null>(
     null,
   );
   const [toast, setToast] = useState("");
@@ -940,18 +936,22 @@ export default function Library() {
       window.removeEventListener("inkreference:library-refresh", reload);
   }, [reload]);
   const notify = useCallback((message: string) => setToast(message), []);
-  const metadata = useCallback(async () => {
-    const [meta, result] = await Promise.all([
-      request<{ tables: TableMeta[]; version: string }>("/meta"),
-      request<Stats>("/stats"),
-    ]);
-    setMetas(meta.tables);
-
-    setStats(result);
-  }, []);
+  const metadataLoaded = useRef(false);
   useEffect(() => {
-    void metadata().catch((e) => setLoadError(errorMessage(e)));
-  }, [metadata, refresh]);
+    if (metadataLoaded.current) return;
+    const controller = new AbortController();
+    void request<{ tables: TableMeta[]; version: string }>("/meta", { signal: controller.signal })
+      .then(result => { if (!controller.signal.aborted) { metadataLoaded.current = true; setMetas(result.tables); } })
+      .catch(e => { if (!controller.signal.aborted) setLoadError(errorMessage(e)); });
+    return () => controller.abort();
+  }, [refresh]);
+  useEffect(() => {
+    const controller = new AbortController();
+    void request<Stats>("/stats", { signal: controller.signal })
+      .then(setStats)
+      .catch(e => { if (!controller.signal.aborted) setLoadError(errorMessage(e)); });
+    return () => controller.abort();
+  }, [refresh]);
   useEffect(() => {
     const timer = window.setTimeout(() => {
       setDebouncedQuery(query);
@@ -1060,7 +1060,6 @@ export default function Library() {
         <main id="main-content" className="main-content" tabIndex={-1}>
           <div className="page-heading">
             <div>
-              <div className="eyebrow">素材管理</div>
               <h1>{config.label}</h1>
             </div>
             <button
@@ -1090,18 +1089,6 @@ export default function Library() {
                 </span>
               </button>
             ))}
-            <div className="stat-card relation-stat">
-              <div>
-                <span>作品与桥段关联</span>
-                <strong>
-                  {nf.format(stats.work_cliches)}
-                  <small>组</small>
-                </strong>
-              </div>
-              <span className="stat-icon links">
-                <Link2 size={21} />
-              </span>
-            </div>
           </div>
           <section className="library-card" aria-label={`${config.label}列表`}>
             <div className="list-toolbar">
@@ -1187,7 +1174,7 @@ export default function Library() {
                 <h3>
                   {debouncedQuery
                     ? "没有找到匹配的素材"
-                    : `从第一${table === "works" ? "部作品" : "条素材"}开始`}
+                    : `暂无${config.singular}`}
                 </h3>
                 <p>
                   {debouncedQuery
@@ -1353,41 +1340,6 @@ export default function Library() {
       )}
       {modal === "export" && (
         <ExportDialog onClose={closeModal} notify={notify} />
-      )}
-      {modal === "about" && (
-        <Modal title="关于此工作区" onClose={closeModal}>
-          <div className="modal-body">
-            <div className="about-brand">
-              <BookOpen size={30} />
-              <div>
-                <strong>InkReference</strong>
-                <span>写作参考工作台</span>
-              </div>
-            </div>
-            <p>
-              面向写作的本地参考素材库，整理作品、人物和桥段，并保留它们之间的联系。
-            </p>
-            <div className="about-row">
-              <span>当前已可使用</span>
-              <p>数据库、CSV 与 Excel 完整导入导出，素材编辑与关联浏览。</p>
-            </div>
-            <div className="about-row">
-              <span>后续开发</span>
-              <p>
-                全文清洗、LangGraph 提取工作流、Skills、本地模型与 API、token
-                统计。
-              </p>
-            </div>
-            <p className="helper">
-              CSV 导出用于数据交换；请按项目说明备份本地数据库以保留完整工作区。
-            </p>
-          </div>
-          <div className="modal-footer">
-            <button className="button secondary" onClick={closeModal}>
-              知道了
-            </button>
-          </div>
-        </Modal>
       )}
       {toast && (
         <div className="toast" role="status">

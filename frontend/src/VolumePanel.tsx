@@ -11,6 +11,7 @@ export function VolumePanel({ documentId, versionId, onDirty }: { documentId: st
   const [plan, setPlan] = useState<Plan | null>(null), [rows, setRows] = useState<Volume[]>([]);
   const [busy, setBusy] = useState(""), [error, setError] = useState(""), [message, setMessage] = useState("");
   const [paste, setPaste] = useState(""), [showPaste, setShowPaste] = useState(false), [prompt, setPrompt] = useState("");
+  const [advanced, setAdvanced] = useState(false);
   const [models, setModels] = useState<ModelProfile[]>([]), [profile, setProfile] = useState(""), [confirm, setConfirm] = useState(false);
   const ticket = useRef(0), base = `/documents/${documentId}/versions/${versionId}/volumes`;
   const onDirtyRef = useRef(onDirty); onDirtyRef.current = onDirty;
@@ -20,11 +21,17 @@ export function VolumePanel({ documentId, versionId, onDirty }: { documentId: st
   useEffect(() => () => onDirtyRef.current?.(false), []);
   useEffect(() => {
     const id = ++ticket.current; setBusy("读取分卷"); setError(""); setPlan(null); setRows([]); setMessage("");
-    Promise.all([studio<Plan>(base), studio<{ items: ModelProfile[] }>("/models")]).then(([next, choices]) => {
-      if (id === ticket.current) { setPlan(next); setRows(next.volumes); const nextModels = normalizeList(choices); setModels(nextModels); setProfile(nextModels[0]?.id || ""); }
+    studio<Plan>(base).then((next) => {
+      if (id === ticket.current) { setPlan(next); setRows(next.volumes); }
     }).catch((e) => { if (id === ticket.current) setError(messageOf(e)); }).finally(() => { if (id === ticket.current) setBusy(""); });
     return () => { ticket.current++; };
   }, [base]);
+  useEffect(() => {
+    if (!advanced || models.length) return;
+    let active = true; setBusy("读取识别模型");
+    studio<{ items: ModelProfile[] }>("/models").then((choices) => { if (active) { const next = normalizeList(choices); setModels(next); setProfile(next[0]?.id || ""); } }).catch((e) => { if (active) setError(messageOf(e)); }).finally(() => { if (active) setBusy(""); });
+    return () => { active = false; };
+  }, [advanced]);
   const run = async (label: string, action: () => Promise<void>) => { setBusy(label); setError(""); setMessage(""); try { await action(); } catch (e) { setError(messageOf(e)); } finally { setBusy(""); } };
   const detect = () => run("识别分卷", async () => { const result = await send<{ volumes: Volume[] }>(`${base}/detect`, {}); setRows(result.volumes); setMessage("分卷预览已更新"); });
   const modelDetect = () => run("模型识别分卷", async () => { setConfirm(false); const result = await send<{ volumes: Volume[] }>(`${base}/model`, { profile_id: profile, remote_consent: !!selected && isRemoteModel(selected), expected_model_fingerprint: selected?.target_fingerprint }); setRows(result.volumes); setMessage("分卷预览已更新"); });
@@ -32,14 +39,13 @@ export function VolumePanel({ documentId, versionId, onDirty }: { documentId: st
   const copy = () => run("准备提示词", async () => { const result = await studio<{ prompt: string }>(`${base}/prompt`); try { await navigator.clipboard.writeText(result.prompt); setMessage("提示词已复制"); } catch { setPrompt(result.prompt); } });
   const update = (index: number, change: Partial<Volume>) => setRows((current) => current.map((row, position) => position === index ? { ...row, ...change } : row));
   return <section className="volume-panel" aria-label="分卷规划" aria-busy={!!busy}>
-    <div className="volume-toolbar"><div><h3>分卷规划</h3><span>{plan?.chapter_count ?? "—"} 章 · {rows.length} 卷</span>{dirty && <strong className="volume-unsaved">未保存</strong>}</div><button className="button primary compact-button" disabled={!!busy || !dirty} onClick={save}><Save size={14} />保存分卷</button></div>
-    <div className="volume-actions"><button className="button secondary compact-button" disabled={!!busy || !plan} onClick={detect}><Sparkles size={14} />自动识别</button><button className="button secondary compact-button" disabled={!!busy || !plan} onClick={copy}><Copy size={14} />复制提示词</button><button className="button secondary compact-button" disabled={!!busy || !plan} onClick={() => setShowPaste(true)}>粘贴结果</button></div>
-    <div className="volume-feedback" role="status" aria-live="polite">{message && <><CheckCircle2 size={13} />{message}</>}</div>
+    <div className="volume-toolbar"><div><h3>分卷</h3><span>{plan?.chapter_count ?? "—"} 章 · {rows.length} 卷</span>{dirty && <strong className="volume-unsaved">未保存</strong>}</div><div className="volume-primary-actions"><button className="button secondary compact-button" disabled={!!busy || !plan} onClick={detect}><Sparkles size={14} />自动识别分卷</button>{dirty && <button className="button primary compact-button" disabled={!!busy} onClick={save}><Save size={14} />保存分卷</button>}</div></div>
+    {message && <div className="volume-feedback" role="status" aria-live="polite"><CheckCircle2 size={13} />{message}</div>}
     {error && <Notice error>{error}</Notice>}{busy && <Busy label={busy} />}
-    <div className="volume-model"><label>识别模型<select aria-label="分卷识别模型" value={profile} onChange={(event) => setProfile(event.target.value)} disabled={!!busy}><option value="">选择模型</option>{models.map((model) => <option value={model.id} key={model.id}>{model.name}</option>)}</select></label><button className="button secondary compact-button" disabled={!!busy || !selected || !plan} onClick={() => selected && isRemoteModel(selected) ? setConfirm(true) : modelDetect()}>模型识别</button></div>
     <div className="volume-table"><div className="volume-row volume-head"><span>卷名</span><span>起始章</span><span>结束章</span><span /></div>
       {rows.map((row, index) => <div className="volume-row" key={index}><input aria-label={`第${index + 1}卷名称`} value={row.title} disabled={!!busy} onChange={(event) => update(index, { title: event.target.value })} /><input aria-label={`第${index + 1}卷起始章`} type="number" min={1} max={plan?.chapter_count} value={row.start_chapter} disabled={!!busy} onChange={(event) => update(index, { start_chapter: Number(event.target.value) })} /><input aria-label={`第${index + 1}卷结束章`} type="number" min={1} max={plan?.chapter_count} value={row.end_chapter} disabled={!!busy} onChange={(event) => update(index, { end_chapter: Number(event.target.value) })} /><button className="icon-button" aria-label={`删除第${index + 1}卷`} disabled={!!busy} onClick={() => setRows(rows.filter((_, position) => position !== index))}><Trash2 size={14} /></button></div>)}
     </div><button className="button secondary compact-button volume-add" disabled={!!busy || !plan} onClick={() => setRows([...rows, { title: `第${rows.length + 1}卷`, start_chapter: (rows.at(-1)?.end_chapter ?? 0) + 1, end_chapter: plan?.chapter_count ?? 1 }])}><Plus size={14} />添加分卷</button>
+    <details className="volume-methods" open={advanced} onToggle={(event) => setAdvanced(event.currentTarget.open)}><summary>更多识别方式</summary><div className="volume-methods-body"><div className="volume-actions"><button className="button secondary compact-button" disabled={!!busy || !plan} onClick={copy}><Copy size={14} />复制提示词</button><button className="button secondary compact-button" disabled={!!busy || !plan} onClick={() => setShowPaste(true)}>粘贴结果</button></div><div className="volume-model"><label>识别模型<select aria-label="分卷识别模型" value={profile} onChange={(event) => setProfile(event.target.value)} disabled={!!busy}><option value="">选择模型</option>{models.map((model) => <option value={model.id} key={model.id}>{model.name}</option>)}</select></label><button className="button secondary compact-button" disabled={!!busy || !selected || !plan} onClick={() => selected && isRemoteModel(selected) ? setConfirm(true) : modelDetect()}>模型识别分卷</button></div></div></details>
     {showPaste && <Modal title="粘贴分卷结果" busy={!!busy} onClose={() => setShowPaste(false)}><div className="modal-body"><textarea aria-label="分卷 JSON" className="volume-paste" value={paste} onChange={(event) => setPaste(event.target.value)} placeholder={'{"volumes":[{"title":"第一卷","start_chapter":1,"end_chapter":30}]}'} /><Notice error>{error}</Notice></div><div className="modal-footer"><button className="button secondary" disabled={!!busy} onClick={() => setShowPaste(false)}>取消</button><button className="button primary" disabled={!!busy || !paste.trim()} onClick={() => run("校验分卷结果", async () => { const result = await send<{ volumes: Volume[] }>(`${base}/paste`, { content: paste }); setRows(result.volumes); setShowPaste(false); setPaste(""); })}>预览分卷</button></div></Modal>}
     {prompt && <Modal title="分卷提示词" onClose={() => setPrompt("")}><div className="modal-body"><textarea className="volume-paste" aria-label="分卷提示词" readOnly value={prompt} onFocus={(event) => event.target.select()} /></div></Modal>}
     {confirm && selected && <Modal title="使用远程模型识别分卷" busy={!!busy} onClose={() => setConfirm(false)}><div className="modal-body"><p>将章节目录发送至 {modelEndpoint(selected.base_url)} · {selected.model}</p></div><div className="modal-footer"><button className="button secondary" onClick={() => setConfirm(false)}>取消</button><button className="button primary" onClick={modelDetect}>开始识别</button></div></Modal>}

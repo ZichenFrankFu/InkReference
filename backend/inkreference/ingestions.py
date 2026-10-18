@@ -249,7 +249,7 @@ class IngestionStore:
                         raise DataError(422, conversion["error"] or "格式转换未完成，请重试")
                     self._cancellations[identifier].wait(0.1)
                 self._check_cancelled(identifier)
-                document = self.conversions.import_to_document(conversion_id, self.documents, progress=progress)
+                document = self.conversions.import_to_document(conversion_id, self.documents, progress=progress, normalize_layout=True)
                 committed = {"document_id": document["id"], "version_id": document["imported_version_id"]}
             elif committed is None:
                 with self._connection() as connection:
@@ -259,12 +259,12 @@ class IngestionStore:
                     raise DataError(422, "上传原件校验失败")
                 if options["mode"] == "new":
                     self.documents.upload(meta["filename"], raw, options["encoding"], options["title"], options["work_id"],
-                                          idempotency_key=key, preserve_text=True, progress=progress)
+                                          idempotency_key=key, preserve_text=True, progress=progress, normalize_layout=True)
                     committed = self.documents.ingestion_result(key)
                 else:
                     writer = self.documents.replace if options["mode"] == "replace" else self.documents.append
                     version = writer(options["target_document_id"], options["base_version_id"], meta["filename"], raw,
-                                     options["encoding"], idempotency_key=key, preserve_text=True, progress=progress)
+                                     options["encoding"], idempotency_key=key, preserve_text=True, progress=progress, normalize_layout=True)
                     committed = {"document_id": options["target_document_id"], "version_id": version["id"]}
             # A completed document commit wins a simultaneous cancellation: its
             # immutable version exists and must remain visible to the user.

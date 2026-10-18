@@ -186,7 +186,8 @@ def create_app(data_dir: str | Path | None = None, static_dir: str | Path | None
                     conversions = runtime._studio._conversions
                     if conversions is not None:
                         await run_in_threadpool(conversions.shutdown)
-                    await run_in_threadpool(runtime._studio.runner.shutdown)
+                    if runtime._studio._runner is not None:
+                        await run_in_threadpool(runtime._studio.runner.shutdown)
                 runtime.pending.clear()
 
     application = FastAPI(title="InkReference", version=__version__, lifespan=lifespan, docs_url=None, redoc_url=None)
