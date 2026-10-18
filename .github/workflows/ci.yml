@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   backend:
-    name: Backend (${{ matrix.os }}, Python ${{ matrix.python }})
+    name: Backend and source launcher (${{ matrix.os }}, Python ${{ matrix.python }})
     strategy:
       fail-fast: false
       matrix:
@@ -19,7 +19,13 @@ jobs:
             python: '3.11'
           - os: windows-latest
             python: '3.12'
+          - os: macos-15
+            python: '3.12'
+          - os: macos-15-intel
+            python: '3.13'
     runs-on: ${{ matrix.os }}
+    env:
+      PYTHONUTF8: '1'
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -27,7 +33,7 @@ jobs:
           python-version: ${{ matrix.python }}
       - name: Install backend and test dependencies
         run: python -m pip install -c requirements-lock.txt -e ".[dev]"
-      - name: Test data integrity, API and text preservation
+      - name: Test data integrity, API and platform behavior
         run: python -m pytest -q
       - name: Parse Windows PowerShell scripts
         if: runner.os == 'Windows'
@@ -37,94 +43,34 @@ jobs:
             $tokens = $null
             $parseErrors = $null
             [System.Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$tokens, [ref]$parseErrors) | Out-Null
-            if ($parseErrors.Count -gt 0) {
-              $parseErrors | Format-List
-              throw "Invalid PowerShell syntax: $($file.Name)"
-            }
+            if ($parseErrors.Count -gt 0) { $parseErrors | Format-List; throw "Invalid PowerShell: $($file.Name)" }
           }
       - uses: actions/setup-node@v7
-        if: runner.os == 'Windows'
+        if: runner.os != 'Linux'
         with:
           node-version: '22'
-      - name: Run the Windows installation script
+      - name: Install into the default project venv on Windows
         if: runner.os == 'Windows'
         shell: powershell
-        run: .\scripts\setup.ps1 -BrowserOnly
-      - name: Start the Windows app and check HTTP health
+        run: .\scripts\install.ps1 -BrowserOnly -Dev
+      - name: Install into the default project venv on macOS
+        if: runner.os == 'macOS'
+        run: ./scripts/install.sh --browser-only --dev
+      - name: Reuse the project environment without Conda
+        if: runner.os != 'Linux'
+        run: python scripts/manage.py install --browser-only --dev
+      - name: Diagnose the selected project environment
+        if: runner.os != 'Linux'
+        run: python scripts/manage.py doctor --json
+      - name: Start the Windows wrapper with a Chinese data path
         if: runner.os == 'Windows'
-        shell: powershell
-        run: |
-          $env:INKREFERENCE_DATA_DIR = Join-Path $env:RUNNER_TEMP ('InkReference ' + [char]0x4e2d + [char]0x6587 + ' smoke')
-          $stdout = Join-Path $env:RUNNER_TEMP 'inkreference-stdout.log'
-          $stderr = Join-Path $env:RUNNER_TEMP 'inkreference-stderr.log'
-          $arguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', 'scripts/start.ps1', '-NoOpen', '-Port', '18765')
-          $server = Start-Process -FilePath 'powershell.exe' -ArgumentList $arguments -WorkingDirectory $PWD.Path -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru
-          try {
-            $ready = $false
-            for ($i = 0; $i -lt 50; $i++) {
-              if ($server.HasExited) { throw 'The Windows launcher exited before becoming ready.' }
-              try {
-                $health = Invoke-RestMethod -Uri 'http://127.0.0.1:18765/api/health' -TimeoutSec 1
-                if ($health.status -eq 'ok') { $ready = $true; break }
-              } catch { Start-Sleep -Milliseconds 200 }
-            }
-            if (-not $ready) { throw 'The Windows app did not become ready.' }
-            $page = Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:18765/' -TimeoutSec 5
-            if ($page.StatusCode -ne 200 -or $page.Content -notmatch 'InkReference') { throw 'The production UI was not served.' }
-          } finally {
-            if (-not $server.HasExited) { & taskkill.exe /PID $server.Id /T /F | Out-Null }
-            if (Test-Path $stdout) { Get-Content $stdout }
-            if (Test-Path $stderr) { Get-Content $stderr }
-          }
-
-
-      - name: Set up Conda without changing shell profiles
-        if: runner.os == 'Windows'
-        uses: conda-incubator/setup-miniconda@v4
-        with:
-          miniforge-version: latest
-          activate-environment: ""
-          auto-activate: false
-          run-init: "false"
-          remove-profiles: "false"
-      - name: Create and install the Windows Conda environment
-        if: runner.os == 'Windows'
-        shell: powershell
-        run: .\scripts\install.ps1 -EnvironmentName InkReferenceCI -BrowserOnly
-      - name: Reuse the existing Conda environment
-        if: runner.os == 'Windows'
-        shell: powershell
-        run: .\scripts\install.ps1 -EnvironmentName InkReferenceCI -BrowserOnly
-      - name: Open the Conda browser app and check HTTP health
-        if: runner.os == 'Windows'
-        shell: powershell
-        run: |
-          $env:INKREFERENCE_DATA_DIR = Join-Path $env:RUNNER_TEMP ('InkReference Conda ' + [char]0x4e2d + [char]0x6587 + ' smoke')
-          $stdout = Join-Path $env:RUNNER_TEMP 'inkreference-conda-stdout.log'
-          $stderr = Join-Path $env:RUNNER_TEMP 'inkreference-conda-stderr.log'
-          $arguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', 'scripts/open.ps1', '-EnvironmentName', 'InkReferenceCI', '-Browser', '-NoOpen', '-Port', '18766')
-          $server = Start-Process -FilePath 'powershell.exe' -ArgumentList $arguments -WorkingDirectory $PWD.Path -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru
-          try {
-            $ready = $false
-            $lastProbeError = 'No HTTP response received.'
-            for ($i = 0; $i -lt 50; $i++) {
-              if ($server.HasExited) { throw 'The Conda launcher exited before becoming ready.' }
-              try {
-                $health = Invoke-RestMethod -Uri 'http://127.0.0.1:18766/api/health' -TimeoutSec 1
-                if ($health.status -eq 'ok') { $ready = $true; break }
-              } catch {
-                $lastProbeError = $_.Exception.Message
-                Start-Sleep -Milliseconds 200
-              }
-            }
-            if (-not $ready) { throw "The Conda app did not become ready: $lastProbeError" }
-            $page = Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:18766/' -TimeoutSec 5
-            if ($page.StatusCode -ne 200 -or $page.Content -notmatch 'InkReference') { throw 'The Conda app did not serve the production UI.' }
-          } finally {
-            if (-not $server.HasExited) { & taskkill.exe /PID $server.Id /T /F | Out-Null }
-            if (Test-Path $stdout) { Get-Content $stdout }
-            if (Test-Path $stderr) { Get-Content $stderr }
-          }
+        run: python scripts/verify_launch.py -- powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/open.ps1 -Browser -NoOpen -Port 18765
+      - name: Start the macOS wrapper with a Chinese data path
+        if: runner.os == 'macOS'
+        run: python scripts/verify_launch.py -- bash scripts/open.sh --browser --no-open --port 18765
+      - name: Reuse a developer-managed Python environment
+        if: runner.os != 'Linux'
+        run: python scripts/verify_launch.py --port 18766 -- python scripts/manage.py open --current-environment --browser --no-open --port 18766
 
   frontend:
     name: Frontend typecheck and production build

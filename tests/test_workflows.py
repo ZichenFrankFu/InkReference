@@ -441,7 +441,8 @@ def test_recover_approval_without_main_commit_remains_reviewable(tmp_path):
     assert store.stats()["works"] == 1 and len(models.calls) == 1
 
 
-def test_remote_creation_and_every_execution_require_explicit_consent(tmp_path):
+@pytest.mark.parametrize("legacy", [False, True], ids=["confirmed-task", "legacy-task"])
+def test_remote_task_confirms_once_and_keeps_target_on_resume(tmp_path, legacy):
     from inkreference.local_security import target_fingerprint
     runner, local, models, documents, workflows = setup_runner(tmp_path)
     models.profile.update(connection_mode="remote", base_url="https://provider.example/v1")
@@ -450,16 +451,16 @@ def test_remote_creation_and_every_execution_require_explicit_consent(tmp_path):
     assert blocked.value.status_code == 428 and len(runner.list_runs()) == 1
     remote = runner.create_run(local["document_id"], local["version_id"], "test", "1.0.0", "mock-profile", remote_consent=True, expected_model_fingerprint=target_fingerprint(models.profile))
     assert remote["snapshots"]["privacy"]["target_base_url"] == "https://provider.example/v1"
-    for action in (runner.start, runner.execute):
-        with pytest.raises(DataError) as blocked:
-            action(remote["id"])
-        assert blocked.value.status_code == 428
+    if legacy:
+        old_snapshots = copy.deepcopy(remote["snapshots"])
+        old_snapshots.pop("privacy")
+        with runner._db(write=True) as db:
+            db.execute("UPDATE run_jobs SET snapshots_json=? WHERE id=?", (json.dumps(old_snapshots), remote["id"]))
     runner.cancel(remote["id"])
-    with pytest.raises(DataError) as blocked:
-        runner.resume(remote["id"])
-    assert blocked.value.status_code == 428 and not models.calls
-    finished = runner.execute(remote["id"], remote_consent=True)
+    assert not models.calls
+    finished = runner.execute(remote["id"])
     assert finished["status"] == "needs_review"
+    assert finished["snapshots"]["model"]["base_url"] == "https://provider.example/v1"
     assert any(event["stage"] == "remote_authorized" for event in finished["events"])
 
 

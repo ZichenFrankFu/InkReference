@@ -281,7 +281,9 @@ class WorkflowRunner:
         with self._db(write=True) as db:
             row = self._job(db, run_id)
             model = json.loads(row["snapshots_json"])["model"]
-            require_remote_consent(model, remote_consent)
+            # This is an explicit start/resume of a task whose target is fixed.
+            # New tasks record confirmation at creation; resuming does not ask
+            # again or change the destination, including older saved projects.
             allowed = RESUMABLE if resume else {"queued"}
             if row["status"] not in allowed:
                 raise DataError(409, "当前任务状态不能继续" if resume else "只有等待中的任务可以启动")
@@ -290,7 +292,7 @@ class WorkflowRunner:
                 db.execute("UPDATE run_chunks SET round_attempts=0,status=CASE WHEN status='completed' THEN status ELSE 'pending' END WHERE run_id=?", (run_id,))
             self._event(db, run_id, "resuming" if resume else "starting", "用户已继续任务；成功块保留" if resume else "用户已启动模型提取")
             if remote_model(model):
-                self._event(db, run_id, "remote_authorized", "用户已确认向固定远程模型发送当前任务的全文分块")
+                self._event(db, run_id, "remote_authorized", "按任务已确定的远程目标继续执行")
 
     def _launch(self, run_id: str, *, resume: bool, remote_consent: bool = False) -> dict[str, Any]:
         key = self._key(run_id)

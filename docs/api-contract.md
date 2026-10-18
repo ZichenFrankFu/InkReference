@@ -40,12 +40,12 @@ All endpoints below use `/api/studio`. Lists return `{items:[...]}`. Timestamps 
 | Full texts | `GET/POST /documents`; POST multipart `file,title,encoding,work_id`. TXT/MD/SRT/DOCX/EPUB, 50 MiB. Originals remain immutable. |
 | Versions | `GET /documents/{id}`, `GET /documents/{id}/versions/{vid}?include_text=false`; `POST /documents/{id}/versions` with `base_version_id,options,manual_text?`, 409 on a stale base. |
 | Reading | Version suffix `/text?start=0&limit=20000&kind=cleaned\|source` pages text; `/diff` returns the bounded diff; `/download` downloads TXT. `/documents/{id}/original/download` returns original bytes. |
-| Models | `GET/POST /models`; `PUT/DELETE /models/{id}`. `api_key` is input only. Connection, credential and explicit outbound consent contracts are described below. |
+| Models | `GET/POST /models`; `PUT/DELETE /models/{id}`. `api_key` is input only. Connection and credential contracts are described below. |
 | Usage | `GET /usage?run_id=` returns `{items,summary}`. Counts have `actual`, `estimated` or `unknown` sources; costs require explicit prices/currency. |
 | Skills | `GET/POST /skills`, `POST /skills/upload` multipart `file`, `GET /skills/{id}/versions/{version}`. JSON, SKILL.md or declarative ZIP; uploaded code is not executable. |
 | Workflows | `GET/POST /workflows`, `GET /workflows/{id}/versions/{version}`. Definitions are immutable. `/layout` GET/PUT separately manages `{layout,expected_revision}`. |
 | Analysis | `GET/POST /jobs`; POST `{document_id,version_id,profile_id,workflow_id,workflow_version,start:true,remote_consent:false,expected_model_fingerprint?:string}`. Remote creation requires `remote_consent:true` plus the selected public profile's `target_fingerprint` as `expected_model_fingerprint`. Missing confirmation is 428; a changed endpoint/model is 409 with no job or model request. `GET /jobs/{id}` returns real progress, chunks, coverage, evidence, errors and configuration snapshots. |
-| Control | `POST /jobs/{id}/cancel`, `/start` or `/resume`; remote start/resume bodies must explicitly include `{remote_consent:true}`. Resume skips completed chunks and uses fixed versions. App restart never sends requests automatically. |
+| Control | `POST /jobs/{id}/cancel`, `/start` or `/resume`. A remote task uses its already confirmed fixed target, so start/resume need no renewed consent body. Resume skips completed chunks and uses fixed versions. App restart never sends requests automatically. |
 | Review | `PUT /jobs/{id}/results` with `{results,expected_revision}`; `POST /jobs/{id}/approve` with `{expected_revision}`. Approval commits reviewed candidates transactionally and idempotently. |
 | Projects | `GET /projects/export` is the full restore-capable ZIP. `GET /projects/tables/export` contains a CSV for every business table. `POST /projects/restore` multipart `file` verifies the ZIP and creates an independent copy, returning `data_dir`. |
 
@@ -54,19 +54,19 @@ All endpoints below use `/api/studio`. Lists return `{items:[...]}`. Timestamps 
 Profiles include `id,name,provider,connection_mode,base_url,model,context_window,max_output_tokens,max_tokens_parameter,timeout_seconds,credential_mode,key_env,input_price_per_million,output_price_per_million,currency`. `provider` is `ollama` or `openai_compatible`; `connection_mode` is `local` or `remote`:
 
 - `local`: URL hostname must be `localhost` or a literal loopback address; HTTP is allowed for the local inference server.
-- `remote`: URL must use HTTPS. A connection test, discovery request or remote analysis execution requires explicit consent for that action.
+- `remote`: URL must use HTTPS. Clicking test/discovery executes that explicit user operation without a second confirmation. New analysis confirms the target once; an existing task keeps that fixed target on start/resume.
 
 `credential_mode` is `session`, `vault` or `environment`. Input `api_key` is never returned. Session keys exist only in backend memory; environment mode stores only `key_env`, never its value. Vault mode uses an approved operating-system keyring backend, fails closed when unavailable and does not fall back to plaintext. Vault entries are scoped to the workspace path, so a restored or moved project requires new credential configuration. Profiles return `has_session_key,has_vault_key,key_available,credential_status` (`available|missing|vault_unavailable`) rather than a key.
 
 | Endpoint | Request and behavior |
 |---|---|
 | `GET /models/security` | Returns `{vault_available,vault_backend,vault_reason,credential_modes}`. No credentials or automatic network lookup. |
-| `POST /models/test-draft` | Body contains the current profile draft, optionally `api_key` and `use_saved_key:<profile_id>`; remote requests additionally require `remote_consent:true`. Sends a fixed test message, records actual usage, returns `{ok,model,message,usage,cost,call_id,duration_ms}`. Does not save the draft or send a document. |
-| `POST /models/discover` | Same draft and consent contract; performs an explicit provider model-list request, returns `{models:[{id}]}`. No discovery is performed by loading the settings page. |
-| `POST /models/{id}/test` | Tests a saved profile; remote requests require `{remote_consent:true}`. |
+| `POST /models/test-draft` | Body contains the current profile draft, optionally `api_key` and `use_saved_key:<profile_id>`; `remote_consent` is accepted for older clients but no second consent is required for this explicit action. Sends a fixed test message, records actual usage, returns `{ok,model,message,usage,cost,call_id,duration_ms}`. Does not save the draft or send a document. |
+| `POST /models/discover` | Same draft contract; performs an explicit provider model-list request, returns `{models:[{id}]}`. No discovery is performed by loading the settings page. |
+| `POST /models/{id}/test` | Tests a saved profile; no repeated consent is required for this explicit action. |
 | `DELETE /models/{id}/credentials` | Removes stored session/vault credentials and the profile's environment-variable reference. Does not change the operating-system environment variable itself. |
 
-Keys are excluded from profile JSON, model snapshots, business-table CSV and full project backups. Backups do retain non-secret configuration metadata and the user's texts/results. Switching to a remote endpoint does not grant consent to future requests; create/start/resume and explicit test/discovery actions each enforce the request's consent.
+Keys are excluded from profile JSON, model snapshots, business-table CSV and full project backups. Backups do retain non-secret configuration metadata and the user's texts/results. Credentials are bound to their service endpoint rather than silently reused after an endpoint change. New remote analysis requires target confirmation and the fingerprint check above; existing tasks retain the already confirmed immutable target. Explicit test/discovery requests do not require an extra confirmation dialog.
 
 ## EPUB and MinerU PDF conversion
 

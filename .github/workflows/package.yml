@@ -1,4 +1,4 @@
-name: Build Windows desktop package
+name: Build Windows and macOS desktop packages
 
 on:
   pull_request:
@@ -13,7 +13,7 @@ on:
   workflow_dispatch:
     inputs:
       installer:
-        description: Also compile an Inno Setup installer
+        description: Also compile Windows Setup and macOS DMG
         type: boolean
         default: true
 
@@ -26,66 +26,73 @@ jobs:
     timeout-minutes: 35
     steps:
       - uses: actions/checkout@v7
-      - uses: conda-incubator/setup-miniconda@v4
+      - uses: actions/setup-python@v7
         with:
-          miniforge-version: latest
-          activate-environment: ""
-          auto-activate: false
-          run-init: "false"
-          remove-profiles: "false"
-      - name: Build the desktop application and optional installer
+          python-version: '3.12'
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+      - name: Build the application without Conda
         shell: powershell
         run: |
           $buildInstaller = '${{ github.event_name }}' -eq 'pull_request' -or '${{ inputs.installer }}' -eq 'true'
-          .\scripts\package.ps1 -EnvironmentName InkReferenceBuild -Installer:$buildInstaller
-      - name: Check the frozen application without opening a window
-        shell: powershell
-        run: |
-          $env:INKREFERENCE_DATA_DIR = Join-Path $env:RUNNER_TEMP 'InkReference frozen smoke'
-          $exe = Join-Path $PWD.Path 'release/app/InkReference/InkReference.exe'
-          $server = Start-Process -FilePath $exe -ArgumentList @('--no-open', '--port', '18767') -PassThru
-          try {
-            $ready = $false
-            for ($i = 0; $i -lt 60; $i++) {
-              if ($server.HasExited) { throw 'The packaged application exited before readiness.' }
-              try {
-                $health = Invoke-RestMethod -Uri 'http://127.0.0.1:18767/api/health' -TimeoutSec 1
-                if ($health.status -eq 'ok') { $ready = $true; break }
-              } catch { Start-Sleep -Milliseconds 200 }
-            }
-            if (-not $ready) { throw 'The packaged application did not become ready.' }
-            $page = Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:18767/' -TimeoutSec 5
-            if ($page.StatusCode -ne 200 -or $page.Content -notmatch 'InkReference') { throw 'The frozen application did not serve its UI.' }
-            $meta = Invoke-RestMethod -Uri 'http://127.0.0.1:18767/api/meta' -TimeoutSec 5
-            if ($meta.tables.Count -ne 3) { throw 'The frozen application did not initialize its database.' }
-            $vault = Invoke-RestMethod -Uri 'http://127.0.0.1:18767/api/studio/models/security' -TimeoutSec 10
-            if (-not $vault.vault_available -or $vault.vault_backend -notmatch 'WinVaultKeyring$') { throw 'The frozen application did not load Windows Credential Locker.' }
-            $profileBody = @{
-              id = 'frozen-vault-smoke'; name = 'Synthetic vault smoke'; provider = 'openai_compatible'
-              connection_mode = 'local'; credential_mode = 'vault'; base_url = 'http://127.0.0.1:1234/v1'
-              model = 'synthetic-no-network'; api_key = [guid]::NewGuid().ToString('N')
-            } | ConvertTo-Json
-            try {
-              $profile = Invoke-RestMethod -Method Post -Uri 'http://127.0.0.1:18767/api/studio/models' -ContentType 'application/json' -Body $profileBody -TimeoutSec 10
-              if (-not $profile.has_vault_key -or -not $profile.key_available) { throw 'The frozen app failed to save the synthetic OS credential.' }
-              $cleared = Invoke-RestMethod -Method Delete -Uri 'http://127.0.0.1:18767/api/studio/models/frozen-vault-smoke/credentials' -TimeoutSec 10
-              if ($cleared.has_vault_key -or $cleared.key_available) { throw 'The frozen app failed to remove the synthetic OS credential.' }
-            } finally {
-              Invoke-RestMethod -Method Delete -Uri 'http://127.0.0.1:18767/api/studio/models/frozen-vault-smoke' -TimeoutSec 10 | Out-Null
-              $profileBody = $null
-            }
-          } finally {
-            if (-not $server.HasExited) { & taskkill.exe /PID $server.Id /T /F | Out-Null }
-            $log = Join-Path $env:INKREFERENCE_DATA_DIR 'logs/desktop.log'
-            if (Test-Path $log) { Get-Content $log }
-          }
-      - name: Upload portable ZIP and Setup
-        uses: actions/upload-artifact@v7
+          .\scripts\package.ps1 -CurrentEnvironment -Installer:$buildInstaller
+      - name: Check the frozen UI, database and Windows credential store
+        run: python scripts/verify_launch.py --require-vault -- release/app/InkReference/InkReference.exe --no-open --port 18765
+      - uses: actions/upload-artifact@v7
         with:
           name: InkReference-windows-x64
           path: |
             release/InkReference-windows-x64.zip
             release/installer/*.exe
+            release/package-manifest.json
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
+  macos:
+    name: macOS ${{ matrix.arch }} application
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            arch: arm64
+          - os: macos-15-intel
+            arch: x86_64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
+    env:
+      MACOSX_DEPLOYMENT_TARGET: '13.0'
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+      - name: Build the native app, ZIP and optional disk image
+        run: |
+          if [ '${{ github.event_name }}' = 'pull_request' ] || [ '${{ inputs.installer }}' = 'true' ]; then
+            ./scripts/package.sh --current-environment --dmg
+          else
+            ./scripts/package.sh --current-environment
+          fi
+      - name: Extract the distribution and check its signature and HTTP UI
+        run: |
+          destination="$RUNNER_TEMP/InkReference extracted app"
+          /usr/bin/ditto -x -k "release/InkReference-macos-${{ matrix.arch }}.zip" "$destination"
+          bundle="$destination/InkReference.app"
+          /usr/bin/codesign --verify --deep --strict "$bundle"
+          python scripts/verify_launch.py -- "$bundle/Contents/MacOS/InkReference" --no-open --port 18765
+      - uses: actions/upload-artifact@v7
+        with:
+          name: InkReference-macos-${{ matrix.arch }}
+          path: |
+            release/InkReference-macos-${{ matrix.arch }}.zip
+            release/InkReference-macos-${{ matrix.arch }}.dmg
+            release/package-manifest.json
           if-no-files-found: error
           retention-days: 14
           compression-level: 0

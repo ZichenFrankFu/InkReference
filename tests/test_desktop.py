@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import logging
+from contextlib import closing
 import threading
 import time
 from pathlib import Path
@@ -128,7 +129,7 @@ def test_health_timeout_keeps_error_message_and_returns_failure(desktop_fixture,
     assert desktop.run_desktop(server, object(), "http://127.0.0.1:8000") == 1
     assert not view.window.urls and server.should_exit
     assert "启动超时" in view.window.html[-1]
-    assert "open.ps1" in capsys.readouterr().err
+    assert "open.ps1" in capsys.readouterr().err if desktop.sys.platform == "win32" else "open.sh" in capsys.readouterr().err
 
 
 def test_server_failure_is_not_reported_as_gui_success(desktop_fixture, capsys):
@@ -146,7 +147,7 @@ def test_missing_optional_webview_does_not_start_server(monkeypatch, capsys):
     server = FakeServer()
     assert desktop.run_desktop(server, object(), "http://127.0.0.1:8000") == 2
     assert not hasattr(server, "sockets")
-    assert "-Browser" in capsys.readouterr().err
+    assert "Browser" in capsys.readouterr().err if desktop.sys.platform == "win32" else "--browser" in capsys.readouterr().err
 
 
 def test_renderer_exception_shuts_down_server(desktop_fixture, capsys):
@@ -216,8 +217,59 @@ def test_windowed_entry_provides_streams_for_uvicorn(monkeypatch, tmp_path):
 
 
 def test_frozen_failure_hint_uses_the_executable_and_current_port(monkeypatch):
+    monkeypatch.setattr(desktop.sys, "platform", "win32")
     monkeypatch.setattr(desktop.sys, "frozen", True, raising=False)
     monkeypatch.setattr(desktop.sys, "executable", r"C:\Program Files\InkReference\InkReference.exe")
     message = desktop._error_html("WebView2 unavailable", "http://127.0.0.1:18769")
     assert "open.ps1" not in message
     assert "InkReference.exe" in message and "--no-open --port 18769" in message
+
+
+def test_macos_uses_native_cocoa_renderer_on_main_thread(desktop_fixture, monkeypatch):
+    monkeypatch.setattr(desktop.sys, "platform", "darwin")
+    assert desktop.run_desktop(FakeServer(), object(), "http://127.0.0.1:8000") == 0
+    assert desktop_fixture.start_options["gui"] == "cocoa"
+    assert desktop_fixture.window.urls == ["http://127.0.0.1:8000"]
+
+
+def test_macos_errors_and_browser_fallback_are_platform_specific(desktop_fixture, monkeypatch, capsys):
+    monkeypatch.setattr(desktop.sys, "platform", "darwin")
+    desktop_fixture.renderer_error = True
+    assert desktop.run_desktop(FakeServer(), object(), "http://127.0.0.1:8000") == 1
+    message = capsys.readouterr().err
+    assert "WebKit" in message and "./scripts/open.sh --browser" in message
+    assert "PowerShell" not in message and "Windows 需要" not in message
+
+
+def test_macos_frozen_browser_hint_quotes_bundle_executable(monkeypatch):
+    monkeypatch.setattr(desktop.sys, "platform", "darwin")
+    monkeypatch.setattr(desktop.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(desktop.sys, "executable", "/Applications/Ink Reference.app/Contents/MacOS/InkReference")
+    hint = desktop._browser_hint("http://127.0.0.1:18769")
+    assert hint.startswith("'/Applications/Ink Reference.app/Contents/MacOS/InkReference' --no-open")
+    assert "--port 18769" in hint and "& '" not in hint
+
+
+def test_default_data_and_log_paths_use_macos_locations_and_legacy_workspace(monkeypatch, tmp_path):
+    from inkreference.api import default_data_dir
+
+    monkeypatch.setattr(desktop.sys, "platform", "darwin")
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.delenv("INKREFERENCE_DATA_DIR", raising=False)
+    monkeypatch.delenv("XDG_DATA_HOME", raising=False)
+    assert default_data_dir() == tmp_path / "Library" / "Application Support" / "InkReference"
+    assert desktop.default_log_dir() == tmp_path / "Library" / "Logs" / "InkReference"
+    legacy = tmp_path / ".local" / "share" / "InkReference"
+    legacy.mkdir(parents=True)
+    (legacy / "inkreference.sqlite3").write_bytes(b"invalid database")
+    assert default_data_dir() == tmp_path / "Library" / "Application Support" / "InkReference"
+    import sqlite3
+    (legacy / "inkreference.sqlite3").unlink()
+    with closing(sqlite3.connect(legacy / "inkreference.sqlite3")) as connection:
+        with connection:
+            connection.execute("CREATE TABLE fixture (id INTEGER)")
+    assert default_data_dir() == legacy
+    override = tmp_path / "chosen workspace"
+    monkeypatch.setenv("INKREFERENCE_DATA_DIR", str(override))
+    assert default_data_dir() == override
+    assert desktop.default_log_dir() == override / "logs"

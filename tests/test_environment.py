@@ -1,0 +1,268 @@
+"""Environment selection is explicit and never installs into an accidental Python."""
+from __future__ import annotations
+
+import importlib.util
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+
+import pytest
+
+SCRIPT = Path(__file__).resolve().parents[1] / 'scripts' / 'manage.py'
+_spec = importlib.util.spec_from_file_location('inkreference_manage', SCRIPT)
+manage = importlib.util.module_from_spec(_spec)
+sys.modules[_spec.name] = manage
+_spec.loader.exec_module(manage)
+
+
+def args(action='open', *options):
+    return manage.parser().parse_args([action, *options])
+
+
+def details(**extra):
+    return {'version': [3, 12, 0], 'pip': True, 'app': True, 'desktop': True, 'missing': [], **extra}
+
+
+def source_tree(root):
+    for name in ('pyproject.toml', 'requirements-lock.txt', 'frontend/package-lock.json', 'frontend/dist/index.html'):
+        path = root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('{}' if name.endswith('json') else 'fixture', encoding='utf-8')
+
+
+def test_default_environment_is_project_venv_even_with_an_active_environment(tmp_path, monkeypatch):
+    target = manage.venv_python(tmp_path)
+    target.parent.mkdir(parents=True)
+    target.touch()
+    monkeypatch.setenv('CONDA_PREFIX', str(tmp_path / 'developer conda'))
+    monkeypatch.setenv('VIRTUAL_ENV', str(tmp_path / 'active other environment'))
+    seen = []
+    monkeypatch.setattr(manage, 'probe', lambda runtime: seen.append(runtime.executable) or details())
+    selected = manage.resolve_runtime(args(), tmp_path)
+    assert selected.executable == str(target)
+    assert seen == [str(target)]
+
+
+def test_current_environment_explicitly_bypasses_project_venv(tmp_path):
+    target = manage.venv_python(tmp_path)
+    target.parent.mkdir(parents=True)
+    target.write_text('not an executable', encoding='utf-8')
+    runtime = manage.resolve_runtime(args('open', '--current-environment'), tmp_path)
+    assert runtime.executable == sys.executable
+
+
+def test_missing_venv_never_falls_back_to_global_python(tmp_path):
+    with pytest.raises(manage.EnvironmentError, match='install command first'):
+        manage.resolve_runtime(args(), tmp_path)
+    assert not (tmp_path / '.venv').exists()
+
+
+def test_real_venv_with_unicode_spaces_and_missing_pip(tmp_path):
+    root = tmp_path / '中文 project with spaces'
+    root.mkdir()
+    target = manage.venv_python(root)
+    subprocess.run([sys.executable, '-m', 'venv', '--without-pip', str(root / '.venv')], check=True, capture_output=True)
+    runtime = manage.resolve_runtime(args(), root)
+    inspected = manage.probe(runtime)
+    assert Path(inspected['executable']) == target
+    assert inspected['prefix'] != inspected['base_prefix']
+    assert inspected['pip'] is False
+    with pytest.raises(manage.EnvironmentError, match='pip is missing'):
+        manage.checked_runtime(runtime, needs_pip=True)
+
+
+def test_unsupported_environment_is_diagnosed_without_modification(tmp_path, monkeypatch):
+    target = manage.venv_python(tmp_path)
+    target.parent.mkdir(parents=True)
+    target.write_text('preserve this environment', encoding='utf-8')
+    monkeypatch.setattr(manage, 'probe', lambda runtime: details(version=[3, 14, 0]))
+    with pytest.raises(manage.EnvironmentError, match='was not changed'):
+        manage.resolve_runtime(args(), tmp_path)
+    assert target.read_text() == 'preserve this environment'
+
+
+def test_explicit_python_does_not_silently_select_another_version(monkeypatch):
+    monkeypatch.setattr(manage, 'probe', lambda runtime: details(version=[3, 10, 0]))
+    with pytest.raises(manage.EnvironmentError, match='Python 3.10.0'):
+        manage.creation_python(sys.executable)
+
+
+def test_mutually_exclusive_environment_options():
+    with pytest.raises(SystemExit):
+        args('install', '--current-environment', '--conda-environment', 'InkReference')
+    with pytest.raises(SystemExit):
+        args('open', '--python', sys.executable, '--current-environment')
+
+
+def test_runtime_preserves_argument_boundaries_and_does_not_change_process_environment(monkeypatch):
+    monkeypatch.setenv('PYTHONHOME', 'unrelated global runtime')
+    runtime = manage.Runtime('/Python with spaces/python', label='explicit')
+    assert runtime.command('-m', 'inkreference', '--data-dir', '/中文 data/a & b') == [
+        '/Python with spaces/python', '-m', 'inkreference', '--data-dir', '/中文 data/a & b',
+    ]
+    assert 'PYTHONHOME' not in runtime.environment()
+    assert os.environ['PYTHONHOME'] == 'unrelated global runtime'
+
+
+def test_missing_node_reports_action_before_creating_environment(tmp_path, monkeypatch):
+    source_tree(tmp_path)
+    monkeypatch.setattr(manage, 'creation_python', lambda value: manage.Runtime(sys.executable))
+    monkeypatch.setattr(manage.shutil, 'which', lambda name: None)
+    calls = []
+    monkeypatch.setattr(manage, 'run_phase', lambda *a, **kw: calls.append(a))
+    with pytest.raises(manage.EnvironmentError, match='Node.js 22 or 24'):
+        manage.install(args('install'), tmp_path)
+    assert calls == []
+    assert not (tmp_path / '.venv').exists()
+
+
+@pytest.mark.parametrize('version', ['v20.20.0', 'v23.0.0', 'v25.1.0', 'invalid'])
+def test_incompatible_node_requires_user_selected_toolchain(version, monkeypatch):
+    monkeypatch.setattr(manage.shutil, 'which', lambda name: '/tools/' + name)
+    monkeypatch.setattr(manage, 'capture', lambda command, **kw: version if 'node' in command[0] else '11.0.0')
+    with pytest.raises(manage.EnvironmentError, match='no global tools were changed'):
+        manage.frontend_tools(manage.Runtime(sys.executable))
+
+
+def test_conda_is_only_consulted_when_explicit_and_missing_name_is_not_created(tmp_path, monkeypatch):
+    conda = tmp_path / 'Conda tools' / 'conda'
+    conda.parent.mkdir()
+    conda.touch()
+    monkeypatch.setenv('CONDA_EXE', str(conda))
+    commands = []
+    monkeypatch.setattr(manage, 'capture', lambda command, **kw: commands.append(command) or json.dumps({'envs': [str(tmp_path / 'base')]}))
+    with pytest.raises(manage.EnvironmentError, match='does not exist'):
+        manage.resolve_conda('MissingEnvironment')
+    assert commands == [[str(conda), 'env', 'list', '--json']]
+
+
+def test_existing_conda_environment_uses_conda_run_without_activate_or_changes(tmp_path, monkeypatch):
+    conda = tmp_path / 'Conda tools' / 'conda'
+    conda.parent.mkdir()
+    conda.touch()
+    monkeypatch.setenv('CONDA_EXE', str(conda))
+    monkeypatch.setattr(manage, 'capture', lambda command, **kw: json.dumps({'envs': [str(tmp_path / 'envs/InkReference')]}))
+    runtime = manage.resolve_conda('InkReference')
+    assert runtime.command('-m', 'pip', '--version') == [str(conda), 'run', '--no-capture-output', '-n', 'InkReference', 'python', '-m', 'pip', '--version']
+    assert runtime.tool_command('npm', 'ci') == [str(conda), 'run', '--no-capture-output', '-n', 'InkReference', 'npm', 'ci']
+
+
+def test_install_targets_selected_environment_and_isolates_optional_mineru_constraints(tmp_path, monkeypatch):
+    root = tmp_path / '中文 project with spaces'
+    source_tree(root)
+    (root / 'requirements-mineru.txt').write_text('mineru==4.0.12')
+    runtime = manage.Runtime('/selected python/python', label='explicit developer environment')
+    monkeypatch.setattr(manage, 'resolve_runtime', lambda *a: runtime)
+    monkeypatch.setattr(manage, 'checked_runtime', lambda *a, **kw: runtime)
+    monkeypatch.setattr(manage, 'frontend_tools', lambda selected: (['node'], ['npm'], 'v24.0.0'))
+    calls = []
+    monkeypatch.setattr(manage, 'run_phase', lambda command, description, **kw: calls.append((command, kw)))
+    assert manage.install(args('install', '--current-environment', '--mineru', '--dev'), root) == 0
+    assert len(calls) == 4
+    base, mineru, npm_install, npm_build = [call[0] for call in calls]
+    assert base == runtime.command('-m', 'pip', 'install', '-c', str(root / 'requirements-lock.txt'), '-e', '.[dev,desktop]')
+    assert mineru == runtime.command('-m', 'pip', 'install', '-r', str(root / 'requirements-mineru.txt'))
+    assert '-c' not in mineru
+    assert npm_install == ['npm', 'ci']
+    assert npm_build == ['npm', 'run', 'build']
+    assert calls[2][1]['cwd'] == root / 'frontend'
+    assert all(call[1]['runtime'] == runtime for call in calls)
+    assert not (root / '.venv').exists()
+
+
+def test_incomplete_checkout_fails_before_installing_anything(tmp_path, monkeypatch):
+    monkeypatch.setattr(manage, 'creation_python', lambda value: pytest.fail('must not select/install Python'))
+    with pytest.raises(manage.EnvironmentError, match='complete checkout'):
+        manage.install(args('install'), tmp_path)
+
+
+@pytest.mark.parametrize('platform,options,desktop_available,expects_desktop', [
+    ('win32', [], True, True),
+    ('darwin', [], True, True),
+    ('darwin', ['--no-open'], True, False),
+    ('win32', ['--browser'], True, False),
+    ('darwin', [], False, False),
+    ('linux', [], True, False),
+])
+def test_open_platform_and_browser_selection(tmp_path, monkeypatch, platform, options, desktop_available, expects_desktop):
+    source_tree(tmp_path)
+    monkeypatch.setattr(manage.sys, 'platform', platform)
+    runtime = manage.Runtime('/selected Python/python', label='selected')
+    monkeypatch.setattr(manage, 'resolve_runtime', lambda *a: runtime)
+    monkeypatch.setattr(manage, 'probe', lambda selected: details(desktop=desktop_available))
+    calls = []
+    monkeypatch.setattr(manage.subprocess, 'call', lambda command, **kw: calls.append((command, kw)) or 0)
+    data = str(tmp_path / '中文 user data')
+    assert manage.open_app(args('open', *options, '--port', '8123', '--data-dir', data), tmp_path) == 0
+    command, kwargs = calls[0]
+    assert ('--desktop' in command) is expects_desktop
+    assert ('--no-open' in command) == ('--no-open' in options)
+    assert command[:6] == ['/selected Python/python', '-m', 'inkreference', '--host', '127.0.0.1', '--port']
+    assert command[-2:] == ['--data-dir', data]
+    assert kwargs['cwd'] == tmp_path
+
+
+def test_open_missing_dependencies_has_actionable_message(tmp_path, monkeypatch):
+    source_tree(tmp_path)
+    monkeypatch.setattr(manage, 'resolve_runtime', lambda *a: manage.Runtime(sys.executable, label='selected'))
+    monkeypatch.setattr(manage, 'probe', lambda selected: details(missing=['uvicorn']))
+    monkeypatch.setattr(manage.subprocess, 'call', lambda *a, **kw: pytest.fail('must not launch broken app'))
+    with pytest.raises(manage.EnvironmentError, match='uvicorn'):
+        manage.open_app(args(), tmp_path)
+
+
+def test_doctor_does_not_require_node_for_prebuilt_interface_or_disclose_environment_keys(tmp_path, monkeypatch, capsys):
+    source_tree(tmp_path)
+    monkeypatch.setenv('OPENAI_API_KEY', 'private-test-key-never-print')
+    monkeypatch.setattr(manage, 'resolve_runtime', lambda *a: manage.Runtime(sys.executable, label='selected'))
+    monkeypatch.setattr(manage, 'probe', lambda selected: details())
+    def missing_node(selected):
+        raise manage.EnvironmentError('Node.js not installed')
+    monkeypatch.setattr(manage, 'frontend_tools', missing_node)
+    assert manage.doctor(args('doctor', '--json'), tmp_path) == 0
+    output = capsys.readouterr().out
+    report = json.loads(output)
+    assert report['ok'] is True
+    assert report['checks']['frontend_tools']['required_for'] == 'source builds only'
+    assert 'private-test-key' not in output
+    assert 'OPENAI_API_KEY' not in output
+
+
+def test_doctor_fails_when_application_dependencies_are_missing(tmp_path, monkeypatch, capsys):
+    source_tree(tmp_path)
+    monkeypatch.setattr(manage, 'resolve_runtime', lambda *a: manage.Runtime(sys.executable))
+    monkeypatch.setattr(manage, 'probe', lambda selected: details(app=False, missing=['fastapi']))
+    monkeypatch.setattr(manage, 'frontend_tools', lambda selected: (['node'], ['npm'], 'v22.0.0'))
+    assert manage.doctor(args('doctor', '--json'), tmp_path) == 1
+    assert json.loads(capsys.readouterr().out)['checks']['python']['ok'] is False
+
+
+@pytest.mark.skipif(sys.platform == 'win32' or shutil.which('bash') is None, reason='POSIX shell wrappers')
+@pytest.mark.parametrize('wrapper,action', [('install.sh', 'install'), ('open.sh', 'open')])
+def test_shell_wrappers_preserve_spaces_and_unicode_without_installing(tmp_path, wrapper, action):
+    root = tmp_path / '中文 checkout & spaces'
+    scripts = root / 'scripts'
+    scripts.mkdir(parents=True)
+    shutil.copyfile(SCRIPT.parent / wrapper, scripts / wrapper)
+    (scripts / 'manage.py').write_text('import json,sys; print(json.dumps(sys.argv[1:]))', encoding='utf-8')
+    data = str(tmp_path / '中文 user data & spaces')
+    result = subprocess.run(['bash', str(scripts / wrapper), '--python', sys.executable, '--data-dir', data], text=True, capture_output=True, check=True)
+    assert json.loads(result.stdout) == [action, '--python', sys.executable, '--data-dir', data]
+
+
+@pytest.mark.skipif(sys.platform == 'win32' or shutil.which('bash') is None, reason='POSIX shell wrappers')
+@pytest.mark.parametrize('wrapper,action', [('install.sh', 'install'), ('open.sh', 'open')])
+def test_shell_wrappers_zero_arguments_use_project_venv(tmp_path, wrapper, action):
+    root = tmp_path / '中文 checkout with spaces'
+    scripts = root / 'scripts'
+    scripts.mkdir(parents=True)
+    shutil.copyfile(SCRIPT.parent / wrapper, scripts / wrapper)
+    (scripts / 'manage.py').write_text('import json,sys; print(json.dumps(sys.argv[1:]))', encoding='utf-8')
+    target = root / '.venv/bin/python'
+    target.parent.mkdir(parents=True)
+    target.symlink_to(sys.executable)
+    result = subprocess.run(['bash', str(scripts / wrapper)], text=True, capture_output=True, check=True)
+    assert json.loads(result.stdout) == [action]

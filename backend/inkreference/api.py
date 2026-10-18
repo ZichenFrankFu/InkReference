@@ -46,9 +46,20 @@ def default_data_dir() -> Path:
     configured = os.environ.get("INKREFERENCE_DATA_DIR")
     if configured:
         return Path(configured).expanduser().resolve()
-    if os.name == "nt":
+    if sys.platform == "win32":
         base = Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local")))
         return base / "InkReference"
+    if sys.platform == "darwin":
+        # Earlier source checkouts used the Linux-style path on macOS. Reuse
+        # an existing workspace so this platform update never hides its data.
+        legacy = Path(os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local" / "share"))) / "InkReference"
+        try:
+            with (legacy / "inkreference.sqlite3").open("rb") as database:
+                if database.read(16) == b"SQLite format 3\x00":
+                    return legacy
+        except OSError:
+            pass
+        return Path.home() / "Library" / "Application Support" / "InkReference"
     base = Path(os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local" / "share")))
     return base / "InkReference"
 

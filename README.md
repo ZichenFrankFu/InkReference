@@ -1,8 +1,8 @@
 # InkReference
 
-Windows 优先的本地写作参考工作台：整理作品、人物和桥段，管理全文及清洗版本，用可定制的 LangGraph 工作流提取剧情与证据，审核后入库。
+Windows／macOS 本地写作参考工作台：整理作品、人物和桥段，管理全文与清洗版本，用可定制的 LangGraph 工作流提取剧情和证据，审核后入库。
 
-React 中文界面提供素材库、全文清洗、EPUB／MinerU PDF 转换、分析任务、工作流与 Skills、模型设置和项目备份。可在指定 Conda 环境中打开 pywebview 桌面窗口或浏览器，也提供 Windows 安装包构建入口。
+普通用户使用打包后的桌面应用，无需安装 Python、Node.js 或 Conda。源码安装默认使用项目内 `.venv`；开发者可自行配置并复用 Conda 或其他 Python 环境。
 
 ## 当前功能
 
@@ -20,207 +20,232 @@ React 中文界面提供素材库、全文清洗、EPUB／MinerU PDF 转换、�
 | 工作流与 Skills | 内置参考作品分析流程；自定义提取开关、提示词、分块、重试和 token 预算；保存不可变版本。画布支持移动、缩放与布局保存。创建或上传 JSON、SKILL.md、声明式 ZIP Skill，校验输出结构与引文。 |
 | 用量与费用 | 每次模型请求及重试独立记账；查看成功／失败／待确认状态、输入和输出 token，区分提供商实测、规划估算及未知；按配置的价格和币种估算费用，可按分析任务筛选。 |
 | 备份与恢复 | 导出包含五个 SQLite 数据库及原始 CSV 导入文件的完整项目 ZIP；恢复时校验路径、大小、SHA-256 和数据库完整性，生成独立工作区。全部业务表 CSV 用于查阅和迁移，恢复项目使用完整备份 ZIP。 |
-| 桌面与运行 | 命名 Conda 环境一键安装／打开；pywebview 桌面或浏览器入口；自选端口与数据目录；工作区单实例保护；Windows 可携带 ZIP 和 Setup 构建。界面提供进度条、键盘操作、窄屏布局与减少动态效果支持。 |
+| 桌面与运行 | Windows／macOS 桌面应用及浏览器入口；源码一键安装、启动、环境诊断；默认使用项目 `.venv`，也可复用开发者已配置的环境。支持自选端口、数据目录和工作区单实例保护；提供 Windows ZIP／Setup、macOS `.app`／ZIP 构建。界面提供进度条、键盘操作、窄屏布局与减少动态效果支持。 |
 
 当前素材结构采用 v8 的固定字段，CSV 表头需要完整匹配某一类表；文件名和列的排列顺序可以不同。
 
-## 第一次使用
+## 普通用户：桌面应用
 
-1. 按下面的 PowerShell 命令安装并打开应用。
-2. 在“素材库”导入三个 v8 CSV，检查预览后提交；也可以直接新建作品。
-3. 打开“模型设置”，选择本地模型或商业 API，在界面填写地址、模型和凭据，测试连接后保存。详见[模型配置与数据边界](#模型配置与数据边界)。
-4. 在“全文与清洗”上传全文，查看章节、诊断和清洗版本。EPUB／PDF 的 MD、TXT 输出在该页面的“格式转换”中完成。
-5. 选择全文版本、模型及工作流，开始分析；远程请求需确认目的服务。到“分析与审核”查看证据、修订并确认入库。
-6. 在“备份与恢复”下载完整项目 ZIP。迁移到另一台机器或另一目录后，重新配置模型凭据。
+从项目提供的构建产物中选择与系统匹配的包：
 
-## Windows 安装与启动
+| 系统 | 安装与打开 |
+|---|---|
+| Windows x64 | 运行 Setup 安装程序，或完整解压 Windows ZIP 后双击 `InkReference.exe`。Windows 需要 Microsoft Edge WebView2 Runtime。 |
+| macOS 13+ Apple Silicon | 解压 `macos-arm64` ZIP，把 `InkReference.app` 拖入“应用程序”后打开。 |
+| macOS 13+ Intel | 选择 `macos-x86_64` ZIP，按相同方式安装。 |
 
-先安装 Miniconda、Miniforge 或 Anaconda，然后在仓库根目录的 PowerShell 中执行：
+可携带版需要保留整个解压目录。macOS 包按对应架构在 Mac 上构建，构建会添加本机 ad-hoc 签名，未提供 Developer ID 签名或 Apple 公证；首次打开可能需要在“系统设置 → 隐私与安全性”中允许此应用。GitHub Actions 的构建产物位于相应运行的 Artifacts，构建不会自动发布 GitHub Release。各平台的实际验证范围见 [validation.md](docs/validation.md)。
 
-```powershell
-.\scripts\install.ps1 -EnvironmentName InkReference
-.\scripts\open.ps1 -EnvironmentName InkReference
-```
+首次使用：
 
-安装会复用指定环境；环境不存在时创建 Python 3.12、pip 和 Node.js 22，随后安装应用依赖并构建前端。已有环境必须使用 Python 3.11–3.13；补装缺失工具时保留原 Python 小版本。Conda 模式不再创建额外 `.venv`，不需要预先 `conda activate` 或修改 `conda init`。下载日志直接展示，阶段进度为不定进度，不估算百分比。
+1. 打开“素材库”，导入三个 v8 CSV，检查预览后提交；也可以直接新建作品。
+2. 在“模型设置”选择本地模型或商业 API，填写地址、模型及凭据，测试连接后保存。
+3. 在“全文与清洗”上传全文，查看章节、诊断和清洗版本；EPUB／PDF 的 Markdown、TXT 输出使用同页“格式转换”。PDF 需要可选的 MinerU 运行环境，见[格式转换与分析](#格式转换与分析)。
+4. 选择全文版本、模型和工作流，开始分析。远程分析在开始前简洁确认一次目的服务；任务恢复沿用已确认目标。
+5. 在“分析与审核”查看证据、修订结果并确认入库。需要迁移或归档时，在“备份与恢复”下载完整项目 ZIP。
 
-如需使用可选的 MinerU 4 PDF 转换，在同一环境显式安装：
+## 源码安装与启动
 
-```powershell
-.\scripts\install.ps1 -EnvironmentName InkReference -MinerU
-```
+源码运行需要 **Python 3.11–3.13、Node.js 22 或 24 和 npm**。无需 Conda。以下命令都在仓库根目录执行；安装器检查版本，创建或复用项目 `.venv`，安装依赖并构建前端。下载输出与阶段进度会显示在终端。
 
-MinerU 使用独立的 `requirements-mineru.txt`，不会加入基础依赖锁。标准 OCR 首次使用可能下载模型，具体取决于所选后端；安装日志与转换进度会分别展示。EPUB 转换不需要 MinerU。
-
-`EnvironmentName` 默认是 `InkReference`，也可改成其他环境名。默认打开 pywebview 桌面窗口；Windows 需要 Microsoft Edge WebView2 Runtime。若只需要浏览器界面：
+### Windows PowerShell
 
 ```powershell
-.\scripts\install.ps1 -EnvironmentName InkReference -BrowserOnly
-.\scripts\open.ps1 -EnvironmentName InkReference -Browser
+.\scripts\install.ps1
+.\scripts\open.ps1
+
+# 可选：PDF 转换与测试依赖
+.\scripts\install.ps1 -MinerU -Dev
+
+# 只使用浏览器
+.\scripts\install.ps1 -BrowserOnly
+.\scripts\open.ps1 -Browser
+.\scripts\open.ps1 -Browser -NoOpen
+
+# 指定端口和数据目录
+.\scripts\open.ps1 -Port 8001 -DataDir "D:\写作资料\InkReference"
 ```
 
-启动选项：
+支持 Windows PowerShell 5.1。脚本不修改全局执行策略；若当前策略阻止运行，可只为此次子进程设置：
 
 ```powershell
-# 指定端口与数据目录，支持空格和中文路径
-.\scripts\open.ps1 -EnvironmentName InkReference -Port 8001 -DataDir "D:\写作资料\InkReference"
-
-# 仅启动本地服务，手动打开 http://127.0.0.1:8000
-.\scripts\open.ps1 -EnvironmentName InkReference -Browser -NoOpen
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\install.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\open.ps1
 ```
 
-启动终端需要保持运行，按 `Ctrl+C` 可停止服务。端口占用时脚本会提示更换端口，不结束其他程序。代码更新后重新执行同一条安装命令即可更新依赖和前端。
+### macOS Terminal
 
-脚本支持 Windows PowerShell 5.1。如果当前终端找不到 Conda，可从 Anaconda PowerShell Prompt 运行，或让 `CONDA_EXE` 指向自己的 `conda.exe`。脚本不修改全局执行策略；若策略阻止脚本，可仅为这次子进程使用：
+```bash
+./scripts/install.sh
+./scripts/open.sh
+
+# 可选：PDF 转换与测试依赖
+./scripts/install.sh --mineru --dev
+
+# 浏览器模式，或指定数据目录
+./scripts/open.sh --browser
+./scripts/open.sh --port 8001 --data-dir "$HOME/Documents/InkReference"
+```
+
+桌面模式使用 macOS 系统 WebKit。浏览器模式复用相同的本机服务。源码启动时保持终端运行，`Ctrl+C` 停止服务；端口占用会提示换端口，不结束其他程序。代码更新后重新运行安装命令。
+
+两套入口共用 Python 管理器，也可直接执行：
+
+```bash
+python scripts/manage.py install
+python scripts/manage.py open
+python scripts/manage.py doctor
+```
+
+macOS 中如果命令名为 `python3`，将上面的 `python` 替换为 `python3`。`doctor` 检查解释器、依赖、前端及桌面支持，输出具体修复建议；`doctor --json` 可输出结构化结果。创建 `.venv` 时可用 `install --python PATH`／`install.ps1 -Python PATH` 指定基础解释器。安装使用 `requirements-lock.txt` 约束依赖，前端使用 `npm ci` 和生产构建；可选 MinerU 使用独立的 `requirements-mineru.txt`。默认安装运行及桌面依赖，测试依赖由 `--dev`／`-Dev` 选装。
+
+### 复用开发者自己的环境
+
+先手动激活已配置好的 Python 环境，再明确要求使用当前环境。可以是 Conda、虚拟环境或其他受管理的 Python；安装器不会替你创建 Conda 环境、执行 `conda init`，也不改全局配置。
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\install.ps1 -EnvironmentName InkReference
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\open.ps1 -EnvironmentName InkReference
+conda activate InkReference
+.\scripts\install.ps1 -CurrentEnvironment -Dev
+.\scripts\open.ps1 -CurrentEnvironment
 ```
 
-安装使用 `requirements-lock.txt` 约束 Python 依赖；默认安装 `.[dev,desktop]`，`-BrowserOnly` 使用 `.[dev]`。前端存在锁文件时使用 `npm ci`，随后执行生产构建。仓库的 `environment.yml` 描述默认 Conda 环境，推荐使用上面的安装入口完成包含前端的安装。
+macOS／通用入口：
 
-已有 `.venv` 用户可以继续双击 `scripts\setup.cmd`、`scripts\start.cmd`，或使用 `install.ps1 -LegacyVenv`、`open.ps1 -LegacyVenv`。该模式需要系统安装 Python 3.11–3.13 和 Node.js 22/24；旧 `start.cmd` 默认打开浏览器，新的 `open.ps1` 默认打开桌面窗口，`-Browser` 可回退浏览器。
-
-## Windows 打包
-
-在 Windows 中用同一个 Conda 环境执行：
-
-```powershell
-# 可携带的应用目录和 ZIP
-.\scripts\package.ps1 -EnvironmentName InkReference
-
-# 同时生成 Setup 安装程序，需要先安装 Inno Setup 6.3 或更高版本
-.\scripts\package.ps1 -EnvironmentName InkReference -Installer
-
-# 指定输出位置
-.\scripts\package.ps1 -EnvironmentName InkReference -Installer -OutputDirectory "D:\打包结果\InkReference"
+```bash
+conda activate InkReference
+./scripts/install.sh --current-environment --dev
+./scripts/open.sh --current-environment
+# 等价：python scripts/manage.py install --current-environment --dev
 ```
 
-默认输出为 `release\app\InkReference\InkReference.exe`、`release\InkReference-windows-x64.zip`，安装程序位于 `release\installer`。可携带版需要保留整个应用目录；双击 EXE 默认打开桌面窗口，Windows 仍需 WebView2 Runtime。安装程序建立开始菜单入口，卸载时保留用户数据目录。
+旧 `-EnvironmentName InkReference` 参数仅兼容复用**已经存在**的命名 Conda 环境，环境不存在时提示手动配置，不再自动创建。旧 `setup`／`start` 入口保留为兼容入口。Conda 是可选的开发者工具，打包后的应用用户无需配置它。
 
-打包会收集已构建的前端、LangGraph SQLite 与 pywebview 资源，包含相应运行依赖；MinerU、模型权重和用户资料不放入安装包。MinerU 转换可通过上面的 Conda 源码运行方式使用。
+## 模型配置与基本安全
 
-GitHub Actions 工作流 **Build Windows desktop package** 会在相关 PR 中构建，也可手动启动：构建后用 `--no-open` 检查 EXE 的本地 HTTP 服务与界面，并把 ZIP／Setup 放在该次运行的 Artifacts；它不会创建 GitHub Release。该烟雾检查及 fake-window 测试不能替代原生窗口的 Windows 实机验收。
-
-## 数据与导入规则
-
-- 数据默认存放在 `%LOCALAPPDATA%\InkReference`，与源码分开。也可以设置 `INKREFERENCE_DATA_DIR`，或传入 `-DataDir`。
-- 数据库启动时自动迁移。真实 CSV、数据库、全文、模型和密钥不提交到仓库；提交的测试仅使用合成数据。
-- 以外部 ID 识别记录，同名作品的不同版本分别保存；日期精度、换行、空白和“不确定”等内容保留为字符串。
-- 导入先预览，存在校验错误时不会写入。提交在一个事务内执行；重复记录可选择跳过、更新或报错。
-- 编辑使用版本检查。存在关联的记录默认禁止直接删除，级联删除需要在界面确认。
-
-素材库导出提供两种 ZIP：兼容模式包含 v8 格式的三个 CSV；完整模式包含三张素材表（附记录 ID／revision）、作品桥段关联表及 `manifest.json`。也可以单独导出一张素材表。CSV 使用 UTF-8 BOM，便于在 Windows Excel 中打开。
-
-素材库的兼容导出保留 v8 的三个 CSV；备份页的“全部业务表”会为素材、全文、转换、Skills、工作流、分析与用量等每张业务表生成 CSV。完整项目 ZIP 另外包含五个 SQLite 数据库、原始导入文件与校验清单，可恢复为独立工作区。模型凭据的备份边界见下一节。
-
-## 模型配置与数据边界
-
-模型连接在 GUI 的“模型设置”中完成，无需通过代码或命令行填写模型参数。
+模型连接均在 GUI 的“模型设置”完成。
 
 | 连接方式 | GUI 配置 |
 |---|---|
-| 本地 Ollama | 选择“本地模型”中的 Ollama，默认地址 `http://127.0.0.1:11434`；确保 Ollama 已运行且已下载所需模型，然后主动读取模型列表或填写模型 ID。 |
-| 本地 LM Studio／vLLM | 选择相应预设，启动本机 OpenAI-compatible 服务，填写实际监听地址与模型 ID。应用连接已有推理服务；模型权重由该服务管理。 |
-| 商业 API | 选择 OpenAI、DeepSeek、通义千问或自定义兼容服务，核对 HTTPS 服务地址、模型 ID 和 API Key。当前适配 OpenAI-compatible Chat Completions 协议；其他协议需对应的兼容端点。 |
+| Ollama | 选择本地 Ollama，默认 `http://127.0.0.1:11434`；先运行 Ollama 并准备模型，然后读取模型列表或填写模型 ID。 |
+| LM Studio／vLLM | 启动相应的本机 OpenAI-compatible 服务，选择预设并填写实际地址和模型 ID。权重由推理服务管理。 |
+| 商业 API | 选择 OpenAI、DeepSeek、通义千问或自定义兼容服务，填写 HTTPS 地址、模型 ID 和 API Key。当前支持 OpenAI-compatible Chat Completions 协议。 |
 
-填写配置名称、地址和模型后，可直接“测试连接”，测试使用当前草稿，无需提前保存。模型列表只在点击“读取模型列表”时获取；商业服务的列表权限取决于提供商，也可手动输入模型 ID。上下文窗口、最大输出、超时、每百万 token 的输入／输出价格和币种位于详细设置中。
+可直接测试当前草稿，无需提前保存。点击“读取模型列表”或“测试连接”就会执行该操作，不再弹出二次确认。上下文、输出上限、超时、价格和币种在详细设置中。新建远程分析时只确认一次目的服务和模型，之后该任务的开始／恢复沿用已确认目标；若目标在提交前被其他窗口修改，会要求刷新后重新选择。
 
-凭据支持三种保存方式：
+凭据可选**系统密钥库**、**仅本次运行**或**环境变量**。Windows 使用系统凭据后端，macOS 使用 Keychain；系统密钥库不可用时可改选会话或环境变量，不写入明文文件。Key 默认遮罩，保存后清空输入框，可在 GUI 清除。API 响应、模型快照、CSV、项目备份及浏览器存储不包含 Key。凭据绑定服务地址，避免更换服务后沿用原 Key；系统密钥库按工作区隔离，移动或恢复项目后重新配置凭据。
 
-- **仅本次运行**：API Key 仅保存在后端内存，退出应用后重新填写。
-- **系统密钥库**：通过操作系统凭据后端保存。可用性在 GUI 显示；不可用时禁止保存，不回退到明文文件。凭据按工作区路径隔离，移动／恢复到新目录后需重新填写。
-- **环境变量**：GUI 只填写变量名，后端读取进程中的变量值。清除配置中的凭据会移除该引用，保留系统中原有的环境变量。
+应用保留正常的本机安全边界：服务仅监听回环地址，检查 Host 和请求来源，页面使用 CSP 且不加载外部统计或字体。HTTP 可用于本机模型，远程服务使用 HTTPS；工作流关闭远程追踪。CSV、规则清洗、EPUB 转换、导出和备份在本机执行；远程模型分析会把所选全文版本的正文块与提示词发送至所选服务。模型测试只发送固定测试消息。
 
-密码输入默认遮罩，保存后清空输入框；配置返回值、模型快照、CSV 和项目备份不包含 API Key。可以在 GUI 中清除已存凭据。浏览器不使用 localStorage／sessionStorage 保存 Key 或配置草稿。
+如选择环境变量模式，在启动前设置变量，再在 GUI 填写变量名即可。通常直接使用系统密钥库更方便。正文、分析结果和备份没有整体加密，请按自己的资料保管习惯保存。
 
-本地模型地址只接受 `localhost` 或字面量回环 IP，商业服务只接受 HTTPS。每次商业 API 连接测试、读取模型列表及启动／恢复远程分析，界面都会显示目标地址并要求明确同意。分析确认绑定当前服务地址和模型；其他窗口修改配置后，创建任务会被阻止，需要刷新并重新确认。连接测试使用固定测试消息；分析请求会把所选版本的正文块、Skill 提示词与自定义提示词发送给所选服务。CSV 整理、规则清洗、EPUB 转换、导出和备份均在本机执行；MinerU OCR 首次运行可能需要下载其模型。
+## 格式转换与分析
 
-应用服务仅允许本机回环监听，并检查 Host、请求来源与浏览器同源边界；页面使用 CSP，不加载外部字体、脚本或统计服务。LangGraph 工作流显式关闭远程追踪，不继承外部 LangSmith tracing 开关。正文、分析结果和本地数据库没有做整体加密，完整备份也包含这些内容，应存放在自己的受保护目录。系统密钥库保护凭据，不能隔离同一账户下已经获得系统访问权限的其他程序。
+上传 TXT、Markdown、SRT、DOCX 或 EPUB 后保留不可变原件。清洗、手动修改均生成新版本，可查看章节、疑似乱码、修改差异和原文；疑似采集 ID 只有勾选后才删除，不会自动删掉题外话或故事线索。
 
-若选择环境变量模式，可在启动前设置变量；这是可选凭据方式：
+EPUB 按 spine 阅读顺序转换为 Markdown，再渲染为纯 TXT。PDF 使用 **MinerU 4**：默认 `flash + txt` 提取文字层，扫描件使用 `standard + ocr` 并准备对应模型。转换支持进度、取消、重试、MD／TXT 下载和全文库导入；完整块渲染保留可能被分类为页眉的正文。EPUB 不需要 MinerU。
 
-```powershell
-$inkReferenceKey = Read-Host 'API Key' -AsSecureString
-$env:INKREFERENCE_LLM_KEY = [System.Net.NetworkCredential]::new('', $inkReferenceKey).Password
-# 在 GUI 的“环境变量”方式中填 INKREFERENCE_LLM_KEY
-try {
-    .\scripts\open.ps1 -EnvironmentName InkReference
-}
-finally {
-    Remove-Item Env:\INKREFERENCE_LLM_KEY -ErrorAction SilentlyContinue
-    Remove-Variable inkReferenceKey -ErrorAction SilentlyContinue
-}
-```
-
-遮罩输入避免把 Key 写进 PowerShell 命令历史；程序退出后上面的命令会清除当前终端中的变量。
-
-## 全文、转换与分析
-
-1. 在“全文与清洗”上传 TXT、Markdown、SRT、DOCX 或 EPUB。原件不可变；编码严格解码，无法确认时选择编码后重新预览。清洗结果作为新版本保存，可以查看章节、疑似乱码、修改差异及原文。默认不删除题外话、疑似编号或故事线索；移除随机 ID 需明确勾选。
-2. 在“格式转换”选择 EPUB 或 PDF。EPUB 按书籍 spine 顺序转 Markdown，再生成 TXT。PDF 使用 **MinerU 4**；默认 `flash + txt` 提取已有文字层，扫描件选择 `standard + ocr` 并准备相应模型。转换完成后可下载 `.md`、`.txt`，或把 TXT 导入全文库。原件一直保留。PDF 完整块渲染保留可能被识别为页眉的正文，避免默认渲染省略内容。
-3. 在“模型设置”配置并测试模型，选择本地推理服务或商业 API，再回到全文页面选择该配置。
-4. 在“工作流与 Skills”选择声明式 Skill，调整人物／剧情／桥段开关、自定义提示词、字符块上限、重试和 token 预算；保存为新版本。React Flow 画布布局单独保存，提取行为由工作流定义控制。Skill 可上传 JSON、带简单元数据的 SKILL.md，或 `manifest.json` 加提示词的 ZIP；不会执行上传代码。
-5. 选择明确的全文版本和模型，开始分析。LangGraph 保存每块状态与 checkpoint；失败、取消或关闭后可手动继续，已完成块跳过。每条候选保留原文引用和位置；查看证据、修订并确认入库后才写入素材表。已有作品的人工字段不会被分析覆盖。尚未完成的任务不会在下次打开时自动调用模型。
-
-所有模型请求及重试独立记账。提供商实际计数、UTF-8 字节规划预估和未知值分开显示；未配置价格时费用显示未知，已配置价格时仍作为费用预估。规划预估不等同特定模型的 tokenizer。取消会在当前请求边界停止后续调用，已发出的请求仍可能产生费用。
-
-MinerU 也可安装在独立 Python 环境。源码和安装包均支持指定该环境的可信 Python 路径：
+源码安装可加 `--mineru`／`-MinerU`。MinerU 及 OCR 权重不随桌面包分发；打包版可连接本机独立安装的 MinerU Python。先在该环境按 `requirements-mineru.txt` 安装，再通过环境变量指定解释器；不要求该环境由 Conda 管理：
 
 ```powershell
-$env:INKREFERENCE_MINERU_PYTHON = 'D:\Miniforge3\envs\MinerU\python.exe'
-.\scripts\open.ps1 -EnvironmentName InkReference
+$env:INKREFERENCE_MINERU_PYTHON = 'D:\Tools\MinerU\Scripts\python.exe'
+.\scripts\open.ps1
+# 打包版：在同一终端运行解压后的 InkReference.exe
 ```
 
-同一数据目录只允许一个进程打开。恢复项目返回独立目录后，可用 `open.ps1 -DataDir '恢复目录'` 打开；当前工作区会保留。SQLite WAL／SHM／journal、原件、全文、权重、密钥、日志、截图、备份及打包结果都由 `.gitignore` 排除；合成 fixtures、环境配置、依赖锁和构建脚本保留在仓库。
+```bash
+export INKREFERENCE_MINERU_PYTHON="$HOME/.venvs/mineru/bin/python"
+./scripts/open.sh
+# 打包版：在同一终端执行 /Applications/InkReference.app/Contents/MacOS/InkReference
+```
 
-## 开发
+OCR 首次运行可能下载模型，转换能力与当前 MinerU 后端及模型有关。
 
-安装完成后，在仓库根目录运行：
+分析使用明确的全文版本、模型、工作流和 Skill。工作流可调整提取开关、提示词、分块、重试及 token 预算并保存新版本；React Flow 画布负责布局与查看。可创建或上传 JSON、SKILL.md、声明式 ZIP Skill，不执行上传代码。
+
+LangGraph 持久化每块响应与 checkpoint。失败、取消或关闭后可手动恢复，完成块不会重复请求，重启应用不自动调用模型。每条候选附原文引用及位置，修订和确认入库后才写入素材表；已有作品的人工字段保持原值。每次请求与重试单独统计 token，区分提供商实际计数、规划预估和未知值。费用根据配置价格估算；取消会在当前请求边界停止后续调用，已经发出的请求仍可能计费。
+
+## 数据与导出
+
+| 系统 | 默认数据目录 |
+|---|---|
+| Windows | `%LOCALAPPDATA%\InkReference` |
+| macOS | `~/Library/Application Support/InkReference` |
+
+可用 `INKREFERENCE_DATA_DIR` 或启动参数 `--data-dir`／`-DataDir` 指定目录。数据与源码、应用包分离，数据库启动时自动迁移；同一目录只允许一个应用实例。
+
+记录按外部 ID 识别，同名作品的不同版本分别保留；日期精度、换行、空白和“不确定”等内容保持字符串。CSV 导入先预览，校验通过后整批事务提交，可选择跳过、更新或报错。编辑检查 revision，关联记录删除需要明确确认。
+
+导出按用途提供：
+
+- **单表／v8 兼容 CSV**：单表下载或三个原始结构 CSV 的 ZIP，均为 UTF-8 BOM。
+- **素材库完整 CSV**：三张素材表（含 ID／revision）、作品桥段关系表和清单。
+- **全部业务表 CSV**：素材、全文、转换、Skills、工作流、分析和用量的每张业务表各一个 CSV，用于查阅及迁移。
+- **完整项目备份**：五个 SQLite 数据库、原始 CSV 导入文件及大小／SHA-256 清单，可验证并恢复为独立工作区，保留当前项目。备份不包含凭据值、安装环境或模型权重；恢复后重新配置模型凭据。
+
+`.gitignore` 排除真实 CSV、全文、数据库及 WAL／SHM／journal、密钥、模型权重、日志、缓存、截图、备份和构建产物；提交合成 fixtures、依赖锁及构建脚本。
+
+## 开发与构建
+
+### 开发检查
+
+先通过上面的安装入口添加 `--dev`／`-Dev`。项目 `.venv` 默认使用以下命令：
 
 ```powershell
-conda run --no-capture-output -n InkReference python -m pytest -q
-conda run --no-capture-output -n InkReference python -m inkreference --no-open
+.\.venv\Scripts\python.exe -m pytest -q
+.\.venv\Scripts\python.exe scripts\verify_reuse.py --source-repo "D:\projects\InkOctoBot"
 ```
 
-Vite 开发界面需要显式允许对应的本机来源。在第一个 PowerShell 终端中设置后再启动后端：
+```bash
+.venv/bin/python -m pytest -q
+.venv/bin/python scripts/verify_reuse.py --source-repo "$HOME/projects/InkOctoBot"
+```
+
+复用自己的环境时直接用该环境的 `python`。前端检查：
+
+```bash
+npm --prefix frontend run typecheck
+npm --prefix frontend run build
+```
+
+Vite 热更新调试需要为后端显式允许本机开发来源。在第一个终端设置 `INKREFERENCE_DEV_ORIGIN=http://localhost:5173` 后启动 `python -m inkreference --no-open`；PowerShell 用 `$env:INKREFERENCE_DEV_ORIGIN = 'http://localhost:5173'`，macOS 用 `export INKREFERENCE_DEV_ORIGIN='http://localhost:5173'`。第二个终端执行：
+
+```bash
+npm --prefix frontend run dev -- --host localhost --port 5173 --strictPort
+```
+
+仅开发界面需要该例外，生产包保持同源。接口定义见 [API contract](docs/api-contract.md)，本地 `/openapi.json` 提供请求结构。
+
+### 构建桌面应用
+
+在目标系统和目标架构上构建，不从 Windows 交叉生成 macOS 应用。默认复用项目 `.venv`；开发者手动激活环境后，可显式使用当前环境。
+
+Windows：
 
 ```powershell
-$env:INKREFERENCE_DEV_ORIGIN = 'http://localhost:5173'
-conda run --no-capture-output -n InkReference python -m inkreference --no-open
+.\scripts\package.ps1
+.\scripts\package.ps1 -Installer
+.\scripts\package.ps1 -CurrentEnvironment -Installer -OutputDirectory "D:\打包结果\InkReference"
 ```
 
-在第二个终端启动前端，然后打开 `http://localhost:5173`：
+`-Installer` 需要 Inno Setup 6.3+。默认生成 `release\app\InkReference\InkReference.exe`、`release\InkReference-windows-x64.zip`，Setup 位于 `release\installer`。安装程序建立开始菜单入口，卸载时保留用户数据。
 
-```powershell
-Push-Location frontend
-conda run --no-capture-output -n InkReference npm run dev -- --host localhost --port 5173 --strictPort
-Pop-Location
+macOS：
+
+```bash
+./scripts/package.sh
+./scripts/package.sh --dmg
+./scripts/package.sh --current-environment --output-directory "$HOME/Desktop/InkReference-build"
 ```
 
-此环境变量仅供开发调试，生产界面保持同源。Python API 与前端构建的约定见 [API contract](docs/api-contract.md)，接口结构可在本地 `/openapi.json` 查看。发布前检查：
+默认输出 `release/app/InkReference.app` 和 `release/InkReference-macos-arm64.zip` 或 `release/InkReference-macos-x86_64.zip`；`--dmg` 额外生成磁盘映像。Apple Silicon 与 Intel 分别构建，最低系统版本为 macOS 13。构建收集前端、Python、LangGraph SQLite、系统密钥库和 pywebview 运行依赖，不包含用户数据、MinerU 或模型权重。macOS 构建使用本机 ad-hoc 签名并验证，正式分发的 Developer ID 签名与公证由发布者另行配置。
 
-```powershell
-Push-Location frontend
-conda run --no-capture-output -n InkReference npm run typecheck
-conda run --no-capture-output -n InkReference npm run build
-Pop-Location
-```
+打包烟雾检查以 `--no-open` 验证冻结程序的本机服务和前端；不等同于 Windows／macOS 原生窗口的人工交互验收。检查记录和限制见 [validation.md](docs/validation.md)。
 
-可信 InkOctoBot 检出版本的离线复用检查可通过下列命令重现；固定来源版本见第三方记录：
+## 项目文档
 
-```powershell
-conda run --no-capture-output -n InkReference python scripts\verify_reuse.py --source-repo "D:\projects\InkOctoBot"
-```
-
-说明文档：
-
-- [第一批范围与验收](docs/batch-01.md)
-- [已完成的检查与复现方法](docs/validation.md)
+- [检查结果与复现](docs/validation.md)
 - [架构与数据规则](docs/architecture.md)
-- [后续开发计划](docs/development-plan.md)
+- [API contract](docs/api-contract.md)
+- [开发计划](docs/development-plan.md)
 - [第三方来源和复用记录](THIRD_PARTY_NOTICES.md)
 - [开发约束](AGENTS.md)
-
-验证范围见 [validation.md](docs/validation.md)。真实模型提取质量、扫描件 OCR 和 Windows 原生交互应与自动化测试分别验收。
