@@ -2,7 +2,7 @@
 
 ## Local checks completed
 
-- Python 3.12: 78 tests passed, covering transactional CSV imports, rollback, CRUD, revision conflicts, API validation, text preservation and export behavior.
+- Python 3.12: 79 tests passed, covering transactional CSV imports, rollback, CRUD, revision conflicts, API validation, text preservation, export behavior and real launcher HTTP responses after TCP clients disconnect.
 - TypeScript type checking and the Vite production build passed.
 - The three private v8 inputs imported as 536 works, 1,213 characters, 138 cliches and 1,155 work/cliche relations. Compatible export preserved record order and every CSV field exactly after standard CSV parsing. Export, reimport into a new database and a second export preserved those values and relationships again.
 - Reimporting the same inputs with `skip` produced 0 inserts, 0 updates and 1,887 skipped records.

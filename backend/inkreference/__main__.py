@@ -75,7 +75,15 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"InkReference: {url}", flush=True)
     try:
-        config = uvicorn.Config("inkreference.api:app", host=args.host, port=args.port, log_level="info")
+        # Windows' Proactor accept loop can close the listener after a client
+        # disconnects during AcceptEx (CPython issue #93821 / WinError 64).
+        # This local HTTP app does not need asyncio subprocesses. Select the
+        # factory explicitly: recent Uvicorn versions bypass loop policies.
+        config = uvicorn.Config(
+            "inkreference.api:app", host=args.host, port=args.port,
+            log_level="info",
+            loop="asyncio:SelectorEventLoop" if sys.platform == "win32" else "auto",
+        )
         server = uvicorn.Server(config)
         server.run(sockets=[listener])
         return 0 if server.started else 1
