@@ -230,6 +230,9 @@ def export_zip(store: DataStore, mode: str = "compatible") -> bytes:
             columns = ["work_id", "cliche_id", "detail", "work_position", "cliche_position"]
             rows = [dict(row) for row in connection.execute("SELECT * FROM work_cliches ORDER BY work_id,work_position,cliche_id")]
             archive.writestr("work_cliches.csv", _csv_bytes(columns, rows))
-            manifest = {"format": "InkReference full table export", "format_version": 1, "schema_version": 2, "encoding": "UTF-8 BOM", "tables": [*TABLES, "work_cliches"], "stats": store._stats(connection), "restore": "Use compatible export for v8 CSV import; full export retains relation details and record revisions. This is a data export, not a full project backup."}
+            columns = ["id", "source_table", "source_id", "target_table", "target_id", "relation_type", "description", "metadata_json", "revision"]
+            rows = [dict(row) for row in connection.execute("SELECT * FROM material_relations ORDER BY id")]
+            archive.writestr("material_relations.csv", _csv_bytes(columns, rows))
+            manifest = {"format": "InkReference full table export", "format_version": 1, "schema_version": 3, "encoding": "UTF-8 BOM", "tables": [*TABLES, "work_cliches", "material_relations"], "stats": store._stats(connection), "restore": "Use compatible export for v8 CSV import; full export retains relation details and record revisions. This is a data export, not a full project backup."}
             archive.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8"))
     return output.getvalue()

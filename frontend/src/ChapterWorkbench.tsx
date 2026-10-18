@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { AlignLeft, Check, ChevronDown, ChevronLeft, ChevronRight, CircleAlert, FilePlus2, ListFilter, Pencil, Plus, RotateCcw, Search, Settings2, Sparkles, Trash2, Upload } from "lucide-react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { AlignLeft, Check, ChevronDown, ChevronLeft, ChevronRight, CircleAlert, FilePlus2, ListChecks, ListFilter, Pencil, Plus, RotateCcw, Search, Settings2, Sparkles, Trash2 } from "lucide-react";
 import { send, studio, type TextVersion } from "./studio";
 import { Busy, Empty, Modal, Notice, messageOf } from "./ui";
+import ChapterTextEditor, { type ChapterEditorHandle, type TextHighlight } from "./ChapterTextEditor";
 import "./chapter.css";
 
 type Issue = { kind: string; label: string; count?: number; severity?: string };
@@ -10,7 +11,8 @@ type Format = { name: string; format?: string; count?: number; score?: number; e
 type CustomFormat = { name: string; format?: string; regex?: string; enabled: boolean };
 type ChapterIndex = { version_id: string; pattern?: string; heading_formats?: string[]; candidates?: Format[]; gaps?: { missing_numbers?: number[]; after_number?: number; before_number?: number; missing_count?: number }[]; chapters: Chapter[]; options?: { author_keywords?: string[]; garble_rules?: { name: string; pattern: string; enabled: boolean }[]; custom_formats?: { name: string; format?: string; regex?: string; enabled: boolean }[] }; author_keyword_defaults?: string[]; };
 type Proposal = { id: string; start: number; end: number; text: string; kind: string; label: string; reason: string; enabled: boolean; removable: boolean };
-type ChapterPage = Chapter & { chapter?: Chapter; text: string; start: number; end: number; total: number; body_offset: number; body_text?: string | null; proposals: Proposal[]; diagnostics?: { start: number; end: number; kind?: string; code?: string; message?: string; label?: string }[] };
+type Finding = Proposal & { chapter_id: string; chapter_index: number; chapter_title: string };
+type ChapterPage = Chapter & { chapter?: Chapter; text: string; start: number; end: number; total: number; body_offset: number; body_text?: string | null; editable_start?: number; editable_end?: number; editable_text?: string; proposals: Proposal[]; diagnostics?: { start: number; end: number; kind?: string; code?: string; message?: string; label?: string }[] };
 type Props = { documentId: string; version: TextVersion; onVersion: (id: string) => Promise<void>; onDirty: (dirty: boolean) => void };
 const PAGE = 20000;
 const issueClass = (kind: string) => /glyph|garbl|mojibake|replacement/.test(kind) ? "glyph" : /author|aside|nonbody|non_body/.test(kind) ? "aside" : /length|gap|duplicate|outlier/.test(kind) ? "length" : "noise";
@@ -28,10 +30,14 @@ export default function ChapterWorkbench({ documentId, version, onVersion, onDir
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState("all");
   const [selections, setSelections] = useState<Record<string, string[]>>({});
-  const [edit, setEdit] = useState<{ title: string; body: string; original: string } | null>(null);
+  const [edit, setEdit] = useState<{ body: string; original: string; start: number; end: number; partial: boolean; chapterId: string; versionId: string } | null>(null);
+  const [findings, setFindings] = useState<Finding[]>([]);
+  const [findingScope, setFindingScope] = useState("all");
+  const [findingKind, setFindingKind] = useState("all");
+  const [findingQuery, setFindingQuery] = useState("");
+  const [findingLimit, setFindingLimit] = useState(100);
+  useEffect(() => { setFindingLimit(100); }, [findingScope, findingKind, findingQuery]);
   const [dialog, setDialog] = useState("");
-  const [appendFiles, setAppendFiles] = useState<File[]>([]);
-  const [encoding, setEncoding] = useState("auto");
   const [formats, setFormats] = useState<string[]>([]);
   const [customFormat, setCustomFormat] = useState("");
   const [customName, setCustomName] = useState("");
@@ -52,7 +58,8 @@ export default function ChapterWorkbench({ documentId, version, onVersion, onDir
   const activeRef = useRef(active);
   const pageRef = useRef<HTMLElement>(null);
   const workspaceRef = useRef<HTMLDivElement>(null);
-  const fileRef = useRef<HTMLInputElement>(null);
+  const editorRef = useRef<ChapterEditorHandle>(null);
+  const pendingFocus = useRef<{ chapterId: string; start: number; end: number } | null>(null);
   const onDirtyRef = useRef(onDirty);
   onDirtyRef.current = onDirty;
   activeRef.current = active;
@@ -108,9 +115,9 @@ export default function ChapterWorkbench({ documentId, version, onVersion, onDir
     cache.current.clear();
     setLoading(true); setError(""); setEdit(null); setDialog(""); setCustomName(""); setCustomFormat(""); setCustomRegex("");
     if (newDocument) { retainedProposals.current.clear(); setPage(null); setActive(0); setQuery(""); setFilter("all"); }
-    void studio<ChapterIndex>(`/documents/${documentId}/versions/${version.id}/chapters`).then(async (next) => {
+    void Promise.all([studio<ChapterIndex>(`/documents/${documentId}/versions/${version.id}/chapters`), studio<{ items: Finding[] }>(`/documents/${documentId}/versions/${version.id}/findings`)]).then(async ([next, checks]) => {
       if (ticket !== request.current) return;
-      setIndex(next);
+      setIndex(next); setFindings([...checks.items, ...next.chapters.flatMap((c) => c.issues.filter((issue) => !checks.items.some((finding) => finding.chapter_id === c.id && issue.kind === finding.kind)).map((issue) => ({ id: `${c.id}-${issue.kind}`, chapter_id: c.id, chapter_index: c.index, chapter_title: c.title, start: (c.body_start || c.start) - c.start, end: (c.body_start || c.start) - c.start + 1, text: c.title, kind: issue.kind, label: issue.label, reason: issue.label, enabled: false, removable: false }))) ]);
       setFormats(next.heading_formats || []);
       setCustomFormats(next.options?.custom_formats || []);
       setChosenChapters([]);
@@ -129,11 +136,26 @@ export default function ChapterWorkbench({ documentId, version, onVersion, onDir
     }).catch((e) => { if (ticket === request.current) setError(messageOf(e)); }).finally(() => { if (ticket === request.current) setLoading(false); });
   }, [documentId, version.id, fetchPage]);
 
+  useLayoutEffect(() => {
+    if (!page || page.id !== chapter?.id) return;
+    const partial = typeof page.body_text !== "string";
+    const start = partial ? page.editable_start ?? Math.max(page.start, page.body_offset) : page.body_offset;
+    const body = partial ? page.editable_text ?? Array.from(page.text).slice(Math.max(0, page.body_offset - page.start)).join("") : page.body_text!;
+    setEdit({ body, original: body, start, end: partial ? page.editable_end ?? page.end : page.total, partial, chapterId: page.id, versionId: version.id });
+  }, [page, chapter?.id, version.id]);
+  useEffect(() => {
+    const focus = pendingFocus.current;
+    if (!focus || !edit || !page || focus.chapterId !== page.id || edit.chapterId !== page.id || edit.versionId !== version.id || reading) return;
+    pendingFocus.current = null;
+    const ticket = request.current;
+    requestAnimationFrame(() => { if (ticket === request.current) editorRef.current?.reveal(focus.start - edit.start, focus.end - edit.start); });
+  }, [edit?.original, edit?.start, edit?.chapterId, edit?.versionId, page?.id, reading, version.id]);
+
   const changePage = async (next: number, start = 0, force = false) => {
     const part = chapters[next];
-    if (!part || (next === active && start === pageStart && page)) return;
-    if (editDirty && !force) { setDiscardAction(() => () => { setEdit(null); void changePage(next, start, true); }); return; }
-    setEdit(null); setActive(next); setPageStart(start); setError("");
+    if (!part || (next === active && start === pageStart && page?.id === part.id && page.start === start)) return;
+    if (editDirty && !force) { setDiscardAction(() => () => { void changePage(next, start, true); }); return; }
+    setActive(next); setPageStart(start); setError("");
     const key = `${version.id}:${part.id}:${start}`;
     const saved = cache.current.get(key);
     const ticket = ++request.current;
@@ -146,7 +168,7 @@ export default function ChapterWorkbench({ documentId, version, onVersion, onDir
       if (!part.enabled_proposal_ids) setSelections((s) => ({ ...s, [part.id]: s[part.id] || result.proposals.filter((p) => p.enabled && p.removable).map((p) => p.id) }));
       pageRef.current?.scrollTo({ top: 0 });
       if (chapters[next + 1]) void fetchPage(chapters[next + 1], 0, true).catch(() => {});
-    } catch (e) { if (ticket === request.current) setError(messageOf(e)); }
+    } catch (e) { if (ticket === request.current) { setError(messageOf(e)); if (page) { setActive(page.index); setPageStart(page.start); } } }
     finally { if (ticket === request.current) setReading(false); }
   };
   const safeAction = (action: () => void) => editDirty ? setDiscardAction(() => action) : action();
@@ -160,79 +182,71 @@ export default function ChapterWorkbench({ documentId, version, onVersion, onDir
     } catch (e) { setError(messageOf(e)); }
     finally { setBusy(""); }
   };
-  const toggle = (id: string) => {
-    if (!chapter) return;
+  const toggleFinding = (chapterId: string, id: string) => {
     setSelections((all) => {
-      const current = all[chapter.id] || [];
+      const current = all[chapterId] || [];
       if (current.includes(id)) retainedProposals.current.add(id); else retainedProposals.current.delete(id);
-      return { ...all, [chapter.id]: current.includes(id) ? current.filter((p) => p !== id) : [...current, id] };
+      return { ...all, [chapterId]: current.includes(id) ? current.filter((p) => p !== id) : [...current, id] };
     });
   };
   const apply = (all = false) => {
-    if (!chapter) return;
+    if (!chapter || editDirty) return;
     void mutate("clean", { selections: (all ? chapters : [chapter]).map((c) => ({ chapter_id: c.id, proposal_ids: selections[c.id] || [] })).filter((c) => c.proposal_ids.length) }, "正在保存清洗版本");
   };
-  const append = async () => {
-    if (!appendFiles.length) return;
-    setBusy("正在接续新章节"); setError("");
-    try {
-      let base = version.id;
-      for (let i = 0; i < appendFiles.length; i++) {
-        setBusy(`正在接续 ${i + 1} / ${appendFiles.length}`);
-        const form = new FormData(); form.append("file", appendFiles[i]); form.append("base_version_id", base); form.append("encoding", encoding);
-        const result = await studio<TextVersion>(`/documents/${documentId}/append`, { method: "POST", body: form });
-        base = result.id;
-        // Refresh the visible version after every committed file so partial success stays reviewable.
-        await onVersion(base);
-      }
-      setAppendFiles([]); setDialog("");
-    } catch (e) { setError(messageOf(e)); }
-    finally { setBusy(""); }
+  const saveEdit = () => {
+    if (!chapter || !edit || !editDirty || edit.chapterId !== chapter.id || edit.versionId !== version.id) return;
+    void mutate(edit.partial ? "edit-slice" : "edit", edit.partial ? { chapter_id: chapter.id, start: edit.start, end: edit.end, text: edit.body, expected_text: edit.original } : { chapter_id: chapter.id, body_text: edit.body }, "正在保存章节修订");
   };
   const filtered = chapters.filter((c) => (!query || c.title.toLocaleLowerCase().includes(query.toLocaleLowerCase()) || String(c.number ?? c.index + 1).includes(query)) && (filter === "all" || (filter === "marked" ? (selections[c.id]?.length || 0) > 0 : c.issues.some((issue) => issueClass(issue.kind) === filter))));
-  const annotations = useMemo(() => {
-    if (!page) return [] as ReactNode[];
-    const text = Array.from(page.text);
-    const start = page.start || 0, end = start + text.length;
-    const spans = [
-      ...page.proposals.filter((p) => p.end > start && p.start < end).map((p) => ({ start: Math.max(start, p.start), end: Math.min(end, p.end), proposal: p, diagnostic: null as null | { message?: string; label?: string; kind?: string; code?: string } })),
-      ...(page.diagnostics || []).filter((d) => d.end > start && d.start < end && !page.proposals.some((p) => p.start < d.end && p.end > d.start)).map((d) => ({ start: Math.max(start, d.start), end: Math.min(end, d.end), proposal: null, diagnostic: d })),
-    ].sort((a, b) => a.start - b.start || b.end - a.end);
-    let cursor = start;
-    const nodes: ReactNode[] = [];
-    for (const span of spans) {
-      if (span.start < cursor || span.end <= span.start) continue;
-      if (cursor < span.start) nodes.push(text.slice(cursor - start, span.start - start).join(""));
-      const value = text.slice(span.start - start, span.end - start).join("");
-      if (span.proposal) {
-        const p = span.proposal, enabled = selectedIds.includes(p.id);
-        nodes.push(p.removable ? <button key={`${p.id}-${span.start}`} type="button" className={`chapter-annotation ${enabled ? "removing" : "keeping"}`} aria-pressed={enabled} aria-label={`${p.label}：${enabled ? "取消清理" : "标记清理"}`} title={`${p.reason || p.label} · 点击${enabled ? "保留此处" : "清理此处"}`} onClick={() => toggle(p.id)} disabled={!!busy || reading}>{value || "\u200b"}</button> : <mark key={`${p.id}-${span.start}`} className={`chapter-diagnostic ${issueClass(p.kind)}`} title={p.reason || p.label}>{value}</mark>);
-      } else nodes.push(<mark key={`d-${span.start}`} className={`chapter-diagnostic ${issueClass(span.diagnostic?.kind || span.diagnostic?.code || "glyph")}`} title={span.diagnostic?.message || span.diagnostic?.label}>{value}</mark>);
-      cursor = span.end;
-    }
-    if (cursor < end) nodes.push(text.slice(cursor - start).join(""));
-    return nodes;
-  // Selections intentionally update annotation state without fetching the chapter again.
-  }, [page, selectedIds, busy, reading]);
-
-  const beginEdit = async () => {
-    if (!chapter || !page || reading) return;
-    setError("");
-    if (typeof page.body_text === "string") { setEdit({ title: chapter.title, body: page.body_text, original: page.body_text }); return; }
-    setBusy("正在读取完整章节");
-    try {
-      const result = await studio<ChapterPage>(`/documents/${documentId}/versions/${version.id}/chapters/${encodeURIComponent(chapter.id)}?start=0&limit=100000`);
-      if (typeof result.body_text !== "string") throw new Error("本章超过编辑上限，请先调整章节切分。");
-      setEdit({ title: chapter.title, body: result.body_text, original: result.body_text });
-    } catch (e) { setError(messageOf(e)); } finally { setBusy(""); }
+  const visibleFindings = findings.filter((item) => (findingScope === "all" || item.chapter_id === chapter?.id) && (findingKind === "all" || issueClass(item.kind) === findingKind) && (!findingQuery || `${item.chapter_title} ${item.text} ${item.reason}`.toLocaleLowerCase().includes(findingQuery.toLocaleLowerCase())));
+  const removableFindings = visibleFindings.filter((item) => item.removable);
+  const allFindingsSelected = removableFindings.length > 0 && removableFindings.every((item) => selections[item.chapter_id]?.includes(item.id));
+  const selectFindings = (checked: boolean) => {
+    setSelections((all) => {
+      const next = { ...all };
+      for (const item of removableFindings) {
+        const ids = next[item.chapter_id] || [];
+        next[item.chapter_id] = checked ? [...new Set([...ids, item.id])] : ids.filter((id) => id !== item.id);
+        if (checked) retainedProposals.current.delete(item.id); else retainedProposals.current.add(item.id);
+      }
+      return next;
+    });
   };
+  const jumpToFinding = (finding: Finding) => {
+    safeAction(() => {
+      setDialog("");
+      pendingFocus.current = { chapterId: finding.chapter_id, start: finding.start, end: finding.end };
+      if (page?.id === finding.chapter_id && edit && finding.start >= edit.start && finding.end <= edit.end) {
+        pendingFocus.current = null;
+        requestAnimationFrame(() => editorRef.current?.reveal(finding.start - edit.start, finding.end - edit.start));
+      } else void changePage(finding.chapter_index, Math.floor(finding.start / PAGE) * PAGE, true);
+    });
+  };
+  const annotations = useMemo<TextHighlight[]>(() => {
+    if (!page || !edit) return [];
+    const before = Array.from(edit.original), after = Array.from(edit.body);
+    let prefix = 0, oldEnd = before.length, newEnd = after.length;
+    if (editDirty) {
+      while (prefix < oldEnd && prefix < newEnd && before[prefix] === after[prefix]) prefix++;
+      while (oldEnd > prefix && newEnd > prefix && before[oldEnd - 1] === after[newEnd - 1]) { oldEnd--; newEnd--; }
+    }
+    return page.proposals.filter((p) => p.end > edit.start && p.start < edit.end).flatMap((p) => {
+      let start = Math.max(0, p.start - edit.start), end = Math.min(before.length, p.end - edit.start);
+      if (editDirty) {
+        if (end <= prefix) { /* Original prefix remains exact. */ }
+        else if (start >= oldEnd) { const delta = newEnd - oldEnd; start += delta; end += delta; }
+        else return [];
+      }
+      return [{ id: p.id, start, end, label: p.reason || p.label, kind: issueClass(p.kind), selected: selectedIds.includes(p.id), removable: p.removable }];
+    });
+  }, [page, edit?.body, edit?.original, edit?.start, selectedIds, editDirty]);
   const openSettings = () => { setDialog("settings"); setError(""); };
   return <div className="chapter-workbench" aria-busy={loading || reading || !!busy}>
     <div className="chapter-workbench-toolbar">
       <div className="chapter-format-summary"><AlignLeft size={15} /><span>{index?.pattern || "章节识别"}</span><span className="chapter-small-tag">{chapters.length} 章</span></div>
       <div className="inline-actions">
         <button className="text-button" disabled={loading || !!busy} onClick={() => safeAction(openSettings)}><Settings2 size={14} />识别设置</button>
-        <button className="button secondary compact-button" disabled={loading || !!busy} onClick={() => safeAction(() => { setDialog("append"); setError(""); })}><Upload size={14} />接续章节</button>
+        <button className="button secondary compact-button" disabled={loading || !!busy} onClick={() => { setFindingScope("all"); setFindingKind("all"); setDialog("findings"); }}><ListChecks size={14} />问题清单{findings.length > 0 && <span className="chapter-counter">{findings.length}</span>}</button>
       </div>
     </div>
     <div ref={workspaceRef} className="chapter-workspace">
@@ -249,24 +263,26 @@ export default function ChapterWorkbench({ documentId, version, onVersion, onDir
       </aside>
       <section className="chapter-reading-pane">
         <div className={`chapter-loading-track ${loading || reading || busy ? "is-loading" : ""}`}><div className="indeterminate" role={loading || reading || busy ? "progressbar" : undefined} aria-label={busy || (reading ? "正在读取章节" : "正在读取章节目录")}><i /></div></div>
-        <div className="chapter-reader-header"><div><span className="chapter-reader-overline">{chapter ? `章节 ${active + 1} / ${chapters.length}` : "章节预览"}</span><h3>{chapter?.title || "选择章节"}</h3></div><div className="chapter-reader-actions"><button className="icon-button" title="上一章" aria-label="上一章" disabled={loading || active <= 0 || !!busy} onClick={() => void changePage(active - 1)}><ChevronLeft size={16} /></button><button className="icon-button" title="下一章" aria-label="下一章" disabled={loading || active >= chapters.length - 1 || !!busy} onClick={() => void changePage(active + 1)}><ChevronRight size={16} /></button><span className="chapter-action-separator" /><button className={`button secondary compact-button ${edit ? "active" : ""}`} disabled={!page || !!busy || reading} onClick={() => edit ? safeAction(() => setEdit(null)) : void beginEdit()}><Pencil size={13} />{edit ? "退出编辑" : "编辑正文"}</button><button className="icon-button" aria-label="重命名章节" title="重命名章节" disabled={!chapter || !!busy || reading} onClick={() => safeAction(() => { setNewTitle(chapter.title); setDialog("rename"); })}><AlignLeft size={15} /></button><button className="icon-button chapter-delete-button" aria-label="删除章节" title="删除章节" disabled={!chapter || !!busy || reading} onClick={() => safeAction(() => { setDeleteIds([chapter.id]); setDialog("delete"); })}><Trash2 size={14} /></button></div></div>
+        <div className="chapter-reader-header"><div><span className="chapter-reader-overline">{chapter ? `章节 ${active + 1} / ${chapters.length}` : "章节预览"}</span><h3>{chapter?.title || "选择章节"}</h3></div><div className="chapter-reader-actions"><button className="icon-button" title="上一章" aria-label="上一章" disabled={loading || active <= 0 || !!busy} onClick={() => void changePage(active - 1)}><ChevronLeft size={16} /></button><button className="icon-button" title="下一章" aria-label="下一章" disabled={loading || active >= chapters.length - 1 || !!busy} onClick={() => void changePage(active + 1)}><ChevronRight size={16} /></button><span className="chapter-action-separator" /><button className="icon-button" aria-label="重命名章节" title="重命名章节" disabled={!chapter || !!busy || reading} onClick={() => safeAction(() => { setNewTitle(chapter.title); setDialog("rename"); })}><AlignLeft size={15} /></button><button className="icon-button chapter-delete-button" aria-label="删除章节" title="删除章节" disabled={!chapter || !!busy || reading} onClick={() => safeAction(() => { setDeleteIds([chapter.id]); setDialog("delete"); })}><Trash2 size={14} /></button></div></div>
         <div className="chapter-notice"><Notice error>{error}</Notice></div>
+        {!!chapter?.issues.length && <div className="chapter-current-issues">{chapter.issues.map((issue, i) => <button key={`${issue.kind}-${i}`} className={`chapter-issue ${issueClass(issue.kind)}`} onClick={() => { setFindingScope("chapter"); setFindingKind(issueClass(issue.kind)); setDialog("findings"); }}>{issue.label}{issue.count ? ` · ${issue.count}` : ""}</button>)}</div>}
         <article ref={pageRef} className={`chapter-reader-scroll ${reading ? "pending" : ""}`} aria-label={chapter?.title || "章节正文"}>
-          {edit ? <textarea className="chapter-body-editor" aria-label="编辑章节正文" value={edit.body} onChange={(e) => setEdit((draft) => draft ? { ...draft, body: e.target.value } : null)} disabled={!!busy} spellCheck={false} /> : page ? <div className="chapter-annotated-text">{annotations}</div> : !loading ? <Empty icon={FilePlus2} title="尚无章节" description="接续全文或添加第一章。" /> : <div className="chapter-reader-skeleton"><i /><i /><i /><i /><i /></div>}
+          {edit && page ? <ChapterTextEditor key={`${version.id}:${page.id}:${edit.start}`} ref={editorRef} value={edit.body} highlights={annotations} readOnly={!!busy || reading || page.id !== chapter?.id} onChange={(body) => setEdit((draft) => draft ? { ...draft, body } : null)} /> : !loading ? <Empty icon={FilePlus2} title="尚无章节" description="上传全文或添加第一章。" /> : <div className="chapter-reader-skeleton"><i /><i /><i /><i /><i /></div>}
         </article>
         <div className="chapter-reader-bottom">
-          {edit ? <><span className="chapter-edit-state"><Pencil size={13} />{editDirty ? "有未保存的修订" : "编辑章节正文"}<small>{Array.from(edit.body).length.toLocaleString()} 字</small></span><div className="inline-actions"><button className="text-button" disabled={!!busy} onClick={() => safeAction(() => setEdit(null))}>取消</button><button className="button primary compact-button" disabled={!editDirty || !!busy} onClick={() => void mutate("edit", { chapter_id: chapter.id, body_text: edit.body }, "正在保存章节修订")}><Check size={14} />保存章节</button></div></> : <><div className="chapter-clean-legend"><span><i className="chapter-removal-swatch" />红色标记将被清理</span><small>点击标记可保留</small></div><div className="inline-actions"><button className="text-button" disabled={!chapter || !chapter.proposal_count || reading || !!busy} onClick={() => { const ids = chapter.enabled_proposal_ids || chapter.proposal_ids || page?.proposals.filter((p) => p.removable).map((p) => p.id) || []; for (const id of ids) { if (selectedIds.length) retainedProposals.current.add(id); else retainedProposals.current.delete(id); } setSelections((s) => ({ ...s, [chapter.id]: selectedIds.length ? [] : ids })); }}>{selectedIds.length ? "全部保留" : "选中本章标记"}</button><button className="button primary compact-button" disabled={!selectedIds.length || !!busy || reading} onClick={() => apply()}><Sparkles size={14} />清理本章{selectedIds.length ? ` · ${selectedIds.length}` : ""}</button></div></>}
+          <div className="chapter-clean-legend">{editDirty ? <span className="chapter-unsaved-label"><Pencil size={13} />正文已修改 · 尚未保存</span> : <span><i className="chapter-removal-swatch" />红色待清理 · 紫色待修复</span>}<small>{edit ? `${Array.from(edit.body).length.toLocaleString()} 字${edit.partial ? " · 当前段" : ""}` : ""}</small></div>
+          <div className="inline-actions">{editDirty ? <><button className="text-button" disabled={!!busy} onClick={() => setDiscardAction(() => () => setEdit((draft) => draft ? { ...draft, body: draft.original } : null))}>撤销修订</button><button className="button primary compact-button" disabled={!!busy || reading} onClick={saveEdit}><Check size={14} />保存正文</button></> : <><button className="text-button" disabled={!chapter || !chapter.proposal_count || reading || !!busy} onClick={() => { const ids = chapter.proposal_ids || chapter.enabled_proposal_ids || page?.proposals.filter((p) => p.removable).map((p) => p.id) || []; for (const id of ids) { if (selectedIds.length) retainedProposals.current.add(id); else retainedProposals.current.delete(id); } setSelections((s) => ({ ...s, [chapter.id]: selectedIds.length ? [] : ids })); }}>{selectedIds.length ? "全部保留" : "全选本章标记"}</button><button className="button primary compact-button" disabled={!selectedIds.length || !!busy || reading} onClick={() => apply()}><Sparkles size={14} />清理本章{selectedIds.length ? ` · ${selectedIds.length}` : ""}</button></>}</div>
         </div>
-        {!!page && page.total > PAGE && !edit && <div className="chapter-page-controls"><button className="text-button" disabled={pageStart <= 0 || reading || !!busy} onClick={() => void changePage(active, Math.max(0, pageStart - PAGE))}><ChevronLeft size={13} />上一段</button><span>{(pageStart + 1).toLocaleString()}–{Math.min(pageStart + Array.from(page.text).length, page.total).toLocaleString()} / {page.total.toLocaleString()} 字</span><button className="text-button" disabled={pageStart + Array.from(page.text).length >= page.total || reading || !!busy} onClick={() => void changePage(active, pageStart + Array.from(page.text).length)}>下一段<ChevronRight size={13} /></button></div>}
+        {!!page && edit?.partial && page.total > PAGE && <div className="chapter-page-controls"><button className="text-button" disabled={pageStart <= 0 || reading || !!busy} onClick={() => void changePage(active, Math.max(0, pageStart - PAGE))}><ChevronLeft size={13} />上一段</button><span>{(pageStart + 1).toLocaleString()}–{Math.min(pageStart + Array.from(page.text).length, page.total).toLocaleString()} / {page.total.toLocaleString()} 字</span><button className="text-button" disabled={pageStart + Array.from(page.text).length >= page.total || reading || !!busy} onClick={() => void changePage(active, pageStart + Array.from(page.text).length)}>下一段<ChevronRight size={13} /></button></div>}
       </section>
     </div>
-    <div className="chapter-workbench-footer"><span>{chapters.filter((c) => c.issues.length).length} 章需要检查{index?.gaps?.length ? ` · ${index.gaps.length} 处章节不连续` : ""}</span><button className="text-button" disabled={!markedCount || !!busy || reading || editDirty} onClick={() => setDialog("batch")}><Sparkles size={13} />清理全部标记{markedCount > 0 ? ` · ${markedCount}` : ""}</button></div>
+    <div className="chapter-workbench-footer"><span>{chapters.filter((c) => c.issues.length).length} 章需要检查{markedCount ? ` · ${markedCount} 处待清理` : ""}{index?.gaps?.length ? ` · ${index.gaps.length} 处章节不连续` : ""}</span><button className="button primary compact-button" disabled={!markedCount || !!busy || reading || editDirty} onClick={() => setDialog("batch")}><Sparkles size={13} />清理已选{markedCount > 0 ? ` · ${markedCount} 处` : "标记"}</button></div>
 
-    {dialog === "append" && <Modal title="接续新章节" busy={!!busy} onClose={() => setDialog("")}><div className="modal-body"><input ref={fileRef} type="file" multiple accept=".txt,.md,.epub,.docx,.srt" hidden onChange={(e) => setAppendFiles(Array.from(e.target.files || []))} /><button className="upload-panel" disabled={!!busy} onClick={() => fileRef.current?.click()}><Upload size={26} /><strong>{appendFiles.length ? `${appendFiles.length} 个文件` : "选择需要接续的文件"}</strong><span>接在已有章节之后</span></button>{!!appendFiles.length && <div className="chapter-append-files">{appendFiles.map((f, i) => <div key={`${f.name}-${i}`}><FilePlus2 size={14} /><span>{f.name}</span><small>{(f.size / 1024).toFixed(1)} KB</small></div>)}</div>}<label className="studio-field"><span>文本编码</span><select value={encoding} onChange={(e) => setEncoding(e.target.value)}><option value="auto">自动识别</option><option value="utf-8">UTF-8</option><option value="gb18030">GB18030 / GBK</option><option value="utf-16">UTF-16</option><option value="big5">Big5</option></select></label><Notice error>{error}</Notice>{busy && <Busy label={busy} />}</div><div className="modal-footer"><button className="button secondary" disabled={!!busy} onClick={() => setDialog("")}>取消</button><button className="button primary" disabled={!appendFiles.length || !!busy} onClick={() => void append()}><Upload size={15} />接续全文</button></div></Modal>}
+    {dialog === "findings" && <Modal title="正文问题清单" wide busy={!!busy} onClose={() => setDialog("")}><div className="modal-body chapter-findings-modal"><div className="chapter-findings-filters"><label className="chapter-search"><Search size={14}/><input aria-label="搜索问题标记" placeholder="搜索章节、标记内容" value={findingQuery} onChange={(e) => setFindingQuery(e.target.value)}/></label><select aria-label="问题章节范围" value={findingScope} onChange={(e) => setFindingScope(e.target.value)}><option value="all">全部章节</option><option value="chapter">当前章节</option></select><select aria-label="问题类型" value={findingKind} onChange={(e) => setFindingKind(e.target.value)}><option value="all">全部问题</option><option value="aside">非正文</option><option value="glyph">字符缺失 / 乱码</option><option value="noise">采集噪声</option><option value="length">章节异常</option></select></div><div className="chapter-findings-summary"><label><input type="checkbox" aria-label="全选问题标记" checked={allFindingsSelected} disabled={!removableFindings.length || editDirty} onChange={(e) => selectFindings(e.target.checked)}/>全选可清理项</label><span>{visibleFindings.length} 处问题 · 已选 {markedCount} 处</span></div>{editDirty && <Notice>请先保存正文，重新检查后再清理标记。</Notice>}<div className="chapter-findings-list">{visibleFindings.length ? visibleFindings.slice(0, findingLimit).map((finding) => <div className={`chapter-finding-row ${issueClass(finding.kind)}`} key={`${finding.chapter_id}-${finding.id}`}><input type="checkbox" aria-label={`清理 ${finding.chapter_title} ${finding.label} ${finding.id}`} checked={!!finding.removable && !!selections[finding.chapter_id]?.includes(finding.id)} disabled={!finding.removable || editDirty || !!busy} onChange={() => toggleFinding(finding.chapter_id, finding.id)}/><button className="chapter-finding-jump" onClick={() => jumpToFinding(finding)}><span><strong>{finding.chapter_title}</strong><small className={`chapter-issue ${issueClass(finding.kind)}`}>{finding.label}</small>{!finding.removable && <small className="chapter-manual-fix">需手动修复</small>}</span><p>{finding.text || "隐藏字符"}</p><small>{finding.reason}</small></button></div>) : <div className="chapter-small-empty">当前范围没有此类问题</div>}{visibleFindings.length > findingLimit && <button className="chapter-findings-more text-button" onClick={() => setFindingLimit((limit) => limit + 100)}>显示更多标记 · 还剩 {visibleFindings.length - findingLimit} 处</button>}</div></div><div className="modal-footer"><button className="button secondary" onClick={() => setDialog("")}>返回正文</button><button className="button primary" disabled={!markedCount || editDirty || !!busy} onClick={() => setDialog("batch")}><Sparkles size={14}/>清理已选 {markedCount} 处</button></div></Modal>}
     {dialog === "settings" && <Modal title="章节识别与清洗规则" wide busy={!!busy} onClose={() => setDialog("")}><div className="modal-body chapter-settings"><section><h3><AlignLeft size={16} />章节标题格式</h3><div className="chapter-format-grid">{(index?.candidates?.length ? index.candidates.filter((candidate) => !candidate.custom) : [{ name: "第N章/回/节" }, { name: "Chapter N" }, { name: "N、/." }]).map((candidate) => <label key={formatLabel(candidate)} className={`chapter-format-choice ${formats.includes(formatLabel(candidate)) ? "checked" : ""}`}><input type="checkbox" checked={formats.includes(formatLabel(candidate))} onChange={(e) => setFormats((current) => e.target.checked ? [...current, formatLabel(candidate)] : current.filter((f) => f !== formatLabel(candidate)))} /><span><strong>{formatLabel(candidate)}</strong>{candidate.count !== undefined && <small>匹配 {candidate.count} 处</small>}</span></label>)}</div><div className="chapter-custom-format-list">{customFormats.map((rule,i) => <div className="chapter-custom-format-row" key={i}><input type="checkbox" aria-label={`启用自定义章节格式 ${i+1}`} checked={rule.enabled} onChange={(e) => { setCustomFormats((all) => all.map((r,j) => j===i ? {...r,enabled:e.target.checked} : r)); setFormats((all) => e.target.checked ? [...new Set([...all,rule.name])] : all.filter((n) => n!==rule.name)); }}/><input aria-label={`自定义章节格式 ${i+1} 名称`} value={rule.name} placeholder="格式名称" onChange={(e) => { const name=e.target.value; setCustomFormats((all) => all.map((r,j) => j===i ? {...r,name} : r)); setFormats((all) => all.map((n) => n===rule.name ? name : n)); }}/><select aria-label={`自定义章节格式 ${i+1} 类型`} value={rule.regex!==undefined&&!rule.format ? "regex" : "format"} onChange={(e) => setCustomFormats((all) => all.map((r,j) => j===i ? {name:r.name,enabled:r.enabled,...(e.target.value==="regex" ? {regex:r.format||r.regex||""} : {format:r.regex||r.format||""})} : r))}><option value="format">N 格式</option><option value="regex">正则</option></select><input aria-label={`自定义章节格式 ${i+1} 匹配规则`} value={rule.format||rule.regex||""} placeholder={rule.regex!==undefined&&!rule.format ? "正则表达式" : "例如 第N节"} onChange={(e) => setCustomFormats((all) => all.map((r,j) => j===i ? {...r,...(r.regex!==undefined&&!r.format ? {regex:e.target.value} : {format:e.target.value})} : r))}/><button className="icon-button" aria-label={`删除自定义章节格式 ${i+1}`} onClick={() => { setCustomFormats((all) => all.filter((_,j) => j!==i)); setFormats((all) => all.filter((n) => n!==rule.name)); }}><Trash2 size={13}/></button></div>)}</div><div className="form-grid"><label className="studio-field"><span>自定义格式名称</span><input value={customName} onChange={(e) => setCustomName(e.target.value)} placeholder="例如 节标题" /></label><label className="studio-field"><span>标题格式（N 为章节编号）</span><input value={customFormat} onChange={(e) => setCustomFormat(e.target.value)} placeholder="例如 第N节" /></label></div><details className="chapter-advanced-format"><summary>高级：使用正则表达式</summary><label className="studio-field"><span>章节标题正则（数字捕获组在前，标题在后）</span><input value={customRegex} onChange={(e) => setCustomRegex(e.target.value)} placeholder="^第([0-9]+)幕(.*)$" disabled={!!customFormat.trim()} /></label></details><button className="button secondary" disabled={!!busy} onClick={() => void mutate("resegment", { heading_formats: customFormat.trim() || customRegex.trim() ? [...formats, customName.trim() || customFormat.trim() || "自定义正则"] : formats, custom_formats: [...customFormats, ...(customFormat.trim() || customRegex.trim() ? [{ name: customName.trim() || customFormat.trim() || "自定义正则", ...(customFormat.trim() ? { format: customFormat.trim() } : { regex: customRegex.trim() }), enabled: true }] : [])] }, "正在重新识别章节")}><RotateCcw size={14} />{formats.length || customFormat.trim() || customRegex.trim() ? "按所选格式识别" : "自动识别章节"}</button></section><section><h3><CircleAlert size={16} />非正文与乱码标记<button className="text-button" disabled={!!busy} onClick={() => setKeywords((index?.author_keyword_defaults || []).join("\n"))}>恢复默认关键词</button></h3><div className="form-grid"><label className="studio-field"><span>非正文关键词（每行一项）</span><textarea rows={5} value={keywords} onChange={(e) => setKeywords(e.target.value)} placeholder={"求月票\n作者说\n请假说明"} /></label><div className="studio-field"><span>自定义杂字规则</span><div className="chapter-rule-list">{garbleRules.map((rule, i) => <div className="chapter-rule-row" key={i}><input type="checkbox" aria-label={`启用杂字规则 ${i+1}`} checked={rule.enabled} onChange={(e) => setGarbleRules((rows) => rows.map((r,j) => j===i ? {...r,enabled:e.target.checked} : r))}/><input aria-label={`杂字规则 ${i+1} 名称`} placeholder="规则名称" value={rule.name} onChange={(e) => setGarbleRules((rows) => rows.map((r,j) => j===i ? {...r,name:e.target.value} : r))}/><input aria-label={`杂字规则 ${i+1} 正则`} placeholder="正则表达式" value={rule.pattern} onChange={(e) => setGarbleRules((rows) => rows.map((r,j) => j===i ? {...r,pattern:e.target.value} : r))}/><button className="icon-button" aria-label={`删除杂字规则 ${i+1}`} onClick={() => setGarbleRules((rows) => rows.filter((_,j) => j!==i))}><Trash2 size={13}/></button></div>)}</div><button className="text-button" onClick={() => setGarbleRules((rows) => [...rows,{name:"",pattern:"",enabled:true}])}><Plus size={13}/>添加规则</button></div></div><button className="button secondary" disabled={!!busy} onClick={() => void mutate("settings", { author_keywords: keywords.split("\n").map((k) => k.trim()).filter(Boolean), garble_rules: garbleRules.filter((r) => r.name.trim() || r.pattern.trim()) }, "正在更新标记规则")}><Check size={14} />保存标记规则</button></section><Notice error>{error}</Notice>{busy && <Busy label={busy} />}</div><div className="modal-footer"><button className="button secondary" disabled={!!busy} onClick={() => setDialog("")}>完成</button></div></Modal>}
     {(dialog === "rename" || dialog === "insert") && <Modal title={dialog === "rename" ? "重命名章节" : "添加章节"} busy={!!busy} wide={dialog === "insert"} onClose={() => setDialog("")}><div className="modal-body"><label className="studio-field"><span>{dialog === "rename" ? "章节名称" : "完整章节标题"}</span><input autoFocus value={newTitle} onChange={(e) => setNewTitle(e.target.value)} /></label>{dialog === "insert" && <label className="studio-field"><span>正文 · 插入当前章节之后</span><textarea rows={12} value={newBody} onChange={(e) => setNewBody(e.target.value)} /></label>}<Notice error>{error}</Notice>{busy && <Busy label={busy} />}</div><div className="modal-footer"><button className="button secondary" disabled={!!busy} onClick={() => setDialog("")}>取消</button><button className="button primary" disabled={!newTitle.trim() || !!busy} onClick={() => dialog === "rename" ? void mutate("rename", { chapter_id: chapter?.id, title: newTitle }, "正在保存章节标题") : void mutate("insert", { after_chapter_id: chapter?.id || null, heading: newTitle, body_text: newBody }, "正在添加章节")}><Check size={14} />保存</button></div></Modal>}
     {dialog === "delete" && <Modal title="删除章节" busy={!!busy} onClose={() => setDialog("")}><div className="modal-body"><p>{deleteIds.length===1 ? `删除「${chapters.find((c) => c.id===deleteIds[0])?.title || "所选章节"}」？` : `删除选中的 ${deleteIds.length} 章？`}已有版本保留，可从版本历史恢复。</p>{deleteIds.length>1 && <div className="chapter-batch-list">{chapters.filter((c) => deleteIds.includes(c.id)).map((c) => <div key={c.id}><span>{c.title || `章节 ${c.index+1}`}</span></div>)}</div>}<Notice error>{error}</Notice>{busy && <Busy label={busy} />}</div><div className="modal-footer"><button className="button secondary" disabled={!!busy} onClick={() => setDialog("")}>取消</button><button className="button danger" disabled={!!busy} onClick={() => void mutate("delete", { chapter_ids: deleteIds }, "正在保存删除版本")}><Trash2 size={14} />删除章节</button></div></Modal>}
     {dialog === "batch" && <Modal title="清理全部标记" busy={!!busy} onClose={() => setDialog("")}><div className="modal-body"><p>将清理 {chapters.filter((c) => selections[c.id]?.length).length} 章中的 {markedCount} 处标记。</p><div className="chapter-batch-list">{chapters.filter((c) => selections[c.id]?.length).map((c) => <div key={c.id}><span>{c.title}</span><strong>{selections[c.id].length} 处</strong></div>)}</div><Notice error>{error}</Notice>{busy && <Busy label={busy} />}</div><div className="modal-footer"><button className="button secondary" disabled={!!busy} onClick={() => setDialog("")}>返回检查</button><button className="button primary" disabled={!!busy} onClick={() => apply(true)}><Sparkles size={14} />保存清洗版本</button></div></Modal>}
-    {discardAction && <Modal title="章节修订尚未保存" onClose={() => setDiscardAction(null)}><div className="modal-body"><p>离开编辑前，请保存本章修订。</p></div><div className="modal-footer"><button className="button secondary" onClick={() => setDiscardAction(null)}>继续编辑</button><button className="button danger" onClick={() => { const action = discardAction; setDiscardAction(null); setEdit(null); onDirtyRef.current(false); action(); }}>放弃修订</button></div></Modal>}
+    {discardAction && <Modal title="章节修订尚未保存" onClose={() => setDiscardAction(null)}><div className="modal-body"><p>离开编辑前，请保存本章修订。</p></div><div className="modal-footer"><button className="button secondary" onClick={() => setDiscardAction(null)}>继续编辑</button><button className="button danger" onClick={() => { const action = discardAction; setDiscardAction(null); setEdit((draft) => draft ? { ...draft, body: draft.original } : null); onDirtyRef.current(false); action(); }}>放弃修订</button></div></Modal>}
   </div>;
 }

@@ -152,7 +152,7 @@ def test_existing_conda_environment_uses_conda_run_without_activate_or_changes(t
 
 def test_install_targets_selected_environment_and_isolates_optional_mineru_constraints(tmp_path, monkeypatch):
     root = tmp_path / '中文 project with spaces'
-    source_tree(root)
+    frontend_source(root)
     (root / 'requirements-mineru.txt').write_text('mineru==4.0.12')
     runtime = manage.Runtime('/selected python/python', label='explicit developer environment')
     monkeypatch.setattr(manage, 'resolve_runtime', lambda *a: runtime)
@@ -171,6 +171,8 @@ def test_install_targets_selected_environment_and_isolates_optional_mineru_const
     assert calls[2][1]['cwd'] == root / 'frontend'
     assert all(call[1]['runtime'] == runtime for call in calls)
     assert not (root / '.venv').exists()
+    assert manage.frontend_status(root)['state'] == 'current'
+    assert (root / 'frontend/dist' / manage.FRONTEND_STAMP).is_file()
 
 
 def test_incomplete_checkout_fails_before_installing_anything(tmp_path, monkeypatch):
@@ -266,3 +268,143 @@ def test_shell_wrappers_zero_arguments_use_project_venv(tmp_path, wrapper, actio
     target.symlink_to(sys.executable)
     result = subprocess.run(['bash', str(scripts / wrapper)], text=True, capture_output=True, check=True)
     assert json.loads(result.stdout) == [action]
+
+
+def frontend_source(root):
+    source_tree(root)
+    source = root / 'frontend/src/App.tsx'
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text('export default function App() { return "blue interface"; }', encoding='utf-8')
+    return source
+
+
+def frontend_dependencies(root):
+    for relative in ('node_modules/vite/bin/vite.js', 'node_modules/typescript/bin/tsc'):
+        path = root / 'frontend' / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.touch()
+
+
+def test_frontend_receipt_detects_content_changes_independently_of_timestamps(tmp_path):
+    source = frontend_source(tmp_path)
+    manage.stamp_frontend(tmp_path, manage.frontend_fingerprint(tmp_path))
+    assert manage.frontend_status(tmp_path)['state'] == 'current'
+    original_time = source.stat().st_mtime_ns
+    source.write_text('export default function App() { return "updated interface"; }', encoding='utf-8')
+    os.utime(source, ns=(original_time, original_time))
+    assert manage.frontend_status(tmp_path)['state'] == 'stale'
+    manage.stamp_frontend(tmp_path, manage.frontend_fingerprint(tmp_path))
+    # An old dist/index.html cannot be trusted merely because the source receipt exists.
+    (tmp_path / 'frontend/dist/index.html').write_text('replaced old interface', encoding='utf-8')
+    assert manage.frontend_status(tmp_path)['state'] == 'stale'
+
+
+@pytest.mark.parametrize('filename', ['package-lock.json', 'package.json', 'index.html', 'vite.config.ts', 'tsconfig.app.json', 'public/icon.svg', 'src/reader.css'])
+def test_frontend_fingerprint_includes_build_inputs_not_generated_output(tmp_path, filename):
+    frontend_source(tmp_path)
+    before = manage.frontend_fingerprint(tmp_path)
+    changed = tmp_path / 'frontend' / filename
+    changed.parent.mkdir(parents=True, exist_ok=True)
+    changed.write_text('changed build input', encoding='utf-8')
+    assert manage.frontend_fingerprint(tmp_path) != before
+    after = manage.frontend_fingerprint(tmp_path)
+    generated = tmp_path / 'frontend/dist/generated.js'
+    generated.write_text('new output', encoding='utf-8')
+    assert manage.frontend_fingerprint(tmp_path) == after
+
+
+@pytest.mark.parametrize('platform,npm', [('win32', 'npm.cmd'), ('darwin', 'npm')])
+def test_open_rebuilds_changed_source_before_native_launch_without_install(tmp_path, monkeypatch, platform, npm):
+    source = frontend_source(tmp_path)
+    frontend_dependencies(tmp_path)
+    manage.stamp_frontend(tmp_path, manage.frontend_fingerprint(tmp_path))
+    source.write_text('updated frontend source', encoding='utf-8')
+    monkeypatch.setattr(manage.sys, 'platform', platform)
+    runtime = manage.Runtime('/中文 Python with spaces/python', label='selected')
+    monkeypatch.setattr(manage, 'resolve_runtime', lambda *a: runtime)
+    monkeypatch.setattr(manage, 'probe', lambda selected: details())
+    monkeypatch.setattr(manage, 'frontend_tools', lambda selected: (['node'], [npm], 'v24.0.0'))
+    operations = []
+    def build(command, description, **kwargs):
+        operations.append(('build', command, kwargs))
+        (tmp_path / 'frontend/dist/index.html').write_text('new interface built', encoding='utf-8')
+    monkeypatch.setattr(manage, 'run_phase', build)
+    monkeypatch.setattr(manage.subprocess, 'call', lambda command, **kw: operations.append(('launch', command, kw)) or 0)
+    assert manage.open_app(args('open', '--current-environment'), tmp_path) == 0
+    assert [operation[0] for operation in operations] == ['build', 'launch']
+    assert operations[0][1] == [npm, 'run', 'build']
+    assert operations[0][2]['cwd'] == tmp_path / 'frontend'
+    assert '--desktop' in operations[1][1]
+    assert manage.frontend_status(tmp_path)['state'] == 'current'
+    operations.clear()
+    assert manage.open_app(args('open', '--current-environment'), tmp_path) == 0
+    assert [operation[0] for operation in operations] == ['launch']
+
+
+def test_unstamped_checkout_requires_one_build_even_when_source_mtime_is_older(tmp_path, monkeypatch):
+    source = frontend_source(tmp_path)
+    frontend_dependencies(tmp_path)
+    os.utime(source, ns=(1, 1))
+    builds = []
+    monkeypatch.setattr(manage, 'frontend_tools', lambda selected: (['node'], ['npm'], 'v22.0.0'))
+    monkeypatch.setattr(manage, 'run_phase', lambda command, description, **kw: builds.append(command))
+    assert manage.frontend_status(tmp_path)['state'] == 'stale'
+    manage.ensure_frontend(tmp_path, manage.Runtime(sys.executable))
+    manage.ensure_frontend(tmp_path, manage.Runtime(sys.executable))
+    assert builds == [['npm', 'run', 'build']]
+    assert manage.frontend_status(tmp_path)['state'] == 'current'
+
+
+def test_stale_interface_without_dependencies_reports_install_and_never_launches(tmp_path, monkeypatch):
+    frontend_source(tmp_path)
+    runtime = manage.Runtime(sys.executable, label='selected')
+    monkeypatch.setattr(manage, 'resolve_runtime', lambda *a: runtime)
+    monkeypatch.setattr(manage, 'probe', lambda selected: details())
+    monkeypatch.setattr(manage, 'run_phase', lambda *a, **kw: pytest.fail('must not install/build without dependencies'))
+    monkeypatch.setattr(manage.subprocess, 'call', lambda *a, **kw: pytest.fail('must not launch old interface'))
+    with pytest.raises(manage.EnvironmentError, match='frontend dependencies are missing.*Run install'):
+        manage.open_app(args('open', '--current-environment'), tmp_path)
+    assert not (tmp_path / 'frontend/dist' / manage.FRONTEND_STAMP).exists()
+
+
+def test_failed_frontend_rebuild_does_not_launch_or_mark_old_dist_current(tmp_path, monkeypatch):
+    source = frontend_source(tmp_path)
+    frontend_dependencies(tmp_path)
+    manage.stamp_frontend(tmp_path, manage.frontend_fingerprint(tmp_path))
+    receipt = tmp_path / 'frontend/dist' / manage.FRONTEND_STAMP
+    original_receipt = receipt.read_bytes()
+    source.write_text('changed source after pull', encoding='utf-8')
+    runtime = manage.Runtime(sys.executable, label='selected')
+    monkeypatch.setattr(manage, 'resolve_runtime', lambda *a: runtime)
+    monkeypatch.setattr(manage, 'probe', lambda selected: details())
+    monkeypatch.setattr(manage, 'frontend_tools', lambda selected: (['node'], ['npm'], 'v22.0.0'))
+    def broken_build(*a, **kw):
+        raise manage.EnvironmentError('synthetic build failure')
+    monkeypatch.setattr(manage, 'run_phase', broken_build)
+    monkeypatch.setattr(manage.subprocess, 'call', lambda *a, **kw: pytest.fail('must not launch old interface'))
+    with pytest.raises(manage.EnvironmentError, match='old interface was not launched.*Run install'):
+        manage.open_app(args('open', '--current-environment'), tmp_path)
+    assert receipt.read_bytes() == original_receipt
+    assert manage.frontend_status(tmp_path)['state'] == 'stale'
+
+
+def test_source_change_during_build_never_gets_a_current_receipt(tmp_path, monkeypatch):
+    source = frontend_source(tmp_path)
+    def edit_during_build(*a, **kw):
+        source.write_text('source was edited while building', encoding='utf-8')
+    monkeypatch.setattr(manage, 'run_phase', edit_during_build)
+    with pytest.raises(manage.EnvironmentError, match='source changed during the build'):
+        manage.build_frontend(tmp_path, manage.Runtime(sys.executable), ['npm'])
+    assert not (tmp_path / 'frontend/dist' / manage.FRONTEND_STAMP).exists()
+
+
+def test_doctor_reports_stale_interface_without_rebuilding(tmp_path, monkeypatch, capsys):
+    frontend_source(tmp_path)
+    monkeypatch.setattr(manage, 'resolve_runtime', lambda *a: manage.Runtime(sys.executable))
+    monkeypatch.setattr(manage, 'probe', lambda selected: details())
+    monkeypatch.setattr(manage, 'frontend_tools', lambda selected: (['node'], ['npm'], 'v22.0.0'))
+    monkeypatch.setattr(manage, 'run_phase', lambda *a, **kw: pytest.fail('doctor must not rebuild'))
+    assert manage.doctor(args('doctor', '--json'), tmp_path) == 1
+    report = json.loads(capsys.readouterr().out)
+    assert report['checks']['interface']['state'] == 'stale'
+    assert 'Open rebuilds' in report['checks']['interface']['message']

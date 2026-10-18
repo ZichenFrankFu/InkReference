@@ -112,3 +112,41 @@ def test_exiting_context_keeps_kernel_lock_until_inflight_worker_finishes(tmp_pa
         assert time.monotonic() < deadline
         time.sleep(0.02)
     assert (tmp_path / LOCK_FILENAME).read_bytes() == b"1"
+
+
+def test_application_retains_workspace_while_upload_worker_is_finishing(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    from inkreference.api import create_app
+
+    directory = tmp_path / 'workspace'
+    application = create_app(data_dir=directory)
+    entered, release = threading.Event(), threading.Event()
+    worker_store = None
+    try:
+        with TestClient(application, base_url='http://127.0.0.1') as client:
+            studio = application.state.runtime.studio
+            worker_store = studio.ingestions
+            original_upload = studio.documents.upload
+            original_shutdown = worker_store.shutdown
+
+            def delayed_upload(*args, **kwargs):
+                entered.set()
+                assert release.wait(10)
+                return original_upload(*args, **kwargs)
+
+            monkeypatch.setattr(studio.documents, 'upload', delayed_upload)
+            monkeypatch.setattr(worker_store, 'shutdown', lambda: original_shutdown(timeout=.01))
+            response = client.post('/api/studio/ingestions', files={'file': ('book.txt', '第一章 初遇\n正文。'.encode(), 'text/plain')})
+            assert response.status_code == 201, response.text
+            assert entered.wait(2)
+        assert worker_store.active_threads()
+        assert probe(directory).returncode == 9
+    finally:
+        release.set()
+        if worker_store is not None:
+            for worker in worker_store.active_threads():
+                worker.join(timeout=3)
+    deadline = time.monotonic() + 5
+    while probe(directory).returncode != 0:
+        assert time.monotonic() < deadline
+        time.sleep(.02)

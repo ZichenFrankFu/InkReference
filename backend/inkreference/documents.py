@@ -23,7 +23,7 @@ import zipfile
 from datetime import datetime, timezone
 from html.parser import HTMLParser
 from pathlib import Path, PurePosixPath
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 from urllib.parse import unquote, urlsplit
 from xml.etree import ElementTree as ET
 
@@ -308,7 +308,10 @@ def _options(options: Any) -> dict[str, Any]:
     return validate_settings(result)
 
 
-def _prepare(source: str, previous: str, options: dict[str, Any], *, normalize: bool = True) -> dict[str, Any]:
+def _prepare(source: str, previous: str, options: dict[str, Any], *, normalize: bool = True,
+             progress: Callable[[str, int, int], None] | None = None) -> dict[str, Any]:
+    if progress:
+        progress("chapter_parse", 0, 1)
     if normalize:
         result = analyze_text(source, remove_random_ids=options["remove_random_ids"],
                               fallback_chars=options["fallback_chars"],
@@ -319,8 +322,12 @@ def _prepare(source: str, previous: str, options: dict[str, Any], *, normalize: 
                   "diagnostics": diagnose_text(source), "transformations": [],
                   "chapter_analysis": split_chapters(source, fallback_chars=options["fallback_chars"],
                        heading_formats=options.get("heading_formats"), custom_formats=options.get("custom_formats"))}
+    if progress:
+        progress("chapter_parse", 1, 1)
     text = result["cleaned_text"]
     chapters = result["chapter_analysis"]["chapters"]
+    if progress:
+        progress("scan", 0, len(chapters))
     chunks = []
     for chapter_index, chapter in enumerate(chapters):
         chapter["id"] = f"chapter-{chapter_index + 1}"
@@ -329,7 +336,8 @@ def _prepare(source: str, previous: str, options: dict[str, Any], *, normalize: 
                            "end": chapter["start"] + chunk["end"],
                            "id": f"{chapter['id']}-chunk-{index + 1}", "chapter_id": chapter["id"],
                            "chapter_index": chapter_index})
-    gaps = annotate_chapters(chapters, options)
+    gaps = annotate_chapters(chapters, options,
+                             progress=(lambda completed, total: progress("scan", completed, total)) if progress else None)
     reconstructed = "".join(chunk["text"] for chunk in chunks)
     coverage = {**result["chapter_analysis"]["coverage"],
                 "chunks_complete": reconstructed == text,
@@ -430,14 +438,16 @@ class DocumentStore:
             return [self._meta(row) for row in connection.execute(f"SELECT {_META_COLUMNS} FROM doc_documents ORDER BY created_at DESC,id")]
 
     def upload(self, filename: str, raw: bytes, encoding: str = "auto", title: str = "",
-               work_id: str | None = None, *, idempotency_key: str | None = None) -> dict[str, Any]:
+               work_id: str | None = None, *, idempotency_key: str | None = None,
+               converted_text: str | None = None, preserve_text: bool = False,
+               progress: Callable[[str, int, int], None] | None = None) -> dict[str, Any]:
         if not isinstance(filename, str) or not filename or len(filename) > 255 or re.search(r"[\x00-\x1f]", filename):
             raise DataError(422, "文件名无效")
         # Retain only the display name; never use untrusted names as disk paths.
         filename = filename.replace("\\", "/").rsplit("/", 1)[-1]
         suffix = Path(filename).suffix.lower()
-        if suffix not in SUPPORTED_FORMATS:
-            raise DataError(422, "支持 TXT、MD、SRT、DOCX 和 EPUB 文件")
+        if suffix not in SUPPORTED_FORMATS and not (suffix == ".pdf" and converted_text is not None):
+            raise DataError(422, "支持 TXT、MD、SRT、DOCX 和 EPUB 文件；PDF 需先转换为纯文本")
         if not isinstance(raw, bytes) or not raw:
             raise DataError(422, "请上传非空文件")
         if len(raw) > MAX_UPLOAD_BYTES:
@@ -447,7 +457,12 @@ class DocumentStore:
         if idempotency_key is not None and (not isinstance(idempotency_key, str)
                                             or not 1 <= len(idempotency_key) <= 200):
             raise DataError(422, "导入幂等键必须是不超过 200 字的非空字符串")
-        if suffix == ".docx":
+        if converted_text is not None:
+            self._valid_text(converted_text)
+            if suffix not in {".epub", ".pdf"} or not converted_text.strip():
+                raise DataError(422, "转换后的正文仅用于非空 EPUB/PDF 纯文本")
+            source, used_encoding = converted_text, "utf-8-converted"
+        elif suffix == ".docx":
             source, used_encoding = _docx_text(raw), "xml"
         elif suffix == ".epub":
             source, used_encoding = _epub_text(raw), "xml"
@@ -455,7 +470,8 @@ class DocumentStore:
             source, used_encoding = _decode(raw, encoding)
         identifier = uuid.uuid4().hex
         now = _now()
-        payload = _prepare(source, source, _options({}))
+        payload = _prepare(source, source, _options({}), normalize=not preserve_text, progress=progress)
+        payload["active_source_ids"] = ["original"]
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             if idempotency_key is not None:
@@ -538,6 +554,7 @@ class DocumentStore:
         except UnicodeError:
             raise DataError(422, "手动文本包含无效 Unicode 字符") from None
         prepared = _prepare(working_text, base["text"], selected)
+        prepared["active_source_ids"] = base.get("active_source_ids", self._active_source_ids(document_id, base))
         if manual_text is not None and manual_text != base["text"]:
             prepared["changes"].insert(0, {"stage": "manual_edit", "count": 1,
                                            "input_characters": len(base["text"]),
@@ -570,6 +587,7 @@ class DocumentStore:
                          *, change: dict[str, Any] | None = None, source: str | None = None) -> dict[str, Any]:
         if change:
             prepared["changes"].insert(0, change)
+        prepared.setdefault("active_source_ids", base.get("active_source_ids", self._active_source_ids(document_id, base)))
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             document = self._document(connection, document_id)
@@ -612,7 +630,9 @@ class DocumentStore:
         metadata = {k: v for k, v in chapter.items() if k not in {"text", "content"}}
         return {**metadata, "chapter": metadata, "document_id": document_id, "version_id": version["id"],
                 "text": text[start:start + limit], "start": start, "end": min(start + limit, len(text)),
-                "total": len(text), "body_offset": body_offset,
+                "total": len(text), "body_offset": body_offset, "body_total": len(text) - body_offset,
+                "editable_start": max(start, body_offset), "editable_end": min(start + limit, len(text)),
+                "editable_text": text[max(start, body_offset):min(start + limit, len(text))],
                 "body_text": text[body_offset:] if len(text) - body_offset <= 200000 else None,
                 "proposals": chapter_proposals(chapter, self._version_options(version)),
                 "diagnostics": diagnose_text(text), "offset_unit": "unicode_codepoints"}
@@ -630,6 +650,37 @@ class DocumentStore:
         updated = base["text"][:chapter["body_start"]] + body_text + base["text"][chapter["end"]:]
         prepared = _prepare(updated, base["text"], self._version_options(base), normalize=False)
         return self._commit_prepared(document_id, base, prepared, change={"stage": "chapter_edit", "chapter_id": chapter_id, "count": 1})
+
+    def edit_chapter_slice(self, document_id: str, base_version_id: str, chapter_id: str,
+                           start: int, end: int, text: str, expected_text: str) -> dict[str, Any]:
+        """Replace one visible body page; never truncate the rest of a long chapter."""
+        self._valid_text(text)
+        self._valid_text(expected_text)
+        base = self.get_version(document_id, base_version_id)
+        chapter = self._chapter(base, chapter_id)
+        body_offset = chapter["body_start"] - chapter["start"]
+        if (isinstance(start, bool) or not isinstance(start, int) or isinstance(end, bool) or not isinstance(end, int)
+                or not body_offset <= start <= end <= len(chapter["text"])):
+            raise DataError(422, "正文分页编辑范围无效")
+        if chapter["text"][start:end] != expected_text:
+            raise DataError(409, "正文内容已变化，请刷新后再保存")
+        absolute_start, absolute_end = chapter["start"] + start, chapter["start"] + end
+        updated = base["text"][:absolute_start] + text + base["text"][absolute_end:]
+        prepared = _prepare(updated, base["text"], self._version_options(base), normalize=False)
+        return self._commit_prepared(document_id, base, prepared,
+                                     change={"stage": "chapter_page_edit", "chapter_id": chapter_id,
+                                             "start": start, "end": end, "count": 1})
+
+    def findings(self, document_id: str, version_id: str | None = None) -> dict[str, Any]:
+        version = self.get_version(document_id, version_id)
+        options = self._version_options(version)
+        items = []
+        for index, chapter in enumerate(version["chapters"]):
+            for proposal in chapter_proposals(chapter, options):
+                items.append({**proposal, "chapter_id": chapter["id"], "chapter_index": index,
+                              "chapter_title": chapter.get("raw_marker") or chapter.get("title") or f"第 {index + 1} 段"})
+        return {"document_id": document_id, "version_id": version["id"], "offset_unit": "unicode_codepoints",
+                "items": items, "total": len(items)}
 
     @staticmethod
     def _valid_text(text: Any) -> None:
@@ -758,59 +809,154 @@ class DocumentStore:
         base = self.get_version(document_id, base_version_id)
         target = self.get_version(document_id, target_version_id)
         prepared = _prepare(target["text"], base["text"], self._version_options(target), normalize=False)
+        prepared["active_source_ids"] = target.get("active_source_ids", self._active_source_ids(document_id, target))
         return self._commit_prepared(document_id, base, prepared, source=target["source_text"],
                                      change={"stage": "restore_version", "target_version_id": target_version_id, "count": 1})
 
+    def _active_source_ids(self, document_id: str, version: dict[str, Any]) -> list[str]:
+        """Resolve legacy versions without changing their immutable payloads."""
+        if "active_source_ids" in version:
+            return list(version["active_source_ids"])
+        source_ids = []
+        cursor = version
+        while cursor:
+            replacement = False
+            for change in cursor.get("changes", []):
+                if change.get("stage") in {"append_source", "replace_source"} and change.get("source_id"):
+                    source_ids.append(change["source_id"])
+                    replacement = replacement or change["stage"] == "replace_source"
+                elif change.get("stage") == "restore_version":
+                    restored = self.get_version(document_id, change["target_version_id"])
+                    return self._active_source_ids(document_id, restored) + list(reversed(source_ids))
+            if replacement:
+                return list(reversed(source_ids))
+            parent = cursor.get("parent_version_id")
+            cursor = self.get_version(document_id, parent) if parent else None
+        return ["original", *reversed(source_ids)]
+
+    def ingestion_result(self, key: str) -> dict[str, Any] | None:
+        """Find a durable upload/append commit after a worker/link crash."""
+        with self._connection() as connection:
+            row = connection.execute("SELECT document_id FROM doc_ingestions WHERE key=?", (key,)).fetchone()
+            if row is None:
+                return None
+            document_id = row["document_id"]
+            versions = connection.execute("SELECT payload_json FROM doc_versions WHERE document_id=? ORDER BY version_number", (document_id,))
+            for item in versions:
+                version = json.loads(item["payload_json"])
+                if any(change.get("ingestion_key") == key for change in version.get("changes", [])):
+                    return {"document_id": document_id, "version_id": version["id"]}
+            initial = connection.execute("SELECT id FROM doc_versions WHERE document_id=? ORDER BY version_number LIMIT 1", (document_id,)).fetchone()
+            return {"document_id": document_id, "version_id": initial["id"]}
+
     def append(self, document_id: str, base_version_id: str, filename: str, raw: bytes,
-               encoding: str = "auto") -> dict[str, Any]:
-        # Parse with the same strict upload path without mutating document metadata.
+               encoding: str = "auto", *, idempotency_key: str | None = None,
+               converted_text: str | None = None, preserve_text: bool = False,
+               progress: Callable[[str, int, int], None] | None = None) -> dict[str, Any]:
+        return self._update_source(document_id, base_version_id, filename, raw, encoding, mode="append",
+                                   idempotency_key=idempotency_key, converted_text=converted_text,
+                                   preserve_text=preserve_text, progress=progress)
+
+    def replace(self, document_id: str, base_version_id: str, filename: str, raw: bytes,
+                encoding: str = "auto", *, idempotency_key: str | None = None,
+                converted_text: str | None = None, preserve_text: bool = True,
+                progress: Callable[[str, int, int], None] | None = None) -> dict[str, Any]:
+        return self._update_source(document_id, base_version_id, filename, raw, encoding, mode="replace",
+                                   idempotency_key=idempotency_key, converted_text=converted_text,
+                                   preserve_text=preserve_text, progress=progress)
+
+    def _update_source(self, document_id: str, base_version_id: str, filename: str, raw: bytes,
+                       encoding: str, *, mode: str, idempotency_key: str | None,
+                       converted_text: str | None, preserve_text: bool,
+                       progress: Callable[[str, int, int], None] | None) -> dict[str, Any]:
         if not isinstance(filename, str) or not filename or len(filename) > 255 or re.search(r"[\x00-\x1f]", filename):
             raise DataError(422, "文件名无效")
         filename = filename.replace("\\", "/").rsplit("/", 1)[-1]
         suffix = Path(filename).suffix.lower()
-        if suffix not in SUPPORTED_FORMATS or not isinstance(raw, bytes) or not raw:
-            raise DataError(422, "请上传非空 TXT、MD、SRT、DOCX 或 EPUB 文件")
+        if (suffix not in SUPPORTED_FORMATS and not (suffix == ".pdf" and converted_text is not None)) or not isinstance(raw, bytes) or not raw:
+            raise DataError(422, "请上传支持的非空文本；PDF 需先转换为纯文本")
         if len(raw) > MAX_UPLOAD_BYTES:
             raise DataError(413, "文件超过 50 MiB 限制")
-        if suffix == ".docx":
+        if idempotency_key is not None and (not isinstance(idempotency_key, str) or not 1 <= len(idempotency_key) <= 200):
+            raise DataError(422, "导入幂等键必须为 1 至 200 字的字符串")
+        if converted_text is not None:
+            self._valid_text(converted_text)
+            if suffix not in {".epub", ".pdf"} or not converted_text.strip():
+                raise DataError(422, "转换后的正文仅用于非空 EPUB/PDF 纯文本")
+            source, used_encoding = converted_text, "utf-8-converted"
+        elif suffix == ".docx":
             source, used_encoding = _docx_text(raw), "xml"
         elif suffix == ".epub":
             source, used_encoding = _epub_text(raw), "xml"
         else:
             source, used_encoding = _decode(raw, encoding)
+        if idempotency_key:
+            existing = self.ingestion_result(idempotency_key)
+            if existing:
+                version = self.get_version(existing["document_id"], existing["version_id"])
+                matches = [change for change in version.get("changes", []) if change.get("ingestion_key") == idempotency_key]
+                if (existing["document_id"] != document_id or not matches or matches[0].get("original_sha256") != _sha(raw)
+                        or matches[0].get("stage") != f"{mode}_source"):
+                    raise DataError(409, "同一导入幂等键对应了不同原件或操作")
+                return version
         base = self.get_version(document_id, base_version_id)
         from .text_processing import clean_text
-        new_text = clean_text(source)["cleaned_text"]
-        separator = "" if not base["text"] or base["text"].endswith("\n") else "\n"
-        updated = base["text"] + separator + new_text
-        combined_source = base["source_text"] + ("" if not base["source_text"] or base["source_text"].endswith("\n") else "\n") + source
-        prepared = _prepare(updated, base["text"], self._version_options(base), normalize=False)
+        new_text = source if preserve_text else clean_text(source)["cleaned_text"]
+        if mode == "append":
+            separator = "" if not base["text"] or base["text"].endswith("\n") else "\n"
+            updated = base["text"] + separator + new_text
+            combined_source = base["source_text"] + ("" if not base["source_text"] or base["source_text"].endswith("\n") else "\n") + source
+        else:
+            updated, combined_source = new_text, source
+        prepared = _prepare(updated, base["text"], self._version_options(base), normalize=False, progress=progress)
         source_id = uuid.uuid4().hex
-        prepared["changes"].insert(0, {"stage": "append_source", "source_id": source_id,
-                                       "filename": filename, "count": 1, "appended_characters": len(new_text)})
+        prepared["active_source_ids"] = ([*self._active_source_ids(document_id, base), source_id]
+                                         if mode == "append" else [source_id])
+        prepared["changes"].insert(0, {"stage": f"{mode}_source", "source_id": source_id,
+                                       "filename": filename, "count": 1, "appended_characters": len(new_text) if mode == "append" else 0,
+                                       "original_sha256": _sha(raw), "ingestion_key": idempotency_key})
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            if idempotency_key:
+                previous = connection.execute("SELECT document_id FROM doc_ingestions WHERE key=?", (idempotency_key,)).fetchone()
+                if previous is not None:
+                    raise DataError(409, "上传操作正在提交，请刷新后重试")
             document = self._document(connection, document_id)
             if document["latest_version_id"] != base_version_id:
-                raise DataError(409, "全文已有新版本，请刷新后再接续")
+                raise DataError(409, "全文已有新版本，请刷新后重新选择更新或补充")
             version = self._insert_version(connection, document_id, base_version_id, base["version_number"] + 1,
                                            combined_source, prepared)
             connection.execute("INSERT INTO doc_sources VALUES (?,?,?,?,?,?,?,?,?,?)",
                                (source_id, document_id, filename, suffix[1:], used_encoding, raw, _sha(raw),
                                 source, version["id"], _now()))
             connection.execute("UPDATE doc_documents SET latest_version_id=? WHERE id=?", (version["id"], document_id))
+            if idempotency_key:
+                connection.execute("INSERT INTO doc_ingestions VALUES (?,?)", (idempotency_key, document_id))
             return version
 
     def list_sources(self, document_id: str) -> list[dict[str, Any]]:
+        version = self.get_version(document_id)
+        active = set(self._active_source_ids(document_id, version))
         with self._connection() as connection:
             document = self._document(connection, document_id)
-            originals = [{"id": "original", "filename": document["filename"], "format": document["format"],
-                          "encoding": document["encoding"], "original_sha256": document["original_sha256"],
-                          "original_bytes": len(document["original"]), "created_at": document["created_at"],
-                          "version_id": None}]
+            originals = [] if document["format"] == "collection" else [
+                {"id": "original", "filename": document["filename"], "format": document["format"],
+                 "encoding": document["encoding"], "original_sha256": document["original_sha256"],
+                 "original_bytes": len(document["original"]), "created_at": document["created_at"], "version_id": None, "mode": "new"}]
             originals.extend(dict(row) for row in connection.execute(
                 "SELECT id,filename,format,encoding,original_sha256,length(original) AS original_bytes,version_id,created_at "
                 "FROM doc_sources WHERE document_id=? ORDER BY created_at,id", (document_id,)))
+            for source in originals:
+                if source["version_id"]:
+                    row = connection.execute(
+                        "SELECT json_extract(change.value,'$.stage') AS stage FROM doc_versions, "
+                        "json_each(doc_versions.payload_json,'$.changes') AS change "
+                        "WHERE document_id=? AND doc_versions.id=? AND json_extract(change.value,'$.source_id')=? LIMIT 1",
+                        (document_id, source["version_id"], source["id"])).fetchone()
+                    source["mode"] = "replace" if row and row["stage"] == "replace_source" else "append"
+                source["active"] = source["id"] in active
+                source["superseded"] = source["id"] not in active
+                source["derived_format"] = "txt" if source["encoding"] == "utf-8-converted" else None
             return originals
 
     def get_source_original(self, document_id: str, source_id: str) -> tuple[bytes, str]:

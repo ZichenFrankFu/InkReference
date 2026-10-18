@@ -1,0 +1,177 @@
+/* Responsive rules use the workspace container, independently of sidebar width. */
+.studio-app .library-workspace { container: library / inline-size; display: grid; grid-template-columns: minmax(0,1fr); width: 100%; min-width: 0; align-items: start; }
+.studio-app .library-workspace.has-detail { grid-template-columns: minmax(0,1fr) 380px; }
+.studio-app .library-workspace .library-main { min-width: 0; width: 100%; }
+.studio-app .library-workspace .main-content { padding: 30px clamp(16px,3cqi,38px) 24px; }
+.studio-app .library-workspace .page-heading { flex-wrap: wrap; gap: 16px; margin-bottom: 24px; }
+.studio-app .library-workspace .page-heading h1 { margin: 0; font-size: 27px; letter-spacing: -.6px; }
+.studio-app .library-workspace .page-heading .eyebrow { margin-bottom: 10px; }
+.studio-app .library-workspace .heading-create { flex-shrink: 0; }
+.studio-app .library-workspace .stats-grid { grid-template-columns: repeat(4,minmax(0,1fr)); gap: 12px; margin-bottom: 24px; }
+.studio-app .library-workspace .stat-card { min-width: 0; min-height: 100px; padding: 18px 16px; gap: 8px; }
+.studio-app .library-workspace .stat-card > div { min-width: 0; }
+.studio-app .library-workspace .stat-card > div > span { white-space: normal; line-height: 1.5; font-size: 12px; }
+.studio-app .library-workspace .stat-card strong { font-size: 28px; margin-top: 5px; }
+.studio-app .library-workspace .stat-card small { font-size: 11px; }
+.studio-app .library-workspace .stat-icon { width: 34px; height: 34px; flex-shrink: 0; }
+.studio-app .library-workspace .library-card { min-width: 0; border-radius: 16px; }
+.studio-app .library-workspace .list-toolbar { flex-wrap: wrap; gap: 14px; padding: 18px 20px; align-items: center; }
+.studio-app .library-workspace .list-title { flex: 1 0 120px; }
+.studio-app .library-workspace .list-title h2 { font-size: 14px; }
+.studio-app .library-workspace .list-title > span { font-size: 11px; }
+.studio-app .library-workspace .toolbar-actions { display: flex; flex: 1 1 400px; max-width: 650px; min-width: 0; flex-wrap: wrap; gap: 8px; justify-content: flex-end; }
+.studio-app .library-workspace .search-box { flex: 1 1 180px; width: auto; min-width: 120px; height: 38px; padding: 0 11px; border-radius: 9px; }
+.studio-app .library-workspace .search-box input { font-size: 13px; padding: 10px 0; }
+.studio-app .library-workspace .search-box kbd { font-size: 10px; }
+.studio-app .library-workspace .toolbar-import,
+.studio-app .library-workspace .toolbar-export { width: auto; min-height: 38px; padding: 8px 12px; font-size: 12px; flex: 0 0 auto; white-space: nowrap; border-radius: 9px; }
+.studio-app .library-workspace .toolbar-import svg { width: 15px; }
+.studio-app .library-workspace .record-table-wrap { max-width: 100%; overflow: auto; }
+.studio-app .library-workspace .record-table { width: 100%; min-width: 480px; table-layout: fixed; }
+.studio-app .library-workspace .record-title { min-width: 0; max-width: 100%; }
+.studio-app .library-workspace .record-title > span:last-child { min-width: 0; }
+.studio-app .library-workspace .record-title strong,
+.studio-app .library-workspace .cell-truncate { overflow-wrap: anywhere; }
+.studio-app .library-workspace .record-table th { font-size: 12px; padding-top: 14px; padding-bottom: 14px; }
+.studio-app .library-workspace .record-table td { font-size: 13px; height: 80px; }
+.studio-app .library-workspace .record-title strong { font-size: 14px; }
+.studio-app .library-workspace .record-title small { font-size: 11px; }
+.studio-app .library-workspace .record-table .mono { font-size: 11px; overflow-wrap: anywhere; }
+.studio-app .library-workspace .record-table .date-cell { font-size: 12px; }
+.studio-app .library-workspace .pagination { display: flex; flex-wrap: wrap; gap: 12px; padding: 15px 18px; font-size: 12px; align-items: center; }
+.studio-app .library-workspace .pagination > span { flex: 1 1 180px; line-height: 1.6; }
+.studio-app .library-workspace .pagination > div { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; min-width: 0; }
+.studio-app .library-workspace .pagination label { display: flex; align-items: center; gap: 5px; font-size: 11px; }
+.studio-app .library-workspace .pagination select { font-size: 12px; }
+.studio-app .library-workspace .search-summary { flex-wrap: wrap; gap: 8px 14px; overflow-wrap: anywhere; }
+.studio-app .library-workspace .detail-panel { position: sticky; top: 64px; width: 380px; max-width: 100%; height: calc(100dvh - 64px); border-radius: 0; box-shadow: -8px 0 30px #1a40700a; }
+.studio-app .library-workspace .detail-heading { padding: 24px 22px; }
+.studio-app .library-workspace .detail-heading h2 { font-size: 21px; }
+.studio-app .library-workspace .detail-tabs { display: flex; gap: 8px; padding: 0 22px; }
+.studio-app .library-workspace .detail-tabs button { font-size: 13px; min-height: 48px; }
+.studio-app .library-workspace .detail-scroll { padding: 23px 22px; }
+.studio-app .library-workspace .field > label { font-size: 13px; }
+.studio-app .library-workspace .field input,
+.studio-app .library-workspace .field textarea { font-size: 14px; line-height: 1.8; }
+.studio-app .library-workspace .detail-footer { gap: 12px; padding: 15px 20px; flex-wrap: wrap; }
+.studio-app .library-workspace .detail-footer > div { min-width: 0; }
+.studio-app .library-workspace .detail-footer .button { margin-left: auto; }
+.studio-app .library-workspace .relation-card { display: flex; align-items: flex-start; gap: 12px; padding: 16px; width: 100%; min-width: 0; border-radius: 12px; text-align: left; }
+.studio-app .library-workspace .relation-card > span { display: block; flex: 1; min-width: 0; }
+.studio-app .library-workspace .relation-card > svg { flex-shrink: 0; margin-top: 3px; }
+.studio-app .library-workspace .relation-card strong { font-size: 14px; line-height: 1.6; overflow-wrap: anywhere; }
+.studio-app .library-workspace .relation-card small { line-height: 1.7; font-size: 11px; overflow-wrap: anywhere; }
+.studio-app .library-workspace .relation-semantics { display: grid; gap: 8px; margin-top: 11px; }
+.studio-app .library-workspace .relation-meaning { display: flex; flex-direction: column; align-items: flex-start; gap: 7px; }
+.studio-app .library-workspace .relation-type { display: inline-flex; border: 1px solid #d7e5fd; border-radius: 5px; padding: 2px 7px; color: #285aa6; background: #f0f6ff; font-size: 11px; line-height: 1.6; overflow-wrap: anywhere; }
+.studio-app .library-workspace .relation-description { display: block; color: #556783; font-size: 12px; line-height: 1.8; white-space: pre-wrap; overflow-wrap: anywhere; }
+.studio-app .library-workspace .library-detail-shade { display: none; }
+.studio-app .library-workspace .modal { max-width: calc(100vw - 32px); }
+.studio-app .library-workspace .modal-body { overflow-wrap: anywhere; }
+.studio-app .library-workspace .library-exchange { padding-top: 20px; }
+.studio-app .library-workspace .exchange-format-guide { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 9px; margin-bottom: 18px; }
+.studio-app .library-workspace .exchange-format-guide > div { display: flex; flex-wrap: wrap; gap: 8px; align-content: start; padding: 14px; border: 1px solid #e0e7f1; border-radius: 12px; background: #fafbfd; }
+.studio-app .library-workspace .exchange-format-guide .recommended { border-color: #b9d2ff; background: #f1f6ff; }
+.studio-app .library-workspace .exchange-format-guide svg { color: #3d6fc0; }
+.studio-app .library-workspace .exchange-format-guide strong { display: flex; flex-wrap: wrap; gap: 5px; align-items: center; font-size: 12px; }
+.studio-app .library-workspace .exchange-format-guide strong span { font-size: 9px; font-weight: 500; color: #2d61b0; border-radius: 4px; background: #e0ecff; padding: 2px 4px; }
+.studio-app .library-workspace .exchange-format-guide small { flex-basis: 100%; font-size: 11px; line-height: 1.7; color: #6e7c91; }
+.studio-app .library-workspace .exchange-dropzone { min-height: 145px; padding: 22px 18px; border-radius: 13px; }
+.studio-app .library-workspace .exchange-dropzone strong { font-size: 14px; }
+.studio-app .library-workspace .exchange-dropzone > span:last-child { line-height: 1.7; font-size: 12px; }
+.studio-app .library-workspace .exchange-files { margin-top: 18px; }
+.studio-app .library-workspace .exchange-files ul { padding: 0; list-style: none; display: grid; gap: 5px; margin: 8px 0 18px; max-height: 180px; overflow: auto; }
+.studio-app .library-workspace .exchange-files li { display: flex; min-width: 0; align-items: center; gap: 9px; padding: 6px 9px; border: 1px solid #e4eaf3; border-radius: 8px; }
+.studio-app .library-workspace .exchange-files li > span { min-width: 0; flex: 1; font-size: 12px; overflow-wrap: anywhere; }
+.studio-app .library-workspace .exchange-files li > small { font-size: 10px; color: #8793a6; white-space: nowrap; }
+.studio-app .library-workspace .exchange-files li > svg { flex-shrink: 0; color: #6685b1; }
+.studio-app .library-workspace .exchange-files .icon-button { width: 28px; height: 28px; }
+.studio-app .library-workspace .exchange-progress { padding: 12px 0; }
+.studio-app .library-workspace .exchange-checklist ul { padding: 0; list-style: none; margin: 8px 0 18px; display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 7px; }
+.studio-app .library-workspace .exchange-checklist li { display: flex; align-items: center; min-width: 0; gap: 8px; padding: 10px; border: 1px solid #e0e8f4; border-radius: 9px; background: #f7faff; }
+.studio-app .library-workspace .exchange-checklist li > svg { flex-shrink: 0; color: #3d70b8; }
+.studio-app .library-workspace .exchange-checklist li > span { display: grid; gap: 3px; min-width: 0; flex: 1; }
+.studio-app .library-workspace .exchange-checklist strong { font-size: 12px; font-weight: 600; }
+.studio-app .library-workspace .exchange-checklist small { font-size: 10px; color: #7f8ba0; overflow-wrap: anywhere; }
+.studio-app .library-workspace .exchange-checklist em { font-style: normal; font-size: 10px; text-align: right; color: #6083b2; }
+.studio-app .library-workspace .exchange-checklist .missing { border-color: #f4d6cd; background: #fff8f5; }
+.studio-app .library-workspace .exchange-checklist .missing > svg,
+.studio-app .library-workspace .exchange-checklist .missing em { color: #bc5c43; }
+.studio-app .library-workspace .exchange-guidance { background: #f5f8fd; padding: 12px 14px; border-radius: 10px; margin: 14px 0; }
+.studio-app .library-workspace .exchange-guidance p { margin: 0; font-size: 12px; line-height: 1.85; color: #63738c; }
+.studio-app .library-workspace .exchange-compatibility { margin: 17px 0 0; font-size: 12px; color: #77859a; line-height: 1.8; }
+.studio-app .library-workspace .exchange-intro { font-size: 13px; color: #78869b; margin: 0 0 18px; line-height: 1.8; }
+.studio-app .library-workspace .exchange-export-formats { border: 0; padding: 0; margin: 0; display: grid; gap: 10px; }
+.studio-app .library-workspace .exchange-export-option { display: flex; gap: 12px; padding: 18px 16px; border: 1px solid #e0e7f1; border-radius: 13px; cursor: pointer; align-items: center; min-width: 0; }
+.studio-app .library-workspace .exchange-export-option:hover { background: #f7faff; }
+.studio-app .library-workspace .exchange-export-option.selected { border-color: #8bb5f8; background: #f0f6ff; box-shadow: 0 0 0 2px #3679dc0a; }
+.studio-app .library-workspace .exchange-export-option input { accent-color: #3978d9; margin: 0; flex-shrink: 0; }
+.studio-app .library-workspace .exchange-export-option .option-icon { width: 38px; height: 38px; border-radius: 10px; color: #4877bc; background: #e9f0fc; flex-shrink: 0; }
+.studio-app .library-workspace .exchange-format-text { flex: 1; display: grid; gap: 7px; min-width: 0; }
+.studio-app .library-workspace .exchange-format-text strong { font-size: 14px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.studio-app .library-workspace .exchange-format-text em { font-size: 11px; font-style: normal; font-weight: 400; color: #8492a7; }
+.studio-app .library-workspace .exchange-format-text > span { font-size: 12px; color: #7b8ba1; line-height: 1.7; }
+.studio-app .library-workspace .exchange-format-text .exchange-recommended { font-size: 10px; background: #dfebff; color: #356cb9; padding: 2px 6px; border-radius: 4px; font-weight: 500; }
+.studio-app .library-workspace .exchange-export-option > svg { color: #4079c8; flex-shrink: 0; }
+.studio-app .library-workspace .policy-options { grid-template-columns: repeat(3,minmax(0,1fr)); }
+.studio-app .library-workspace .radio-card { min-width: 0; }
+.studio-app .library-workspace .radio-card small { line-height: 1.6; }
+.studio-app .library-workspace .modal-footer { flex-wrap: wrap; gap: 10px; }
+.studio-app .library-workspace .modal-footer .button { min-width: 90px; max-width: 100%; }
+.studio-app .library-workspace .preview-table { min-width: 420px; }
+.studio-app .library-workspace .preview-table th,
+.studio-app .library-workspace .preview-table td { font-size: 12px; }
+@container library (max-width: 1050px) {
+  .studio-app .library-workspace .detail-panel { position: fixed; right: 0; top: 64px; height: calc(100dvh - 64px); width: min(440px,calc(100vw - 24px)); max-width: none; z-index: 42; box-shadow: -18px 0 70px #20385c25; }
+  .studio-app .library-workspace .library-detail-shade { display: block; position: fixed; inset: 64px 0 0; border: 0; background: #17294320; backdrop-filter: blur(2px); z-index: 41; cursor: default; }
+  .studio-app .library-workspace .library-main { grid-column: 1 / -1; }
+}
+@container library (max-width: 760px) {
+  .studio-app .library-workspace .stat-icon { display: none; }
+  .studio-app .library-workspace .list-title { flex-basis: 100%; }
+  .studio-app .library-workspace .toolbar-actions { flex-basis: 100%; max-width: none; justify-content: stretch; }
+  .studio-app .library-workspace .stats-grid { gap: 9px; }
+  .studio-app .library-workspace .stat-card { min-height: 90px; padding: 13px 12px; }
+  .studio-app .library-workspace .stat-card strong { font-size: 25px; }
+  .studio-app .library-workspace .record-table .optional-column { display: none; }
+  .studio-app .library-workspace .record-table th:first-child { width: 46%; }
+  .studio-app .library-workspace .record-table th:nth-child(2) { width: 28%; }
+  .studio-app .library-workspace .record-table th:nth-child(3) { width: 20%; }
+  .studio-app .library-workspace .record-table th:last-child { width: 6%; }
+  .studio-app .library-workspace .table-cliches th:first-child { width: 70%; }
+  .studio-app .library-workspace .table-cliches th:nth-child(2) { width: 12%; }
+  .studio-app .library-workspace .table-cliches th:nth-child(3) { width: 12%; }
+}
+@container library (max-width: 560px) {
+  .studio-app .library-workspace .main-content { padding: 24px 15px; }
+  .studio-app .library-workspace .page-heading h1 { font-size: 25px; }
+  .studio-app .library-workspace .stats-grid { grid-template-columns: repeat(2,minmax(0,1fr)); margin-bottom: 18px; }
+  .studio-app .library-workspace .stat-icon { display: flex; }
+  .studio-app .library-workspace .stat-card { min-height: 85px; padding: 14px; }
+  .studio-app .library-workspace .list-toolbar { padding: 16px; }
+  .studio-app .library-workspace .search-box { flex-basis: 100%; }
+  .studio-app .library-workspace .toolbar-import,
+  .studio-app .library-workspace .toolbar-export { flex: 1 1 100px; justify-content: center; }
+  .studio-app .library-workspace .record-symbol { display: none; }
+  .studio-app .library-workspace .pagination > div { width: 100%; justify-content: flex-end; }
+  .studio-app .library-workspace .pagination > span { width: 100%; }
+  .studio-app .library-workspace .pagination label { margin-right: auto; }
+  .studio-app .library-workspace .exchange-format-guide { grid-template-columns: 1fr; }
+  .studio-app .library-workspace .exchange-format-guide small { flex-basis: auto; }
+  .studio-app .library-workspace .exchange-checklist ul { grid-template-columns: 1fr; }
+  .studio-app .library-workspace .policy-options { grid-template-columns: 1fr; }
+  .studio-app .library-workspace .exchange-export-option { padding: 16px 12px; gap: 9px; }
+  .studio-app .library-workspace .exchange-export-option .option-icon { display: none; }
+}
+@media (max-width: 720px) {
+  .studio-app .library-workspace .detail-panel { top: 57px; height: calc(100dvh - 57px); }
+  .studio-app .library-workspace .library-detail-shade { top: 57px; }
+}
+.studio-app .library-workspace .exchange-requirements { margin: 0 0 18px; font-size: 12px; color: #687a96; }
+.studio-app .library-workspace .exchange-requirements summary { cursor: pointer; padding: 5px 0; color: #4269a5; }
+.studio-app .library-workspace .exchange-requirements ul { margin: 10px 0; padding: 0; list-style: none; border: 1px solid #e1e9f5; border-radius: 10px; overflow: hidden; }
+.studio-app .library-workspace .exchange-requirements li { display: flex; flex-wrap: wrap; align-items: center; gap: 5px 14px; justify-content: space-between; padding: 9px 12px; border-bottom: 1px solid #e8edf6; }
+.studio-app .library-workspace .exchange-requirements li:last-child { border-bottom: 0; }
+.studio-app .library-workspace .exchange-requirements strong { font-weight: 500; }
+.studio-app .library-workspace .exchange-requirements li > span { font-size: 11px; color: #8592a7; overflow-wrap: anywhere; }
+.studio-app .library-workspace .exchange-requirements p { margin: 8px 0; line-height: 1.8; font-size: 11px; color: #8491a5; }

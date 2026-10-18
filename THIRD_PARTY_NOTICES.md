@@ -57,9 +57,13 @@ Frontend runtime license notices are retained in `third_party/frontend-LICENSES.
 | keyring | Explicit native OS credential backends; no plaintext or third-party fallback | MIT, <https://github.com/jaraco/keyring> |
 | markdownify | EPUB HTML to Markdown | MIT, <https://github.com/matthewwithanm/python-markdownify> |
 | markdown-it-py | Markdown token parsing for plain TXT output | MIT, <https://github.com/executablebooks/markdown-it-py> |
+| openpyxl 3.1.5 | Complete material-library XLSX reading/writing, explicit text cells and long-text auxiliary sheets | MIT, <https://openpyxl.readthedocs.io/> |
+| defusedxml 0.7.1 | Defensive XML parsing available to openpyxl for untrusted XLSX imports; archive/entity checks are additionally applied by InkReference | Python Software Foundation License (PSFL), <https://github.com/tiran/defusedxml> |
 | MinerU 4.0.12 | Optional PDF parsing SDK, isolated trusted Python process | Apache-2.0 **with additional upstream terms**, <https://github.com/opendatalab/MinerU/blob/master/LICENSE.md> |
 
 PDF conversion uses MinerU. Its runtime/models are installed separately rather than copied into the application. Current SDK documentation: <https://github.com/opendatalab/MinerU/blob/master/docs/en/usage/sdk_api.md>. The default full-document `flash/txt` test extracts native PDF text; it is not an OCR or model-quality evaluation. Full Markdown rendering preserves header-classified content that default rendering may omit.
+
+The material-library exchange uses the installed openpyxl/defusedxml packages rather than copying application code. License names and versions above are confirmed by their installed distribution metadata; their distribution license files remain part of the runtime package metadata collected for desktop builds.
 
 ## Historical candidate scope
 

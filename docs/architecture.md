@@ -14,17 +14,29 @@ HTTP 中间件检查所有请求的回环 Host，API 的读写请求都拒绝外
 
 | 数据库 | 内容 |
 |---|---|
-| inkreference.sqlite3 | v8 作品、人物、桥段、权威关联、revision 墓碑和已审核分析的幂等入库记录 |
-| workbench.sqlite3 | 不可变全文原件及清洗版本、转换任务、模型配置、逐请求用量、分析任务与块级结果 |
+| inkreference.sqlite3 | v8 作品、人物、桥段、权威作品桥段关联、带类型与说明的素材关联、revision 墓碑和已审核分析的幂等入库记录 |
+| workbench.sqlite3 | 不可变全文原件及清洗版本、统一上传处理任务、转换任务、模型配置、逐请求用量、分析任务与块级结果 |
 | skills.sqlite3 | 不可变声明式 Skill 版本 |
 | workflow_definitions.sqlite3 | 不可变工作流定义、独立的可变画布布局 |
 | checkpoints.sqlite3 | LangGraph 状态与中断 checkpoint，禁用 pickle 和任意模块构造 |
 
 上传原件作为字节与 SHA 保存，清洗生成新版本。疑似乱码保留并定位；不能恢复的文字不假装修复。明确的原文、清洗版本、字符范围和块覆盖状态可以追溯。所有范围采用 Unicode codepoint，前端按后端分页读取，避免 UTF-16 偏移错误。大文本不一次挂载到编辑控件。
 
+素材主库迁移版本为 3。`work_cliches` 仍是作品／桥段关联的唯一权威来源，其 `detail` 同时供双向关系卡片与兼容字段使用；人物的 `work_id` 表示所属作品，关系卡片显示原始角色定位。`material_relations` 另存明确的来源／目标表与 ID、关系类型、说明、扩展 `metadata_json` 和修订号。不同关系可以连接同一对素材，卡片按目标合并显示各个含义；同作品不会生成推测的人物或桥段关系。桥段互相关联、自关联与无效端点均禁止。多态端点通过验证和 SQLite 触发器保持完整性，删除作品时连同子人物的明确关联一并清理。
+
+## 全文工作流与界面
+
+`IngestionStore` 将 TXT、PDF、EPUB 的上传接入统一的持久任务：TXT 严格解码；PDF／EPUB 复用转换服务得到 TXT，然后进入同一章节识别和问题扫描。阶段回调报告实际处理进度，无法量化的阶段显示不定进度；重启将未完成任务标为中断，重试由用户触发。来源与目标参数固定，幂等记录处理提交成功但任务状态未及时写回的情形，避免重复导入。
+
+新文件可以创建全文，或针对当前版本选择更新／补充：更新替换当前正文，补充接在已有结尾之后，两者均新增版本并保留历史来源。处理时目标已更新则以 409 拒绝覆盖。GUI 中转换设置只随选中的 PDF／EPUB 出现，没有单独的转换页；主工作区按“原始文件 → 分卷 → 正文”排列，原件下载入口从界面移除，后端兼容 API 仍可读取历史原件。
+
+正文工作区组合章节目录、直接编辑的正文、同一版本的内联标记与问题列表。删除建议使用红色，可逐项保留或通过列表全选／勾选清理；不能自动恢复的损坏字符保留诊断标记供人工编辑。所有章节的问题可从 findings API 获取，不再单设诊断 tab。编辑产生脏状态与保存入口；长章保存携带原字符切片与期望文本，仅替换对应范围。缓存及固定进度区域防止切章时布局跳动，窄屏工具栏换行与区域重排避免按钮互相挤压。
+
+分块属于 LangGraph 的内部分析计划；全文 GUI 保留开始分析与任务进度，不暴露单独的分块按钮。“分析与审核”的叙事界面仅包含特征提取、剧情大纲、角色、设定、文本特征；文件来源、章节识别与清洗统一在全文工作区操作。
+
 ## 转换与模型
 
-EPUB 转换复用安全 spine 读取、markdownify 和 markdown-it-py。PDF 通过独立可信 Python 子进程调用 MinerU 4 SDK，输入文件路径仅作为参数，不通过 shell。默认全文原生文本解析；扫描件 OCR 需要独立准备的模型。FULL Markdown 渲染保留可能被标为页眉的正文。子进程支持取消，关闭时先终止全部进程树；任务恢复需要用户操作。
+EPUB 转换复用安全 spine 读取、markdownify 和 markdown-it-py。PDF 通过独立可信 Python 子进程调用 MinerU 4 SDK，输入文件路径仅作为参数，不通过 shell。默认全文原生文本解析；扫描件 OCR 需要独立准备的模型。FULL Markdown 渲染保留可能被标为页眉的正文。转换输出的 TXT 自动进入上传任务的章节识别，已有 Markdown／TXT 输出 API 保留。子进程支持取消，关闭时先终止全部进程树；任务恢复需要用户操作。
 
 ModelService 通过 HTTPX 连接原生 Ollama 或 OpenAI-compatible Chat Completions 服务（含本地 LM Studio/vLLM）。GUI 提供本地／商业服务预设、手填地址和模型、显式模型列表读取、当前草稿测试和可折叠参数。草稿测试使用固定消息，不保存草稿或读取全文。
 
@@ -42,12 +54,18 @@ StateGraph 执行 prepare → extract → validate → advance 循环，最终�
 
 ## 导出与恢复
 
-兼容 CSV 保留三张 v8 表的字符串、字段、版本、未知值和多行内容。全部业务表导出对四个业务数据库的每张表输出 CSV；BLOB 使用 hex。完整项目备份使用 SQLite backup API 产生一致文件快照，包含五个数据库及原始 CSV 导入文件，并附大小和 SHA 清单。活跃分析/转换结束或取消后才可备份。
+`library_exchange.py` 负责主界面的整库交换，和旧 `csvio.py` 单表兼容接口分离。DB、CSV、XLSX 使用相同的五表数据模型：`works`、`characters`、`cliches`、`work_cliches`、`material_relations`。可移植 `.db` 是普通数据表与 `_manifest`，不复制内部工作库的触发器、修订墓碑或分析提交记录；CSV ZIP 是五张 CSV 与 `manifest.json`；XLSX 是五张数据工作表与 `_manifest`，必要时用 `_long_text` 分片保存超长文本或不适合直接写入 XML 的字符。业务 ID 与文本保持原样，目标库独立管理修订。
+
+清单固定格式版本、结构版本、导出批次、每表字段、行数与哈希；CSV／XLSX 的批次信息帮助识别混用文件。新格式要求所有业务表及清单，旧 v8 CSV 则要求三张素材表同时出现。预览逐表报告缺少的文件／工作表、具体字段、关系 ID 和疑似不匹配的两个文件。导入只读解析文件，在临时库模拟完整写入后展示结果，提交时同时比对素材修订与关联快照，最后在单个主库事务中应用冲突策略和关系。DB 读取拒绝非普通数据表；XLSX 不执行公式或外部链接，不能恢复的 Excel 日期改写会指明单元格。
+
+旧 CSV API 保留三张 v8 表的字符串、字段、版本、未知值和多行内容。全部业务表导出对四个业务数据库的每张表输出 CSV；BLOB 使用 hex。完整项目备份使用 SQLite backup API 产生一致文件快照，包含五个数据库及原始素材导入文件，并附大小和 SHA 清单。统一上传、分析或转换任务结束或取消后才可备份。
 
 恢复验证归档路径、大小、哈希与 SQLite 完整性，创建独立目录，保留当前项目。会话 Key、系统密钥库内容、环境变量值、运行锁、日志、安装环境与模型权重不进入备份；非秘密的模型配置与凭据引用元数据可以保留。数据库与完整项目备份包含原件、正文和分析结果，未整体加密，不能把 Key 隔离等同于全文加密。接口详见 [api-contract.md](api-contract.md)，运行与验证见 README 和 [validation.md](validation.md)。
 
 ## 环境与分发
 
 `scripts/manage.py` 统一处理 `install`、`open`、`doctor` 与 `exec`。源码需要 Python 3.11–3.13、Node.js 22／24；默认创建项目 `.venv`。`--current-environment` 明确复用开发者当前解释器，`--conda-environment`／旧 PowerShell `-EnvironmentName` 只查找已有 Conda 环境，不创建环境、修改全局配置或自动下载系统工具。运行依赖默认不包含测试依赖；`--dev` 与 `--mineru` 分别选装。
+
+安装成功后记录前端源码／资源／依赖清单／构建配置的内容指纹，放入被 git 忽略的构建目录。源码启动重新比较指纹，过期时用已有依赖执行前端构建并展示进度；依赖缺失或构建失败则给出安装指引并停止，避免继续显示旧版 GUI。启动不执行 npm 安装。`doctor` 区分 current、stale、missing 和 prebuilt；没有源码的预构建包仍可直接使用。
 
 Windows 通过 PyInstaller 生成应用目录和 ZIP，可选 Inno Setup 安装程序；macOS 在对应架构的 Mac 上生成 `.app` 和 ZIP，可选 DMG，最低系统版本为 macOS 13。包内包含前端、Python、pywebview、LangGraph SQLite 和相应系统凭据后端，不打包用户资料、MinerU 或权重。Windows 依赖 WebView2 Runtime，macOS 复用系统 WebKit；macOS 包添加并验证本机 ad-hoc 签名，当前不提供 Developer ID 签名或 Apple 公证。构建与冻结服务烟雾检查不代表原生窗口交互已验收，具体证据以 [validation.md](validation.md) 为准。

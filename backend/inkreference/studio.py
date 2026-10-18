@@ -63,6 +63,16 @@ class ChapterEdit(BaseModel):
     body_text: str
 
 
+class ChapterSlice(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    base_version_id: str = Field(min_length=1, max_length=200)
+    chapter_id: str = Field(min_length=1, max_length=200)
+    start: StrictInt = Field(ge=0)
+    end: StrictInt = Field(ge=0)
+    text: str
+    expected_text: str
+
+
 class ChapterAction(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     base_version_id: str = Field(min_length=1, max_length=200)
@@ -156,6 +166,7 @@ class Studio:
         self.projects = ProjectStore(runtime.data_dir)
         self.data_dir = runtime.data_dir
         self._conversions = None
+        self._ingestions = None
         self.runner = WorkflowRunner(
             runtime.data_dir, documents=self.documents, models=self.models,
             skills=self.skills, workflows=self.workflows,
@@ -170,7 +181,25 @@ class Studio:
                 self._conversions = ConversionStore(self.data_dir)
             return self._conversions
 
+    @property
+    def ingestions(self):
+        with self.lock:
+            if self._ingestions is None:
+                from .ingestions import IngestionStore
+                self._ingestions = IngestionStore(self.data_dir, self.documents, self.conversions)
+            return self._ingestions
+
+    def active_threads(self) -> list[threading.Thread]:
+        workers = self.runner.active_threads()
+        if self._ingestions is not None:
+            workers += self._ingestions.active_threads()
+        if self._conversions is not None:
+            workers += self._conversions.active_threads()
+        return workers
+
     def require_idle(self):
+        if self._ingestions is not None and any(item["status"] in {"queued", "running"} for item in self.ingestions.list()):
+            raise DataError(409, "请先完成或取消正在处理的全文上传，再导出项目。")
         if any(run["status"] in {"queued", "running", "cancelling", "approving"} for run in self.runner.list_runs()):
             raise DataError(409, "请先暂停或完成正在运行的分析，再导出项目。")
         if any(item["status"] in {"queued", "running"} for item in self.conversions.list()):
@@ -201,6 +230,49 @@ def install_studio_routes(application, runtime):
     @router.get("/documents")
     def documents():
         return {"items": runtime.studio.documents.list_documents()}
+
+    @router.get("/ingestions")
+    def ingestions():
+        return {"items": runtime.studio.ingestions.list()}
+
+    @router.post("/ingestions", status_code=201)
+    async def ingest_document(file: Annotated[UploadFile, File()], title: Annotated[str, Form()] = "",
+                              encoding: Annotated[str, Form()] = "auto", work_id: Annotated[str | None, Form()] = None,
+                              mode: Annotated[str, Form()] = "new", target_document_id: Annotated[str | None, Form()] = None,
+                              base_version_id: Annotated[str | None, Form()] = None, options: Annotated[str, Form()] = "{}"):
+        import json
+        raw = await _upload(file, MAX_UPLOAD_BYTES)
+        try:
+            settings = json.loads(options)
+        except (ValueError, TypeError):
+            raise DataError(422, "转换设置必须是 JSON 对象。") from None
+        if not isinstance(settings, dict):
+            raise DataError(422, "转换设置必须是 JSON 对象。")
+        def create():
+            with runtime.studio.lock:
+                if work_id:
+                    runtime.store.get_record("works", work_id)
+                item = runtime.studio.ingestions.create(file.filename or "upload.txt", raw, title=title,
+                    encoding=encoding, work_id=work_id or None, mode=mode, target_document_id=target_document_id or None,
+                    base_version_id=base_version_id or None, conversion_options=settings)
+                return runtime.studio.ingestions.start(item["id"])
+        return await run_in_threadpool(create)
+
+    @router.get("/ingestions/{identifier}")
+    def ingestion(identifier: str):
+        return runtime.studio.ingestions.get(identifier)
+
+    @router.post("/ingestions/{identifier}/cancel")
+    def cancel_ingestion(identifier: str):
+        return runtime.studio.ingestions.cancel(identifier)
+
+    @router.post("/ingestions/{identifier}/retry")
+    def retry_ingestion(identifier: str):
+        with runtime.studio.lock:
+            item = runtime.studio.ingestions.get(identifier)
+            if item.get("options", {}).get("work_id"):
+                runtime.store.get_record("works", item["options"]["work_id"])
+            return runtime.studio.ingestions.retry(identifier)
 
     @router.post("/documents", status_code=201)
     async def upload_document(file: Annotated[UploadFile, File()], title: Annotated[str, Form()] = "", encoding: Annotated[str, Form()] = "auto", work_id: Annotated[str | None, Form()] = None):
@@ -275,6 +347,10 @@ def install_studio_routes(application, runtime):
     def chapter_index(document_id: str, version_id: str):
         return runtime.studio.documents.chapter_index(document_id, version_id)
 
+    @router.get("/documents/{document_id}/versions/{version_id}/findings")
+    def findings(document_id: str, version_id: str):
+        return runtime.studio.documents.findings(document_id, version_id)
+
     @router.get("/documents/{document_id}/versions/{version_id}/chapters/{chapter_id}")
     def chapter(document_id: str, version_id: str, chapter_id: str,
                 start: Annotated[int, Query(ge=0)] = 0, limit: Annotated[int, Query(ge=1, le=100000)] = 20000):
@@ -284,6 +360,12 @@ def install_studio_routes(application, runtime):
     def edit_chapter(document_id: str, body: ChapterEdit):
         with runtime.studio.lock:
             return runtime.studio.documents.edit_chapter(document_id, body.base_version_id, body.chapter_id, body.body_text)
+
+    @router.post("/documents/{document_id}/chapters/edit-slice", status_code=201)
+    def edit_chapter_slice(document_id: str, body: ChapterSlice):
+        with runtime.studio.lock:
+            return runtime.studio.documents.edit_chapter_slice(document_id, body.base_version_id, body.chapter_id,
+                body.start, body.end, body.text, body.expected_text)
 
     @router.post("/documents/{document_id}/chapters/resegment", status_code=201)
     def resegment(document_id: str, body: ChapterAction):

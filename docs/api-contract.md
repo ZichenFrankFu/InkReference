@@ -18,18 +18,51 @@ These controls protect the local browser boundary; the application is not a netw
 ## Browse/edit
 - `GET /api/records/{table}?q=&offset=0&limit=50&work_id=&cliche_id=` → `{items: Record[],total:number,offset:number,limit:number}`.
 - `GET /api/records/{table}/{id}` → `Record`.
-- `GET /api/records/{table}/{id}/relations` → `{works: Record[],characters:Record[],cliches:Record[]}`.
+- `GET /api/records/{table}/{id}/relations` → `{works: RelatedRecord[],characters:RelatedRecord[],cliches:RelatedRecord[],edges:Edge[]}`. Each `RelatedRecord` adds `relationship` (first edge) and `relationships` (all meanings for that same record): `{id,type,label,description,direction,metadata,source}`. Direction is `outgoing|incoming`; `source` identifies `character_work`, `work_cliches`, or `explicit`. Cards are deduplicated by target; the individual relationship meanings remain separate.
 - `POST /api/records/{table}` body `{values: Record<string,string>}` → Record, 201.
 - `PATCH /api/records/{table}/{id}` body `{values: Record<string,string>,expected_revision:number}` → Record. Immutable IDs. 409 on revision conflict.
 - `DELETE /api/records/{table}/{id}?expected_revision=N&cascade=false` → `{deleted:number}`; 409 if related records block deletion. `cascade=true` is only sent after a GUI confirmation describing related records.
 
-## Import/export
+Only direct edges are shown. Sharing a work does not infer a character-to-character or character-to-cliche relationship; cliche-to-cliche edges are forbidden. Character/work edges show the original `角色定位`; work/cliche edges show the original authoritative `work_cliches.detail`. Work editions remain distinct by ID.
+
+### Typed material associations
+
+An explicit relation has `{id,source_table,source_id,target_table,target_id,relation_type,description,metadata,revision}`. Both table keys are among `works,characters,cliches`. `relation_type` contains the user-facing relationship meaning; arbitrary structured extensions are retained in `metadata`. Unknown input relation fields are folded into this object. The source and target must exist, cannot be the same record, and cannot both be cliches. Two different relation types may connect the same endpoints; duplicate endpoint/type tuples under different IDs are rejected with both IDs identified. Existing legacy work/cliche links remain in their single authoritative table.
+
+- `GET /api/relations` → `{items: Relation[]}`.
+- `POST /api/relations` body `{values:{source_table,source_id,target_table,target_id,relation_type,description?,id?,metadata?}}` → Relation, 201; an omitted ID is generated.
+- `PATCH /api/relations/{id}` body `{values:{...patch},expected_revision:number}` → Relation. IDs are immutable.
+- `DELETE /api/relations/{id}?expected_revision=N` → `{deleted:1}`.
+
+Revision checks and tombstones prevent stale edits and ID-reuse conflicts. Associated material deletion requires `cascade=true`; confirmed deletion removes its typed links, including links belonging to child characters removed with a work. SQLite endpoint triggers protect direct writes and cascades as well as service methods.
+
+## Complete material-library exchange
+
+The GUI uses the same complete dataset for DB, CSV and XLSX. The five business tables are `works,characters,cliches,work_cliches,material_relations`; their portable values are strings. The three material tables keep v8 columns; `work_cliches` columns are `work_id,cliche_id,detail,work_position,cliche_position`; typed association columns are `id,source_table,source_id,target_table,target_id,relation_type,description,metadata_json`.
+
+| Endpoint | Contract |
+|---|---|
+| `GET /api/library/formats` | `{default:"db",schema_version:3,tables,formats,legacy_csv,guidance}`. Provides exact filenames, required columns, format choices and concise import guidance. |
+| `POST /api/library/import/preview` | Multipart `files`. Accepts one portable `.db` / `.sqlite` / `.sqlite3`, one complete CSV ZIP, all five CSV files plus `manifest.json`, one `.xlsx`, or all three legacy v8 CSVs together. Returns `{batch_id,tables,errors,warnings,stats,format,schema_version,bundle_id,legacy,required_tables,guidance}`. Each required-table entry includes `table,label,filename,present`; validation remains reviewable with commit disabled on errors. |
+| `POST /api/library/import/commit` | `{batch_id,policy:"skip"|"update"|"error"}` → `{imported,updated,skipped,relations_imported,relations_updated,relations_skipped,stats}`. A single transaction covers every material and association. Both material revisions and relation snapshots must match the preview, otherwise 409. |
+| `GET /api/library/export?format=db|csv|xlsx` | Defaults to DB. Downloads `InkReference-library.db`, `InkReference-library-csv.zip`, or `InkReference-library.xlsx`. Each carries the same five tables and format manifest. |
+
+Portable format version 1 uses material schema version 3. Manifest entries contain column declarations, row counts and SHA-256 hashes, with a shared `bundle_id`. DB stores the manifest in a `_manifest` table; CSV ZIP has five CSVs and `manifest.json`; XLSX uses five data sheets and hidden `_manifest`. CSV and XLSX data tables append per-row `_bundle_id` and `_schema_version` fields. XLSX adds hidden `_long_text` when necessary to preserve text exceeding Excel's UTF-16 cell limit, CR characters, XML-incompatible characters, XML escape-like text or reserved literal markers. All XLSX data cells are text, including formula-like strings; actual imported formulas/errors/date objects are rejected with sheet and cell locations. Decimal/numeric cells receive a warning when converted to text because lost leading zeros cannot be recovered.
+
+CSV uses UTF-8 BOM, with strict UTF-8/GB18030 decoding on import. CSV export rejects NUL control characters with guidance to use DB/XLSX for exact preservation, rather than emitting an unreadable CSV set. Empty tables must retain headers. Missing required files/sheets, duplicate table selection, missing columns, mismatched batch markers and cross-table references are reported by name; diagnostics identify participating files and affected IDs rather than relying on records already in the target database. Edited hashes/row counts produce review warnings. Old v8 input requires the complete works/characters/cliches set and has no typed-association table. Portable imports keep business values and external IDs; target revisions remain locally managed. Use full project backup for text, analysis and history.
+
+Limits are 32 selected files and 128 MiB total compressed/raw input, 256 ZIP entries and 256 MiB expanded data, 200000 rows per table and 32 MiB per field. A DB is opened read-only with schema restrictions; only ordinary data tables from the portable format are accepted, without triggers, views or virtual tables. Raw workspace SQLite files use the project backup/restore flow. Preview tokens expire after two hours or a restart (404); originals are private application data outside git.
+
+### Legacy CSV APIs
+
+These endpoints remain for existing integrations; the GUI uses the complete exchange endpoints above. Legacy single-table import does not provide the new all-table guidance or typed association format.
+
 - `POST /api/import/preview`, multipart field `files` (multiple CSVs) → `{batch_id:string, tables:[{table:string, filename:string, rows:number,new:number,existing:number}],errors:string[],warnings:string[],stats:{works:number,characters:number,cliches:number,work_cliches:number}}`. Validation errors remain reviewable in this response, and commit is disabled if errors are nonempty.
 - `POST /api/import/commit` body `{batch_id:string,policy:"skip"|"update"|"error"}` → `{imported:number,updated:number,skipped:number,stats:{...}}`. One atomic transaction, rejects a changed database snapshot with 409. Preview tokens expire after two hours or a server restart (404); originals are private app data outside git. File limits: 32 files, 32 MB per file, 128 MB total.
-- `GET /api/export?mode=compatible|full` → ZIP attachment. Compatible contains v8's three named CSVs; full contains `works`, `characters`, `cliches` with `_record_id`/`_revision`, the `work_cliches` relation table and `manifest.json`. For workbench-wide business tables, use `/api/studio/projects/tables/export` instead. Neither CSV ZIP is a restore-capable project backup.
+- `GET /api/export?mode=compatible|full` → ZIP attachment. Compatible contains v8's three named CSVs; full contains `works`, `characters`, `cliches` with `_record_id`/`_revision`, `work_cliches`, `material_relations` (including revision) and a legacy `manifest.json`. This legacy full export is for inspection; its manifest differs from the new complete exchange format. For workbench-wide business tables, use `/api/studio/projects/tables/export` instead. Neither CSV ZIP is a restore-capable project backup.
 - `GET /api/export/{table}` → UTF-8 BOM CSV attachment.
 
-Frontend use relative `/api`, native file input and downloadable response blobs. No real user data is bundled into the app; show an actionable empty state with import button. Backend module `inkreference.api:app`, core `inkreference.database` and `inkreference.csvio`.
+Frontend use relative `/api`, native file input and downloadable response blobs. No real user data is bundled into the app; show an actionable empty state with import button. Backend module `inkreference.api:app`; material modules are `inkreference.database`, `inkreference.library_exchange` and legacy `inkreference.csvio`.
 
 ## Reference workbench
 
@@ -37,9 +70,9 @@ All endpoints below use `/api/studio`. Lists return `{items:[...]}`. Timestamps 
 
 | Resource | Endpoints and behavior |
 |---|---|
-| Full texts | `GET/POST /documents`; POST multipart `file,title,encoding,work_id`. TXT/MD/SRT/DOCX/EPUB, 50 MiB. Originals remain immutable. |
+| Full texts | `GET /documents` lists metadata. The GUI uploads through `/ingestions` below: TXT/PDF/EPUB, 50 MiB. Legacy `POST /documents` still accepts multipart `file,title,encoding,work_id` with TXT/MD/SRT/DOCX/EPUB for existing integrations. Originals remain immutable. |
 | Versions | `GET /documents/{id}`, `GET /documents/{id}/versions/{vid}?include_text=false`; `POST /documents/{id}/versions` with `base_version_id,options,manual_text?`, 409 on a stale base. |
-| Reading | Version suffix `/text?start=0&limit=20000&kind=cleaned\|source` pages text; `/diff` returns the bounded diff; `/download` downloads TXT. `/documents/{id}/original/download` returns original bytes. |
+| Reading | Version suffix `/text?start=0&limit=20000&kind=cleaned\|source` pages text; `/diff` returns the bounded legacy diff; `/download` downloads TXT. Exact original/source-download APIs remain for compatibility; the GUI exposes cleaned TXT export and source provenance rather than original-file download controls. |
 | Models | `GET/POST /models`; `PUT/DELETE /models/{id}`. `api_key` is input only. Connection and credential contracts are described below. |
 | Usage | `GET /usage?run_id=` returns `{items,summary}`. Counts have `actual`, `estimated` or `unknown` sources; costs require explicit prices/currency. |
 | Skills | `GET/POST /skills`, `POST /skills/upload` multipart `file`, `GET /skills/{id}/versions/{version}`. JSON, SKILL.md or declarative ZIP; uploaded code is not executable. |
@@ -70,7 +103,7 @@ Keys are excluded from profile JSON, model snapshots, business-table CSV and ful
 
 ## EPUB and MinerU PDF conversion
 
-Conversion endpoints also use `/api/studio`:
+The GUI presents one upload pipeline. Format-specific settings appear with the selected PDF/EPUB upload; conversion is not a separate navigation tab. Backend conversion resources remain available under `/api/studio` for the pipeline and existing integrations:
 
 | Endpoint | Request and behavior |
 |---|---|
@@ -91,16 +124,34 @@ Run states are `queued,running,paused,failed,cancelling,cancelled,needs_review,a
 
 ## Reference database chapter workspace
 
+### Durable upload pipeline
+
+The following endpoints are relative to `/api/studio`. The GUI accepts TXT, PDF and EPUB. TXT is strictly decoded; EPUB/PDF first pass through the existing conversion service to plain text, then use the same chapter parser and issue scan. Uploading does not apply diagnostic deletion proposals. New uploads select `mode:new`; repeated uploads explicitly choose `replace` (update the current text) or `append` (supplement after existing chapters). Existing immutable sources and version history are retained in both cases.
+
+| Endpoint | Request and response |
+|---|---|
+| `GET /ingestions` | `{items:Ingestion[]}`. Metadata only, without original BLOBs. |
+| `POST /ingestions` | Multipart `file,title?,encoding?,work_id?,mode?,target_document_id?,base_version_id?,options?`. `mode` is `new|replace|append`; replace/append require the current target document and base version. `options` is a JSON string, `{tier:"flash"|"standard",ocr_mode:"txt"|"ocr"}` for PDF only. Starts a durable worker and returns its task metadata, 201. |
+| `GET /ingestions/{id}` | Task includes `status,stage,progress,completed,total,error,attempt,document_id,version_id,conversion_id,options`. `progress:null` indicates an indeterminate stage; PDF/EPUB conversion stages forward the actual conversion progress. |
+| `POST /ingestions/{id}/cancel` | Cancels pending work and the associated conversion process. A document commit that already succeeded remains committed and completed. |
+| `POST /ingestions/{id}/retry` | Explicitly retries a failed/cancelled/interrupted task using its immutable source and target. Idempotency checks reconcile a prior successful document commit before repeating work. |
+
+An application restart marks running imports interrupted and requires an explicit retry; it does not submit a model request. Stages cover decoding/conversion, chapter parsing and issue scanning. A stale replace/append target returns 409 and does not overwrite a newer version. Originals and target configuration are immutable; source filename/hash/bytes remain provenance even though original download is absent from the GUI.
+
+### Chapter operations
+
 The routes in this section are relative to `/api/studio`. Document metadata includes `source_characters` (initial decoded upload length) and `current_characters` (latest text version length); append/edit/collection preparation updates the latter. List/detail metadata queries do not fetch original BLOBs. A document version is immutable. Every chapter mutation supplies its current `base_version_id`; a stale base returns 409 and writes neither a new version nor an append source. Chapter IDs identify positions **within the addressed version**, independently of parsed chapter numbers. Duplicate numbered chapters remain separate records.
 
 | Endpoint | Request and response |
 |---|---|
 | `GET /documents/{id}/versions/{vid}/chapters` | Returns `{document_id,version_id,pattern,heading_formats,candidates,gaps,options,author_keyword_defaults,chapters}`. Chapter metadata includes `id,index,number,title,raw_marker,kind,pattern,start,end,body_start,char_count,issues,proposal_count,proposal_ids,enabled_proposal_ids`. No chapter body is included. |
-| `GET /documents/{id}/versions/{vid}/chapters/{cid}?start=0&limit=20000` | Returns metadata (also under `chapter`), `text,start,end,total,body_offset,body_text,proposals,diagnostics,offset_unit`. `limit` is 1–100000. `body_text` is available through 200000 codepoints; longer bodies remain readable through pages. |
+| `GET /documents/{id}/versions/{vid}/chapters/{cid}?start=0&limit=20000` | Returns metadata (also under `chapter`), `text,start,end,total,body_offset,body_total,body_text,editable_start,editable_end,editable_text,proposals,diagnostics,offset_unit`. `limit` is 1–100000. `body_text` is available through 200000 codepoints; longer bodies remain readable/editable through pages. |
+| `GET /documents/{id}/versions/{vid}/findings` | `{document_id,version_id,offset_unit,items,total}`. All chapters' proposals/diagnostic markers with `chapter_id,chapter_index,chapter_title`; supports the single body workspace's checkable issue list and select-all operation without a separate diagnostics tab. |
 | `POST /documents/{id}/append` | Multipart `base_version_id,file,encoding` (`auto` by default). Strictly parses TXT/MD/SRT/DOCX/EPUB and appends after the current edited text. Returns a new version. Each upload retains its own immutable bytes, hash and decoded source; it does not replace the initial original. |
 | `GET /documents/{id}/sources` | `{items:[{id,filename,format,encoding,original_sha256,original_bytes,version_id,created_at}]}`. Initial original uses ID `original`; later IDs identify append uploads. |
 | `GET /documents/{id}/sources/{source_id}/download` | Exact original bytes for that source, after SHA-256 verification. |
 | `POST /documents/{id}/chapters/edit` | `{base_version_id,chapter_id,body_text}` → new version. Edits the body, preserving its heading and every exterior source span. Heading/next-chapter line boundaries are retained. |
+| `POST /documents/{id}/chapters/edit-slice` | `{base_version_id,chapter_id,start,end,text,expected_text}` → new version. Replaces only the addressed chapter-local codepoint range within the body. The original slice must equal `expected_text`; 409 on mismatch. Unseen parts of long chapters are preserved. |
 | `POST /documents/{id}/chapters/rename` | `{base_version_id,chapter_id,title}` → new version; retains a numbered heading's prefix. |
 | `POST /documents/{id}/chapters/insert` | `{base_version_id,after_chapter_id:null|string,heading,body_text}` → new version. `null` inserts at the beginning; use a heading matching the selected formats. |
 | `POST /documents/{id}/chapters/delete` | `{base_version_id,chapter_ids:[string]}` → new version without those exact chapter spans. |
@@ -112,6 +163,8 @@ The routes in this section are relative to `/api/studio`. Document metadata incl
 All ranges are half-open Unicode **codepoint** ranges `[start,end)`. The chapter index's `start,end,body_start` are absolute within the version text. A chapter-page response's `start,end,total` and all proposal/diagnostic offsets are local to that chapter; `body_offset` is the local start of the body. Pagination never makes a proposal's offsets page-relative. JavaScript must use codepoints (`Array.from(text)`) rather than UTF-16 offsets. The body begins immediately after the heading and can include its line break.
 
 A proposal is `{id,start,end,text,text_truncated,kind,label,reason,enabled,removable}`. `text` is a preview capped at 2000 codepoints; the full range remains readable through chapter pages. `enabled` is the suggested review selection, **not** evidence of an applied deletion. Changing the selection in the GUI has no write effect until `/chapters/clean` succeeds. Author notes and scrape-noise candidates are removable; suspected replacement characters, private-use glyphs and mojibake remain diagnostic annotations with `removable:false`. Missing source character information is not repaired by deleting a placeholder. The single chapter reader can therefore show proposed removals in red and let a user retain each span, without a second original/cleaned text column.
+
+Body editing is directly available in the reader, with dirty-state marking and explicit saving. Paging/chapter changes protect unsaved changes. The findings list and inline colors refer to the same source-version offsets; applying a batch creates a new version before candidates are recomputed. Internal chunk planning remains part of analysis, with no standalone chunk-list button in the full-text GUI.
 
 Issue kinds are `author_note,missing_glyph,mojibake,noise,length,gap,duplicate`; entries include `label,count,severity`. Gap detection compares parsed numbers within each heading pattern. Outliers use relative chapter-body length. Neither missing numbers nor repeated headings cause source text to be discarded or renumbered. Prefaces, headings, whitespace and final partial fallback chunks remain covered exactly.
 

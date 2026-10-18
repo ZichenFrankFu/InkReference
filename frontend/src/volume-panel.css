@@ -1,1 +1,35 @@
 .volume-panel,.source-files{min-height:360px;padding:24px;background:var(--paper);border:1px solid var(--line);border-radius:18px}.volume-toolbar{display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin-bottom:20px}.volume-toolbar>div{margin-right:auto}.volume-toolbar h3{margin:0 0 5px;font-size:17px}.volume-toolbar span,.source-file span{color:var(--muted);font-size:12px}.volume-model{display:flex;align-items:end;gap:12px;margin:18px 0}.volume-model label{display:grid;gap:6px;font-size:12px;min-width:230px}.volume-table{margin:20px 0}.volume-row{display:grid;grid-template-columns:minmax(120px,1fr) 100px 100px 40px;gap:12px;align-items:center;padding:10px 0;border-bottom:1px solid var(--line)}.volume-head{font-size:12px;color:var(--muted);padding-top:0}.volume-paste{width:100%;min-height:280px;font-family:ui-monospace,monospace;font-size:13px}.source-file{display:flex;gap:16px;align-items:center;padding:20px 0;border-bottom:1px solid var(--line)}.source-file>svg{color:var(--accent)}.source-file>div{display:grid;gap:7px;min-width:0;flex:1}.source-file code{font-size:10px;overflow-wrap:anywhere;color:var(--muted)}.source-file strong{font-size:14px}.source-file .button{display:flex;align-items:center;gap:7px}@media(max-width:700px){.volume-panel,.source-files{padding:16px}.volume-row{grid-template-columns:minmax(80px,1fr) 66px 66px 32px;gap:6px}.volume-model{align-items:stretch;flex-direction:column}.volume-model label{min-width:0}.source-file{flex-wrap:wrap}}
+.volume-panel { min-width: 0; border: 0; border-radius: 0; padding: 23px; background: #fff; container-type: inline-size; container-name: volume; }
+.volume-panel .volume-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 15px; min-width: 0; }
+.volume-panel .volume-toolbar > div { min-width: 0; }
+.volume-panel .volume-toolbar h3 { color: #496184; font-size: 16px; font-weight: 550; margin: 0 0 6px; }
+.volume-panel .volume-toolbar span { color: #91a0b8; font-size: 10px; }
+.volume-unsaved { display: inline-block; font-size: 9px; font-weight: 500; margin-left: 9px; color: #b38a4d; padding: 3px 6px; border-radius: 4px; background: #fff7e8; }
+.volume-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.volume-panel .button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; white-space: nowrap; min-width: 0; }
+.volume-feedback { display: flex; align-items: center; gap: 6px; min-height: 16px; font-size: 10px; color: #7b95c1; margin-top: 10px; }
+.volume-panel .volume-model { display: flex; align-items: flex-end; flex-wrap: wrap; gap: 11px; margin: 16px 0 25px; }
+.volume-panel .volume-model label { min-width: 120px; max-width: 380px; flex: 1 1 180px; display: grid; gap: 7px; font-size: 10px; color: #91a0b6; }
+.volume-panel .volume-model select { min-width: 0; width: 100%; color: #6b82a6; font-size: 11px; }
+.volume-panel .volume-model button { min-height: 37px !important; }
+.volume-panel .volume-row { grid-template-columns: minmax(90px,1fr) minmax(60px,86px) minmax(60px,86px) 30px; gap: 9px; min-width: 0; border-color: #e9eef7; }
+.volume-panel .volume-row input { width: 100%; min-width: 0; padding-inline: 10px; font-size: 11px; color: #6e85a7; }
+.volume-panel .volume-head { font-size: 10px; color: #97a7bf; }
+.volume-panel .volume-row .icon-button { width: 28px; height: 30px; min-height: 0; color: #c695a0; }
+.volume-panel .volume-row .icon-button:hover { color: #c45e75; background: #fff1f4; }
+.volume-panel .volume-table { margin: 19px 0; }
+.volume-panel .volume-paste { min-width: 0; }
+@container document (max-width: 500px) {
+  .volume-panel { padding: 18px; }
+}
+@container volume (max-width: 380px) {
+  .volume-panel .volume-row { grid-template-columns: minmax(80px,1fr) minmax(49px,64px) minmax(49px,64px) 26px; gap: 6px; }
+  .volume-panel .volume-row input { padding-inline: 7px; }
+  .volume-panel .volume-row .icon-button { width: 25px; }
+  .volume-panel .volume-model { align-items: stretch; flex-direction: column; gap: 9px; }
+  .volume-panel .volume-model label { flex: none; min-width: 0; max-width: none; }
+  .volume-panel .volume-actions .button { flex: 1 1 auto; }
+}
+@media (max-width: 430px) {
+  .volume-panel { padding: 16px; }
+}

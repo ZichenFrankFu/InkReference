@@ -13,6 +13,7 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
+from uuid import uuid4
 
 from . import __version__
 
@@ -160,9 +161,10 @@ class DataStore:
         with self.transaction() as connection:
             connection.execute("CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)")
             current = connection.execute("SELECT COALESCE(MAX(version), 0) FROM schema_migrations").fetchone()[0]
-            if current > 2:
+            if current > 3:
                 raise DataError(409, "数据库版本高于当前应用，请使用更新的应用")
-            if current < 1:
+            applied = {row[0] for row in connection.execute("SELECT version FROM schema_migrations")}
+            if 1 not in applied:
                 statements = [
                     "CREATE TABLE works (id TEXT PRIMARY KEY, values_json TEXT NOT NULL, cliche_layout TEXT NOT NULL DEFAULT '[]', revision INTEGER NOT NULL DEFAULT 1 CHECK(revision > 0), sort_order INTEGER NOT NULL)",
                     "CREATE TABLE characters (id TEXT PRIMARY KEY, work_id TEXT NOT NULL REFERENCES works(id) ON DELETE CASCADE, values_json TEXT NOT NULL, revision INTEGER NOT NULL DEFAULT 1 CHECK(revision > 0), sort_order INTEGER NOT NULL)",
@@ -175,13 +177,46 @@ class DataStore:
                 for statement in statements:
                     connection.execute(statement)
                 connection.execute("INSERT INTO schema_migrations VALUES (1, ?)", (datetime.now(timezone.utc).isoformat(),))
-            if current < 2:
+            if 2 not in applied:
                 # Tombstones outlive deletions: stale edits cannot target a new
                 # incarnation of the same external ID (the ABA problem).
                 connection.execute("CREATE TABLE record_versions (table_key TEXT NOT NULL, record_id TEXT NOT NULL, revision INTEGER NOT NULL CHECK(revision > 0), PRIMARY KEY(table_key,record_id))")
                 for table in TABLES:
                     connection.execute(f"INSERT INTO record_versions SELECT ?,id,revision FROM {table}", (table,))
                 connection.execute("INSERT INTO schema_migrations VALUES (2, ?)", (datetime.now(timezone.utc).isoformat(),))
+            if 3 not in applied:
+                connection.execute("""CREATE TABLE material_relations (
+                    id TEXT PRIMARY KEY,
+                    source_table TEXT NOT NULL CHECK(source_table IN ('works','characters','cliches')),
+                    source_id TEXT NOT NULL,
+                    target_table TEXT NOT NULL CHECK(target_table IN ('works','characters','cliches')),
+                    target_id TEXT NOT NULL,
+                    relation_type TEXT NOT NULL CHECK(length(trim(relation_type)) > 0),
+                    description TEXT NOT NULL DEFAULT '',
+                    metadata_json TEXT NOT NULL DEFAULT '{}',
+                    revision INTEGER NOT NULL DEFAULT 1 CHECK(revision > 0),
+                    CHECK(NOT(source_table = 'cliches' AND target_table = 'cliches')),
+                    CHECK(source_table != target_table OR source_id != target_id)
+                )""")
+                connection.execute("CREATE INDEX idx_material_relations_source ON material_relations(source_table,source_id)")
+                connection.execute("CREATE INDEX idx_material_relations_target ON material_relations(target_table,target_id)")
+                connection.execute("CREATE UNIQUE INDEX idx_material_relations_meaning ON material_relations(source_table,source_id,target_table,target_id,relation_type)")
+                # Polymorphic endpoints cannot use a normal SQLite foreign key.
+                # Triggers preserve the same integrity for direct SQLite writes
+                # and cascade deletion through a work's characters as well.
+                for operation in ("INSERT", "UPDATE OF source_table,source_id,target_table,target_id"):
+                    name = "insert" if operation == "INSERT" else "update"
+                    checks = " ".join(
+                        f"SELECT CASE WHEN NEW.{side}_table = '{table}' AND NOT EXISTS(SELECT 1 FROM {table} WHERE id = NEW.{side}_id) THEN RAISE(ABORT,'material relation endpoint missing') END;"
+                        for side in ("source", "target") for table in TABLES
+                    )
+                    connection.execute(f"CREATE TRIGGER material_relations_{name}_endpoints BEFORE {operation} ON material_relations BEGIN {checks} END")
+                for table in TABLES:
+                    connection.execute(f"""CREATE TRIGGER {table}_delete_material_relations AFTER DELETE ON {table}
+                        BEGIN DELETE FROM material_relations
+                        WHERE (source_table = '{table}' AND source_id = OLD.id)
+                           OR (target_table = '{table}' AND target_id = OLD.id); END""")
+                connection.execute("INSERT INTO schema_migrations VALUES (3, ?)", (datetime.now(timezone.utc).isoformat(),))
 
     def _stats(self, connection: sqlite3.Connection) -> dict[str, int]:
         return {table: connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] for table in (*TABLES, "work_cliches")}
@@ -280,26 +315,170 @@ class DataStore:
             return {"items": items[offset:offset + limit], "total": len(items), "offset": offset, "limit": limit}
 
     def relations(self, table: str, identifier: str) -> dict[str, list[dict[str, Any]]]:
+        """Return direct, labelled edges; sharing a work never creates an edge.
+
+        The three material groups remain backward compatible. Each material has
+        ``relationships`` (and a first ``relationship`` for simple clients), so
+        several semantic edges to one target do not duplicate the target card.
+        """
         require_table(table)
         with self.connect() as connection:
             connection.execute("BEGIN")
             row = self._row(connection, table, identifier)
-            if table == "works":
-                work_ids = {identifier}
-            elif table == "characters":
-                work_ids = {row["work_id"]}
-            else:
-                work_ids = {item[0] for item in connection.execute("SELECT work_id FROM work_cliches WHERE cliche_id = ?", (identifier,))}
             result = {key: [] for key in TABLES}
-            for key in ("works", "characters"):
-                for item in self._all(connection, key):
-                    wid = item["id"] if key == "works" else item["values"]["作品ID"]
-                    if wid in work_ids and not (key == table and item["id"] == identifier):
-                        result[key].append(item)
-            if table != "cliches":
-                cids = {item["cliche_id"] for item in connection.execute("SELECT * FROM work_cliches") if item["work_id"] in work_ids}
-                result["cliches"] = [item for item in self._all(connection, "cliches") if item["id"] in cids]
+            result["edges"] = []
+            targets: dict[tuple[str, str], dict[str, Any]] = {}
+
+            def add(edge: dict[str, Any], target_table: str, target_id: str, label: str) -> None:
+                if table == target_table == "cliches":
+                    return
+                direction = "outgoing" if edge["source_table"] == table and edge["source_id"] == identifier else "incoming"
+                relation = {"id": edge["id"], "type": edge["relation_type"], "label": label,
+                            "description": edge["description"], "direction": direction,
+                            "metadata": edge.get("metadata", {}), "source": edge.get("source", "explicit")}
+                key = (target_table, target_id)
+                if key not in targets:
+                    item = self._render(connection, target_table, self._row(connection, target_table, target_id))
+                    item["relationship"] = relation
+                    item["relationships"] = []
+                    targets[key] = item
+                    result[target_table].append(item)
+                targets[key]["relationships"].append(relation)
+                result["edges"].append({**edge, "direction": direction, "label": label})
+
+            if table in {"works", "characters"}:
+                children = connection.execute("SELECT * FROM characters WHERE work_id = ? ORDER BY sort_order,id", (identifier,)) if table == "works" else [row]
+                for child in children:
+                    values = json.loads(child["values_json"])
+                    role = values.get("角色定位", "")
+                    label = "登场人物" if table == "works" else "所属作品"
+                    if role:
+                        label += f" · {role}"
+                    edge = {"id": f"character:{child['id']}", "source_table": "characters", "source_id": child["id"],
+                            "target_table": "works", "target_id": child["work_id"], "relation_type": "character_of",
+                            "description": role, "metadata": {"角色定位": role}, "source": "character_work"}
+                    add(edge, "characters" if table == "works" else "works", child["id"] if table == "works" else child["work_id"], label)
+            if table in {"works", "cliches"}:
+                where, order = ("work_id", "work_position,cliche_id") if table == "works" else ("cliche_id", "cliche_position,work_id")
+                for link in connection.execute(f"SELECT * FROM work_cliches WHERE {where} = ? ORDER BY {order}", (identifier,)):
+                    edge = {"id": f"work-cliche:{link['work_id']}:{link['cliche_id']}", "source_table": "works", "source_id": link["work_id"],
+                            "target_table": "cliches", "target_id": link["cliche_id"], "relation_type": "uses_cliche",
+                            "description": link["detail"], "metadata": {}, "source": "work_cliches"}
+                    add(edge, "cliches" if table == "works" else "works", link["cliche_id"] if table == "works" else link["work_id"], "使用桥段" if table == "works" else "出现于")
+            for link in connection.execute("""SELECT * FROM material_relations
+                WHERE (source_table = ? AND source_id = ?) OR (target_table = ? AND target_id = ?) ORDER BY id""", (table, identifier, table, identifier)):
+                edge = self._render_material_relation(link)
+                outgoing = edge["source_table"] == table and edge["source_id"] == identifier
+                add(edge, edge["target_table"] if outgoing else edge["source_table"], edge["target_id"] if outgoing else edge["source_id"], edge["relation_type"])
             return result
+
+    @staticmethod
+    def _render_material_relation(row: sqlite3.Row) -> dict[str, Any]:
+        values = dict(row)
+        values["metadata"] = json.loads(values.pop("metadata_json"))
+        return values
+
+    def _validate_material_relation(self, connection: sqlite3.Connection, values: dict[str, Any]) -> dict[str, Any]:
+        """Validate canonical relation rows, preserving future fields in metadata."""
+        if not isinstance(values, dict):
+            raise DataError(422, "素材关联必须为对象")
+        normalized: dict[str, Any] = {}
+        for field in ("id", "source_table", "source_id", "target_table", "target_id", "relation_type", "description"):
+            value = values.get(field, "")
+            if not isinstance(value, str):
+                raise DataError(422, f"关联字段 {field} 必须为文本")
+            normalized[field] = value
+        if not normalized["id"] or normalized["id"] != normalized["id"].strip() or re.search(r"[/\\\x00-\x1f\x7f]", normalized["id"]) or normalized["id"] in {".", ".."}:
+            raise DataError(422, "关联 ID 不能为空、包含首尾空白、斜杠或控制字符")
+        for side in ("source", "target"):
+            key = normalized[f"{side}_table"]
+            if key not in TABLES:
+                raise DataError(422, f"关联 {normalized['id']} 的 {side}_table 无效：{key}")
+            if connection.execute(f"SELECT 1 FROM {key} WHERE id = ?", (normalized[f"{side}_id"],)).fetchone() is None:
+                raise DataError(422, f"关联 {normalized['id']} 引用的{TABLES[key]['label']}不存在：{normalized[f'{side}_id']}")
+        if normalized["source_table"] == normalized["target_table"] == "cliches":
+            raise DataError(422, "桥段不能关联桥段；请选择作品或人物")
+        if (normalized["source_table"], normalized["source_id"]) == (normalized["target_table"], normalized["target_id"]):
+            raise DataError(422, "素材不能关联自身")
+        normalized["relation_type"] = normalized["relation_type"].strip()
+        if not normalized["relation_type"]:
+            raise DataError(422, f"关联 {normalized['id']} 缺少关系类型（relation_type）")
+        duplicate = connection.execute("""SELECT id FROM material_relations
+            WHERE source_table = ? AND source_id = ? AND target_table = ? AND target_id = ? AND relation_type = ? AND id != ?""", (
+                normalized["source_table"], normalized["source_id"], normalized["target_table"], normalized["target_id"], normalized["relation_type"], normalized["id"]
+            )).fetchone()
+        if duplicate:
+            raise DataError(409, f"关联 {normalized['id']} 与 {duplicate['id']} 的两端素材及关系类型相同；请合并这两条关联或使用不同的关系类型")
+        try:
+            metadata = values["metadata"] if "metadata" in values else json.loads(values.get("metadata_json", "{}"))
+        except (TypeError, ValueError) as error:
+            raise DataError(422, f"关联 {normalized['id']} 的 metadata_json 无效") from error
+        if not isinstance(metadata, dict):
+            raise DataError(422, "关联 metadata 必须为对象")
+        unknown = {key: value for key, value in values.items() if key not in {*normalized, "revision", "metadata", "metadata_json"}}
+        try:
+            normalized["metadata_json"] = _json({**metadata, **unknown})
+        except (TypeError, ValueError) as error:
+            raise DataError(422, "关联的扩展字段必须可保存为 JSON") from error
+        return normalized
+
+    def _upsert_material_relation(self, connection: sqlite3.Connection, values: dict[str, Any], *, expected_revision: int | None = None, conflict_policy: str = "error") -> str:
+        """Import helper; caller owns a transaction covering all material tables."""
+        if conflict_policy not in {"error", "skip", "update"}:
+            raise DataError(422, "关联冲突策略必须为 error、skip 或 update")
+        values = self._validate_material_relation(connection, values)
+        identifier = values["id"]
+        previous = connection.execute("SELECT * FROM material_relations WHERE id = ?", (identifier,)).fetchone()
+        if previous:
+            if expected_revision is not None and previous["revision"] != expected_revision:
+                raise DataError(409, f"关联 {identifier} 已被修改，请刷新后重试")
+            if all((json.loads(previous[field]) == json.loads(value) if field == "metadata_json" else previous[field] == value) for field, value in values.items()):
+                return identifier
+            if conflict_policy == "skip":
+                return identifier
+            if conflict_policy == "error":
+                raise DataError(409, f"关联 ID 已存在：{identifier}")
+            assignments = ",".join(f"{field} = ?" for field in values if field != "id")
+            connection.execute(f"UPDATE material_relations SET {assignments},revision = revision + 1 WHERE id = ?", (*[value for field, value in values.items() if field != "id"], identifier))
+            revision = previous["revision"] + 1
+        else:
+            if expected_revision is not None:
+                raise DataError(404, f"关联不存在：{identifier}")
+            tombstone = connection.execute("SELECT revision FROM record_versions WHERE table_key = 'material_relations' AND record_id = ?", (identifier,)).fetchone()
+            revision = tombstone[0] + 1 if tombstone else 1
+            columns = list(values)
+            connection.execute(f"INSERT INTO material_relations ({','.join(columns)},revision) VALUES ({','.join('?' for _ in range(len(columns) + 1))})", (*values.values(), revision))
+        self._remember_version(connection, "material_relations", identifier, revision)
+        return identifier
+
+    def list_material_relations(self) -> list[dict[str, Any]]:
+        with self.connect() as connection:
+            return [self._render_material_relation(row) for row in connection.execute("SELECT * FROM material_relations ORDER BY id")]
+
+    def create_material_relation(self, values: dict[str, Any]) -> dict[str, Any]:
+        with self.transaction() as connection:
+            identifier = self._upsert_material_relation(connection, {"id": f"R-{uuid4().hex}", **values})
+            return self._render_material_relation(connection.execute("SELECT * FROM material_relations WHERE id = ?", (identifier,)).fetchone())
+
+    def update_material_relation(self, identifier: str, values: dict[str, Any], expected_revision: int) -> dict[str, Any]:
+        with self.transaction() as connection:
+            previous = connection.execute("SELECT * FROM material_relations WHERE id = ?", (identifier,)).fetchone()
+            if previous is None:
+                raise DataError(404, f"关联不存在：{identifier}")
+            if "id" in values and values["id"] != identifier:
+                raise DataError(422, "不能更改已有关联的 ID")
+            self._upsert_material_relation(connection, {**dict(previous), **values}, expected_revision=expected_revision, conflict_policy="update")
+            return self._render_material_relation(connection.execute("SELECT * FROM material_relations WHERE id = ?", (identifier,)).fetchone())
+
+    def delete_material_relation(self, identifier: str, expected_revision: int) -> dict[str, int]:
+        with self.transaction() as connection:
+            previous = connection.execute("SELECT * FROM material_relations WHERE id = ?", (identifier,)).fetchone()
+            if previous is None:
+                raise DataError(404, f"关联不存在：{identifier}")
+            if previous["revision"] != expected_revision:
+                raise DataError(409, f"关联 {identifier} 已被修改，请刷新后重试")
+            connection.execute("DELETE FROM material_relations WHERE id = ?", (identifier,))
+            return {"deleted": 1}
 
     def _next_order(self, connection: sqlite3.Connection, table: str) -> int:
         return connection.execute(f"SELECT COALESCE(MAX(sort_order), -1) + 1 FROM {table}").fetchone()[0]
@@ -489,6 +668,8 @@ class DataStore:
             elif table == "cliches":
                 wids = {item[0] for item in connection.execute("SELECT work_id FROM work_cliches WHERE cliche_id = ?", (identifier,))}
                 related = len(wids)
+            related += connection.execute("""SELECT COUNT(*) FROM material_relations
+                WHERE (source_table = ? AND source_id = ?) OR (target_table = ? AND target_id = ?)""", (table, identifier, table, identifier)).fetchone()[0]
             if related and not cascade:
                 raise DataError(409, f"存在 {related} 条关联；请确认级联删除")
             count = 1 + (connection.execute("SELECT COUNT(*) FROM characters WHERE work_id = ?", (identifier,)).fetchone()[0] if table == "works" else 0)

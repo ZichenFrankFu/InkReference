@@ -17,7 +17,18 @@ export type Stats = {
   cliches: number;
   work_cliches: number;
 };
-export type Relations = Record<TableKey, Item[]>;
+export type MaterialRelationship = {
+  id: string;
+  type: string;
+  label: string;
+  description: string;
+  direction: "outgoing" | "incoming";
+};
+export type RelatedItem = Item & {
+  relationship?: MaterialRelationship;
+  relationships?: MaterialRelationship[];
+};
+export type Relations = Record<TableKey, RelatedItem[]>;
 export type Page = {
   items: Item[];
   total: number;
@@ -36,6 +47,25 @@ export type Preview = {
   errors: string[];
   warnings: string[];
   stats: Stats;
+  format?: "db" | "csv" | "xlsx";
+  schema_version?: number;
+  bundle_id?: string | null;
+  legacy?: boolean;
+  required_tables?: {
+    table: string;
+    label: string;
+    filename: string;
+    present: boolean;
+  }[];
+  guidance?: string[];
+};
+export type LibraryFormats = {
+  default: "db" | "csv" | "xlsx";
+  schema_version: number;
+  tables: { table: string; label: string; filename: string; columns: string[] }[];
+  formats: { format: "db" | "csv" | "xlsx"; label: string; extension: string; description: string }[];
+  legacy_csv: { table: string; filename: string }[];
+  guidance: string[];
 };
 export class ApiError extends Error {
   status: number;

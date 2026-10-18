@@ -40,6 +40,9 @@ backup-*.zip
 *.srt
 *.txt
 *.csv
+*.xlsx
+*.xlsm
+*.xls
 !requirements*.txt
 !third_party/*LICENSE*.txt
 

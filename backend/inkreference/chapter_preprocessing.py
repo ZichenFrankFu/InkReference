@@ -11,7 +11,7 @@ import hashlib
 import re
 import statistics
 from collections import Counter, defaultdict
-from typing import Any
+from typing import Any, Callable
 
 import regex
 
@@ -29,6 +29,7 @@ _TITLE_MARKERS = ["感言", "请假", "通知", "公告", "致歉", "本章说",
 _DIALOGUE = re.compile(r"说道|[“”「」『』]")
 _RULE = re.compile(r"^[ \t　]*[-=*＝—─]{3,}[ \t　]*$", re.MULTILINE)
 _NOISE = [
+    ("control_character", "异常控制字符", re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]+")),
     ("html_comment", "采集注释", re.compile(r"<!--.*?-->", re.DOTALL)),
     ("html_tag", "HTML 标记", re.compile(r"</?[a-zA-Z][a-zA-Z0-9]*(?:\s[^>]*)?>")),
     ("watermark", "网站水印", re.compile(r"@?追书神器|#追书神器")),
@@ -187,7 +188,8 @@ def chapter_proposals(chapter: dict[str, Any], options: dict[str, Any]) -> list[
     return sorted(merged + [p for p in proposals if not p["removable"]], key=lambda p: (p["start"], p["end"]))
 
 
-def annotate_chapters(chapters: list[dict[str, Any]], options: dict[str, Any]) -> list[dict[str, Any]]:
+def annotate_chapters(chapters: list[dict[str, Any]], options: dict[str, Any],
+                      progress: Callable[[int, int], None] | None = None) -> list[dict[str, Any]]:
     lengths = [len(chapter["content"].strip()) for chapter in chapters if chapter["kind"] == "chapter"]
     median = statistics.median(lengths) if lengths else 0
     seen = Counter((chapter.get("pattern"), chapter.get("number")) for chapter in chapters
@@ -221,4 +223,6 @@ def annotate_chapters(chapters: list[dict[str, Any]], options: dict[str, Any]) -
                 issues.append({"kind": "gap", "label": f"缺 {number - previous - 1} 章", "count": number - previous - 1, "severity": "warning"})
             last_number[pattern] = number
         chapter["issues"] = issues
+        if progress:
+            progress(index + 1, len(chapters))
     return gaps

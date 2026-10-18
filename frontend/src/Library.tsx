@@ -37,6 +37,7 @@ import {
   jsonBody,
   request,
   type Item,
+  type LibraryFormats,
   type Page,
   type Preview,
   type Relations,
@@ -44,6 +45,7 @@ import {
   type TableKey,
   type TableMeta,
 } from "./api";
+import "./library.css";
 
 const TABLES: {
   key: TableKey;
@@ -82,7 +84,7 @@ const emptyStats: Stats = {
 };
 const nf = new Intl.NumberFormat("zh-CN");
 const labelFor = (key: string) =>
-  TABLES.find((t) => t.key === key)?.label || key;
+  TABLES.find((t) => t.key === key)?.label || ({ work_cliches: "作品与桥段关联", material_relations: "素材关系" } as Record<string, string>)[key] || key;
 const titleOf = (item: Item, table: TableKey) =>
   item.values[
     table === "works" ? "作品" : table === "characters" ? "角色" : "cliché内容"
@@ -208,6 +210,12 @@ function Modal({
   );
 }
 
+const exchangeFormats = [
+  { id: "db", title: "SQLite 数据库", suffix: ".db", description: "一个文件，完整保存所有素材表与关联。", icon: Database },
+  { id: "csv", title: "CSV 数据包", suffix: ".zip", description: "所有数据表与版本清单，统一打包为 ZIP。", icon: FolderInput },
+  { id: "xlsx", title: "Excel 工作簿", suffix: ".xlsx", description: "一个工作簿，包含全部数据表与版本清单。", icon: FileSpreadsheet },
+] as const;
+
 function ImportDialog({
   onClose,
   onComplete,
@@ -216,320 +224,118 @@ function ImportDialog({
   onComplete: (message: string) => void;
 }) {
   const [preview, setPreview] = useState<Preview | null>(null);
-  const [busy, setBusy] = useState(false);
+  const [formats, setFormats] = useState<LibraryFormats | null>(null);
+  useEffect(() => {
+    const controller = new AbortController();
+    void request<LibraryFormats>("/library/formats", { signal: controller.signal }).then(setFormats).catch(() => undefined);
+    return () => controller.abort();
+  }, []);
+  const [files, setFiles] = useState<File[]>([]);
+  const [busy, setBusy] = useState<"" | "preview" | "commit">("");
   const [error, setError] = useState("");
   const [policy, setPolicy] = useState<"skip" | "update" | "error">("skip");
   const input = useRef<HTMLInputElement>(null);
   const [dragging, setDragging] = useState(false);
-  const inspect = async (files: FileList | File[]) => {
-    if (!files.length || busy) return;
-    if ([...files].some((f) => !f.name.toLowerCase().endsWith(".csv"))) {
-      setError("请选择 CSV 文件。可同时选择作品、人物和桥段文件。");
+  const inspect = async (selected: File[]) => {
+    setFiles(selected);
+    setPreview(null);
+    setError("");
+    if (!selected.length) return;
+    const unsupported = selected.filter((file) => !/\.(db|sqlite3|zip|csv|xlsx|json)$/i.test(file.name));
+    if (unsupported.length) {
+      setError(`不支持的文件：${unsupported.map(file => file.name).join("、")}。请选择 .db 数据库、完整 CSV 数据包或 .xlsx 工作簿。`);
       return;
     }
-    setBusy(true);
-    setError("");
-    setPreview(null);
+    setBusy("preview");
     try {
       const form = new FormData();
-      [...files].forEach((f) => form.append("files", f));
-      setPreview(
-        await request<Preview>("/import/preview", {
-          method: "POST",
-          body: form,
-        }),
-      );
-    } catch (e) {
-      setError(errorMessage(e));
-    } finally {
-      setBusy(false);
-      if (input.current) input.current.value = "";
-    }
+      selected.forEach(file => form.append("files", file));
+      setPreview(await request<Preview>("/library/import/preview", { method: "POST", body: form }));
+    } catch (e) { setError(errorMessage(e)); }
+    finally { setBusy(""); if (input.current) input.current.value = ""; }
+  };
+  const addFiles = (incoming: FileList | File[]) => {
+    if (!incoming.length || busy) return;
+    const merged = new Map(files.map(file => [file.name, file]));
+    [...incoming].forEach(file => merged.set(file.name, file));
+    void inspect([...merged.values()]);
   };
   const commit = async () => {
     if (!preview || preview.errors.length) return;
-    setBusy(true);
-    setError("");
+    setBusy("commit"); setError("");
     try {
-      const result = await request<{
-        imported: number;
-        updated: number;
-        skipped: number;
-      }>("/import/commit", {
-        method: "POST",
-        ...jsonBody({ batch_id: preview.batch_id, policy }),
+      const result = await request<{ imported: number; updated: number; skipped: number }>("/library/import/commit", {
+        method: "POST", ...jsonBody({ batch_id: preview.batch_id, policy }),
       });
-      onComplete(
-        `导入完成：新增 ${nf.format(result.imported)} 条，更新 ${nf.format(result.updated)} 条，跳过 ${nf.format(result.skipped)} 条。`,
-      );
-    } catch (e) {
-      setError(errorMessage(e));
-      setBusy(false);
-    }
+      onComplete(`导入完成：新增 ${nf.format(result.imported)} 条，更新 ${nf.format(result.updated)} 条，跳过 ${nf.format(result.skipped)} 条。`);
+    } catch (e) { setError(errorMessage(e)); setBusy(""); }
   };
-  return (
-    <Modal title="导入 CSV" onClose={onClose} wide busy={busy}>
-      <div className="modal-body">
-        <p className="muted">
-          同时选择三个素材文件，自动识别表头并检查关联。确认后一次性写入。
-        </p>
-        <input
-          type="file"
-          accept=".csv,text/csv"
-          multiple
-          ref={input}
-          className="visually-hidden"
-          aria-label="选择 CSV 文件"
-          onChange={(e) => e.target.files && void inspect(e.target.files)}
-        />
-        <button
-          className={`dropzone ${dragging ? "dragging" : ""}`}
-          disabled={busy}
-          onClick={() => input.current?.click()}
-          onDragOver={(e) => {
-            e.preventDefault();
-            setDragging(true);
-          }}
-          onDragLeave={() => setDragging(false)}
-          onDrop={(e) => {
-            e.preventDefault();
-            setDragging(false);
-            void inspect(e.dataTransfer.files);
-          }}
-        >
-          <span className="drop-icon">
-            <FolderInput size={25} />
-          </span>
-          <strong>
-            {busy && !preview
-              ? "正在检查文件…"
-              : preview
-                ? "重新选择文件"
-                : "点击选择或拖入 CSV 文件"}
-          </strong>
-          <span>支持 v8 作品、人物、桥段 CSV · 可多选</span>
-        </button>
-        {error && (
-          <div className="notice error" role="alert">
-            <CircleAlert size={17} />
-            <span>{error}</span>
-          </div>
-        )}
-        {preview && (
-          <>
-            <div className="section-caption">
-              <span>导入预检</span>
-              <span>{preview.tables.length} 个文件</span>
-            </div>
-            <div className="preview-table-wrap">
-              <table className="preview-table">
-                <thead>
-                  <tr>
-                    <th>文件 / 数据表</th>
-                    <th>记录</th>
-                    <th>新增</th>
-                    <th>已存在</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {preview.tables.map((t, i) => (
-                    <tr key={`${t.filename}-${i}`}>
-                      <td>
-                        <strong>{labelFor(t.table)}</strong>
-                        <small>{t.filename}</small>
-                      </td>
-                      <td>{nf.format(t.rows)}</td>
-                      <td className="positive">{nf.format(t.new)}</td>
-                      <td>{nf.format(t.existing)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-            {preview.errors.length > 0 && (
-              <div className="notice error" role="alert">
-                <CircleAlert size={18} />
-                <div>
-                  <strong>请修复以下问题后重新选择文件</strong>
-                  <ul>
-                    {preview.errors.map((s, i) => (
-                      <li key={i}>{s}</li>
-                    ))}
-                  </ul>
-                </div>
-              </div>
-            )}
-            {preview.warnings.length > 0 && (
-              <div className="notice warning">
-                <CircleAlert size={18} />
-                <div>
-                  <strong>需要留意</strong>
-                  <ul>
-                    {preview.warnings.map((s, i) => (
-                      <li key={i}>{s}</li>
-                    ))}
-                  </ul>
-                </div>
-              </div>
-            )}
-            {!preview.errors.length && (
-              <div className="notice success">
-                <FileCheck2 size={18} />
-                <span>格式与关联检查通过。确认后才会保存数据。</span>
-              </div>
-            )}
-            <fieldset className="policy-options" disabled={busy}>
-              <legend>遇到相同 ID 时</legend>
-              {(
-                [
-                  ["skip", "保留已有记录", "跳过相同 ID，适合首次或重复导入"],
-                  ["update", "更新已有记录", "用 CSV 内容覆盖相同 ID 的字段"],
-                  ["error", "中止本次导入", "发现重复即停止，整批不写入"],
-                ] as const
-              ).map(([value, label, description]) => (
-                <label
-                  className={`radio-card ${policy === value ? "checked" : ""}`}
-                  key={value}
-                >
-                  <input
-                    type="radio"
-                    name="policy"
-                    value={value}
-                    checked={policy === value}
-                    onChange={() => setPolicy(value)}
-                  />
-                  <span>
-                    <strong>{label}</strong>
-                    <small>{description}</small>
-                  </span>
-                </label>
-              ))}
-            </fieldset>
-          </>
-        )}
+  return <Modal title="导入素材库" onClose={onClose} wide busy={!!busy}>
+    <div className="modal-body library-exchange">
+      <div className="exchange-format-guide" aria-label="支持的导入格式">
+        {exchangeFormats.map(format => <div key={format.id} className={format.id === "db" ? "recommended" : ""}>
+          <format.icon size={18} /><strong>{format.suffix === ".zip" ? "CSV / ZIP" : format.suffix.toUpperCase()}{format.id === "db" && <span>推荐</span>}</strong>
+          <small>{format.id === "db" ? "选择一个数据库文件" : format.id === "csv" ? "完整数据包，或同时选择全部 CSV 与 manifest.json" : "选择包含全部数据表的工作簿"}</small>
+        </div>)}
       </div>
-      <div className="modal-footer">
-        <button className="button secondary" disabled={busy} onClick={onClose}>
-          取消
-        </button>
-        <button
-          className="button primary"
-          disabled={busy || !preview || !!preview.errors.length}
-          onClick={() => void commit()}
-        >
-          {busy ? (
-            <Spinner text={preview ? "正在导入…" : "正在检查…"} />
-          ) : (
-            <>
-              <ArrowRight size={16} />
-              确认导入
-            </>
-          )}
-        </button>
-      </div>
-    </Modal>
-  );
+      <details className="exchange-requirements"><summary>CSV / Excel 需要哪些数据表？</summary><ul>{(formats?.tables || [
+        { table: "works", label: "作品表", filename: "works.csv" },
+        { table: "characters", label: "人物表", filename: "characters.csv" },
+        { table: "cliches", label: "桥段表", filename: "cliches.csv" },
+        { table: "work_cliches", label: "作品与桥段关联", filename: "work_cliches.csv" },
+        { table: "material_relations", label: "素材关系", filename: "material_relations.csv" },
+      ]).map(table => <li key={table.table}><strong>{table.label}</strong><span>{table.filename} / {table.table} 工作表</span></li>)}</ul><p>CSV 还需 manifest.json 版本清单；Excel 工作簿需 _manifest 工作表。直接导入本应用导出的完整文件即可。</p></details>
+      <input type="file" accept=".db,.sqlite3,.zip,.csv,.xlsx,.json" multiple ref={input} className="visually-hidden" aria-label="选择素材库文件" onChange={event => { const incoming = [...(event.target.files || [])]; event.target.value = ""; addFiles(incoming); }} />
+      <button className={`dropzone exchange-dropzone ${dragging ? "dragging" : ""}`} disabled={!!busy} onClick={() => input.current?.click()} onDragOver={event => { event.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={event => { event.preventDefault(); setDragging(false); addFiles(event.dataTransfer.files); }}>
+        <span className="drop-icon"><Upload size={23} /></span>
+        <strong>{busy === "preview" ? "正在检查数据表与关联…" : files.length ? "补充文件" : "点击选择或拖入文件"}</strong>
+        <span>{files.length ? "可补齐遗漏文件；同名文件会替换本次选择" : ".db · CSV 数据包 · .xlsx"}</span>
+      </button>
+      {!!files.length && <div className="exchange-files">
+        <div className="section-caption"><span>已选择 {files.length} 个文件</span><button className="text-button" disabled={!!busy} onClick={() => { setFiles([]); setPreview(null); setError(""); }}>清空重选</button></div>
+        <ul>{files.map(file => <li key={file.name}><FileSpreadsheet size={14} /><span title={file.name}>{file.name}</span><small>{nf.format(Math.ceil(file.size / 1024))} KB</small><button className="icon-button" disabled={!!busy} aria-label={`移除 ${file.name}`} onClick={() => void inspect(files.filter(selected => selected !== file))}><X size={14} /></button></li>)}</ul>
+      </div>}
+      {busy === "preview" && <div className="exchange-progress"><Spinner text="正在检查全部数据表…" /></div>}
+      {error && <div className="notice error" role="alert"><CircleAlert size={17} /><span>{error}</span></div>}
+      {preview && <>
+        {!!preview.required_tables?.length && <section className="exchange-checklist" aria-label="必要数据表检查">
+          <div className="section-caption"><span>数据表完整性</span><span>{preview.required_tables.filter(table => table.present).length} / {preview.required_tables.length}</span></div>
+          <ul>{preview.required_tables.map(table => <li key={table.table} className={table.present ? "present" : "missing"}>
+            {table.present ? <CheckCircle2 size={16} /> : <CircleAlert size={16} />}<span><strong>{table.label || labelFor(table.table)}</strong><small>{table.filename}</small></span><em>{table.present ? "已就绪" : "缺少文件 / 工作表"}</em>
+          </li>)}</ul>
+        </section>}
+        {preview.errors.length > 0 && <div className="notice error" role="alert"><CircleAlert size={18} /><div><strong>暂时无法导入</strong><ul>{preview.errors.map((message, index) => <li key={index}>{message}</li>)}</ul></div></div>}
+        {preview.warnings.length > 0 && <div className="notice warning"><CircleAlert size={18} /><div><strong>请核对以下内容</strong><ul>{preview.warnings.map((message, index) => <li key={index}>{message}</li>)}</ul></div></div>}
+        {!!preview.guidance?.length && <div className="exchange-guidance">{preview.guidance.map((message, index) => <p key={index}>{message}</p>)}</div>}
+        {!!preview.tables.length && <><div className="section-caption"><span>导入预览</span><span>{preview.legacy ? "v8 兼容数据" : preview.format?.toUpperCase()}</span></div><div className="preview-table-wrap"><table className="preview-table"><thead><tr><th>数据表 / 来源</th><th>记录</th><th>新增</th><th>已存在</th></tr></thead><tbody>{preview.tables.map((table, index) => <tr key={`${table.filename}-${index}`}><td><strong>{labelFor(table.table)}</strong><small>{table.filename}</small></td><td>{nf.format(table.rows)}</td><td>{nf.format(table.new)}</td><td>{nf.format(table.existing)}</td></tr>)}</tbody></table></div></>}
+        {!preview.errors.length && <div className="notice success"><FileCheck2 size={18} /><span>全部数据表与关联检查通过。</span></div>}
+        <fieldset className="policy-options" disabled={!!busy || !!preview.errors.length}>
+          <legend>遇到相同 ID 时</legend>
+          {([ ["skip", "保留已有记录", "跳过相同 ID"], ["update", "更新已有记录", "使用导入内容更新相同 ID"], ["error", "中止本次导入", "发现重复时整批不写入"] ] as const).map(([value, label, description]) => <label className={`radio-card ${policy === value ? "checked" : ""}`} key={value}><input type="radio" name="policy" checked={policy === value} onChange={() => setPolicy(value)} /><span><strong>{label}</strong><small>{description}</small></span></label>)}
+        </fieldset>
+      </>}
+      {!files.length && <p className="exchange-compatibility">已有 v8 CSV：请同时选择 works_library、character_database、cliche_database 三个同版本文件。</p>}
+    </div>
+    <div className="modal-footer"><button className="button secondary" disabled={!!busy} onClick={onClose}>取消</button><button className="button primary" disabled={!!busy || !preview || !!preview.errors.length} onClick={() => void commit()}>{busy ? <Spinner text={busy === "commit" ? "正在导入…" : "正在检查…"} /> : <><ArrowRight size={16} />确认导入</>}</button></div>
+  </Modal>;
 }
 
-function ExportDialog({
-  table,
-  onClose,
-  notify,
-}: {
-  table: TableKey;
-  onClose: () => void;
-  notify: (message: string) => void;
-}) {
-  const [busy, setBusy] = useState("");
+function ExportDialog({ onClose, notify }: { onClose: () => void; notify: (message: string) => void }) {
+  const [format, setFormat] = useState<"db" | "csv" | "xlsx">("db");
+  const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const exportFile = async (mode: string, path: string, filename: string) => {
-    setBusy(mode);
-    setError("");
+  const exportFile = async () => {
+    setBusy(true); setError("");
     try {
-      await download(path, filename);
-      notify("导出文件已准备好。");
-      onClose();
-    } catch (e) {
-      setError(errorMessage(e));
-    } finally {
-      setBusy("");
-    }
+      await download(`/library/export?format=${format}`, `InkReference${format === "csv" ? ".zip" : `.${format}`}`);
+      notify("完整素材库已导出。"); onClose();
+    } catch (e) { setError(errorMessage(e)); }
+    finally { setBusy(false); }
   };
-  return (
-    <Modal title="导出素材" onClose={onClose} busy={!!busy}>
-      <div className="modal-body">
-        <p className="muted">
-          CSV 使用 UTF-8 BOM 编码，保留多行内容与原始字段。
-        </p>
-        <div className="export-options">
-          {[
-            {
-              id: "compatible",
-              title: "兼容 v8 格式",
-              text: "作品、人物、桥段三个 CSV，打包为 ZIP。",
-              icon: FileSpreadsheet,
-              path: "/export?mode=compatible",
-              filename: "inkreference_v8.zip",
-            },
-            {
-              id: "full",
-              title: "全部业务数据",
-              text: "各业务表 CSV 和字段说明，打包为 ZIP。",
-              icon: Database,
-              path: "/export?mode=full",
-              filename: "inkreference_full.zip",
-            },
-            {
-              id: "table",
-              title: `仅导出${labelFor(table)}`,
-              text: "导出当前数据表的全部记录，生成一个 CSV。",
-              icon: ArrowDownToLine,
-              path: `/export/${table}`,
-              filename: `${table}.csv`,
-            },
-          ].map((option) => (
-            <button
-              className="export-option"
-              disabled={!!busy}
-              key={option.id}
-              onClick={() =>
-                void exportFile(option.id, option.path, option.filename)
-              }
-            >
-              <span className="option-icon">
-                <option.icon size={22} />
-              </span>
-              <span>
-                <strong>{option.title}</strong>
-                <small>{option.text}</small>
-              </span>
-              {busy === option.id ? (
-                <LoaderCircle className="spin" size={18} />
-              ) : (
-                <ChevronRight size={18} />
-              )}
-            </button>
-          ))}
-        </div>
-        <p className="helper">导出包含完整数据表，不受当前搜索条件影响。</p>
-        {error && (
-          <div className="notice error" role="alert">
-            <CircleAlert size={17} />
-            {error}
-          </div>
-        )}
-      </div>
-      <div className="modal-footer">
-        <button
-          className="button secondary"
-          disabled={!!busy}
-          onClick={onClose}
-        >
-          关闭
-        </button>
-      </div>
-    </Modal>
-  );
+  return <Modal title="导出素材库" onClose={onClose} busy={busy}>
+    <div className="modal-body library-exchange"><p className="exchange-intro">所有格式均包含完整数据表与关联。</p><fieldset className="exchange-export-formats" disabled={busy}><legend className="visually-hidden">文件格式</legend>{exchangeFormats.map(option => <label className={`exchange-export-option ${format === option.id ? "selected" : ""}`} key={option.id}><input type="radio" name="export-format" value={option.id} checked={format === option.id} onChange={() => setFormat(option.id)} /><span className="option-icon"><option.icon size={22} /></span><span className="exchange-format-text"><strong>{option.title}<em>{option.suffix}</em>{option.id === "db" && <small className="exchange-recommended">推荐</small>}</strong><span>{option.description}</span></span>{format === option.id && <CheckCircle2 size={19} />}</label>)}</fieldset>{error && <div className="notice error" role="alert"><CircleAlert size={17} />{error}</div>}</div>
+    <div className="modal-footer"><button className="button secondary" disabled={busy} onClick={onClose}>取消</button><button className="button primary" disabled={busy} onClick={() => void exportFile()}>{busy ? <Spinner text="正在生成导出文件…" /> : <><ArrowDownToLine size={16} />导出{format === "csv" ? " CSV 数据包" : ` .${format}`}</>}</button></div>
+  </Modal>;
 }
 
 type Selection = { table: TableKey; id?: string };
@@ -637,7 +443,8 @@ function DetailPanel({
       setSaving(false);
     }
   };
-  const relatedTotal = TABLES.reduce(
+  const relationGroups = TABLES.filter(group => table !== "cliches" || group.key !== "cliches");
+  const relatedTotal = relationGroups.reduce(
     (total, t) => total + (relations[t.key]?.length || 0),
     0,
   );
@@ -837,7 +644,7 @@ function DetailPanel({
             </form>
           ) : (
             <div className="detail-scroll relations-list">
-              {TABLES.map((group) => (
+              {relationGroups.map((group) => (
                 <section key={group.key}>
                   <h3>
                     <group.icon size={16} />
@@ -859,6 +666,13 @@ function DetailPanel({
                               ? ` · ${link.values["版本与原作关系"]}`
                               : ""}
                           </small>
+                          <span className="relation-semantics">
+                            {(link.relationships?.length ? link.relationships : link.relationship ? [link.relationship] : []).map((relationship, index) => <span className="relation-meaning" key={`${relationship.id}-${index}`}>
+                              <span className="relation-type">{relationship.label || relationship.type || "关联"}</span>
+                              {relationship.description && relationship.description !== relationship.label && <span className="relation-description">{relationship.description}</span>}
+                            </span>)}
+                            {!link.relationship && !link.relationships?.length && <span className="relation-description">{link.values["关联说明"] || link.values["关系说明"] || link.values["版本与原作关系"] || "关系说明待补充"}</span>}
+                          </span>
                         </span>
                         <ArrowUpRight size={16} />
                       </button>
@@ -1241,7 +1055,7 @@ export default function Library() {
   const closeModal = useCallback(() => setModal(null), []);
   const totalAll = stats.works + stats.characters + stats.cliches;
   return (
-    <div className={`library-layout ${selection ? "has-detail" : ""}`}>
+    <div className={`library-layout library-workspace ${selection ? "has-detail" : ""}`}>
       <div className="library-main">
         <main id="main-content" className="main-content" tabIndex={-1}>
           <div className="page-heading">
@@ -1323,15 +1137,16 @@ export default function Library() {
                   onClick={() => setModal("import")}
                 >
                   <Upload size={15} />
-                  导入 CSV
+                  导入素材库
                 </button>
                 <button
-                  className="icon-button export-button"
+                  className="button secondary toolbar-export"
                   aria-label="导出素材"
                   title="导出素材"
                   onClick={() => setModal("export")}
                 >
-                  <ArrowDownToLine size={18} />
+                  <ArrowDownToLine size={16} />
+                  导出
                 </button>
               </div>
             </div>
@@ -1378,8 +1193,8 @@ export default function Library() {
                   {debouncedQuery
                     ? "试试更短的关键词，或清空搜索查看全部素材。"
                     : totalAll
-                      ? `可以手动新增${config.singular}，也可以从 CSV 批量导入。`
-                      : "把已有的作品、人物和桥段 CSV 放进来，逐步搭建自己的写作参考库。"}
+                      ? `可以手动新增${config.singular}，也可以从完整素材文件批量导入。`
+                      : "导入已有素材库，或添加第一条作品、人物与桥段。"}
                 </p>
                 <div className="empty-actions">
                   {debouncedQuery ? (
@@ -1396,7 +1211,7 @@ export default function Library() {
                         onClick={() => setModal("import")}
                       >
                         <Upload size={16} />
-                        导入 CSV 文件
+                        导入素材库
                       </button>
                       <button
                         className="button secondary"
@@ -1510,6 +1325,7 @@ export default function Library() {
           </div>
         </Modal>
       )}
+      {selection && <button className="library-detail-shade" aria-label="收起素材详情" onClick={closeDetail} />}
       {selection && (
         <DetailPanel
           key={`${selection.table}-${selection.id || "new"}`}
@@ -1536,7 +1352,7 @@ export default function Library() {
         <ImportDialog onClose={closeModal} onComplete={importComplete} />
       )}
       {modal === "export" && (
-        <ExportDialog table={table} onClose={closeModal} notify={notify} />
+        <ExportDialog onClose={closeModal} notify={notify} />
       )}
       {modal === "about" && (
         <Modal title="关于此工作区" onClose={closeModal}>
@@ -1553,7 +1369,7 @@ export default function Library() {
             </p>
             <div className="about-row">
               <span>当前已可使用</span>
-              <p>CSV 导入预检、素材编辑、关联浏览、兼容与完整数据导出。</p>
+              <p>数据库、CSV 与 Excel 完整导入导出，素材编辑与关联浏览。</p>
             </div>
             <div className="about-row">
               <span>后续开发</span>

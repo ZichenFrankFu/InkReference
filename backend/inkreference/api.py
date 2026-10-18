@@ -18,7 +18,7 @@ import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from fastapi import FastAPI, File, Query, Request, UploadFile
 from fastapi.encoders import jsonable_encoder
@@ -73,6 +73,15 @@ class UpdateRecord(CreateRecord):
     expected_revision: StrictInt = Field(ge=1)
 
 
+class CreateRelation(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    values: dict[str, Any] = Field(max_length=200)
+
+
+class UpdateRelation(CreateRelation):
+    expected_revision: StrictInt = Field(ge=1)
+
+
 class CommitRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     batch_id: StrictStr = Field(min_length=1, max_length=100)
@@ -84,6 +93,7 @@ class PendingBatch:
     batch: object
     expires_at: float
     source_dir: Path
+    kind: str = "legacy_csv"
 
 
 class Runtime:
@@ -163,12 +173,14 @@ def create_app(data_dir: str | Path | None = None, static_dir: str | Path | None
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
-        with workspace_lock(runtime.data_dir, pending_threads=lambda: runtime._studio.runner.active_threads() if runtime._studio else []):
+        with workspace_lock(runtime.data_dir, pending_threads=lambda: runtime._studio.active_threads() if runtime._studio else []):
             runtime.store
             try:
                 yield
             finally:
                 if runtime._studio is not None:
+                    if runtime._studio._ingestions is not None:
+                        await run_in_threadpool(runtime._studio.ingestions.shutdown)
                     # Stop native conversion processes before waiting for a
                     # model request boundary; the desktop close is bounded.
                     conversions = runtime._studio._conversions
@@ -208,12 +220,12 @@ def create_app(data_dir: str | Path | None = None, static_dir: str | Path | None
             return protected(JSONResponse(status_code=403, content={"detail": "已阻止跨站访问本机工作区。"}))
         # Avoid accepting an obviously oversized multipart request before parsing.
         # Actual per-file and batch byte limits are checked while reading uploads.
-        if request.url.path == "/api/import/preview":
+        if request.url.path in {"/api/import/preview", "/api/library/import/preview"}:
             content_length = request.headers.get("content-length")
             if content_length:
                 try:
                     if int(content_length) > MAX_BATCH_BYTES + 1024 * 1024:
-                        return protected(JSONResponse(status_code=413, content={"detail": "一次导入的 CSV 总大小不能超过 128 MB。"}))
+                        return protected(JSONResponse(status_code=413, content={"detail": "一次导入的数据集总大小不能超过 128 MB。"}))
                 except ValueError:
                     return protected(JSONResponse(status_code=400, content={"detail": "无效的请求长度。"}))
         return protected(await call_next(request))
@@ -245,6 +257,22 @@ def create_app(data_dir: str | Path | None = None, static_dir: str | Path | None
     def relations(table: TableName, record_id: str):
         return runtime.store.relations(table, record_id)
 
+    @application.get("/api/relations")
+    def material_relations():
+        return {"items": runtime.store.list_material_relations()}
+
+    @application.post("/api/relations", status_code=201)
+    def create_material_relation(body: CreateRelation):
+        return runtime.store.create_material_relation(body.values)
+
+    @application.patch("/api/relations/{identifier}")
+    def update_material_relation(identifier: str, body: UpdateRelation):
+        return runtime.store.update_material_relation(identifier, body.values, body.expected_revision)
+
+    @application.delete("/api/relations/{identifier}")
+    def delete_material_relation(identifier: str, expected_revision: Annotated[int, Query(ge=1)]):
+        return runtime.store.delete_material_relation(identifier, expected_revision)
+
     @application.get("/api/records/{table}/{record_id}")
     def get_record(table: TableName, record_id: str):
         return runtime.store.get_record(table, record_id)
@@ -266,6 +294,11 @@ def create_app(data_dir: str | Path | None = None, static_dir: str | Path | None
     ):
         if table == "works":
             with runtime.studio.lock:
+                # Read active jobs first: a worker can commit a document and
+                # complete between reads, but never complete before that commit.
+                if any(item["status"] in {"queued", "running"} and item.get("options", {}).get("work_id") == record_id
+                       for item in runtime.studio.ingestions.list()):
+                    raise DataError(409, "此作品有正在处理的全文，请等待完成或取消后再删除。")
                 if any(item.get("work_id") == record_id for item in runtime.studio.documents.list_documents()):
                     raise DataError(409, "此作品已关联全文，请保留其作品 ID；仍可编辑作品字段。")
                 return runtime.store.delete_record(table, record_id, expected_revision, cascade=cascade)
@@ -314,8 +347,8 @@ def create_app(data_dir: str | Path | None = None, static_dir: str | Path | None
         with runtime.lock:
             runtime.expire_batches()
             pending = runtime.pending.get(body.batch_id)
-            if pending is None:
-                raise DataError(404, "导入预览已过期或服务已重启，请重新选择 CSV 并预览。")
+            if pending is None or pending.kind != "legacy_csv":
+                raise DataError(404, "CSV 预览已过期或不属于此导入流程，请重新选择 CSV 并预览。")
             # commit_import revalidates the batch against the latest data and
             # applies one transaction. Only successful commits consume the token.
             result = commit_import(runtime.store, pending.batch, body.policy)
@@ -338,6 +371,68 @@ def create_app(data_dir: str | Path | None = None, static_dir: str | Path | None
             media_type="text/csv; charset=utf-8",
             headers={"Content-Disposition": f'attachment; filename="{filename}"'},
         )
+
+    @application.get("/api/library/formats")
+    def library_formats():
+        from .library_exchange import library_formats as formats
+        return formats()
+
+    @application.post("/api/library/import/preview")
+    async def preview_library(files: Annotated[list[UploadFile], File()]):
+        from .library_exchange import parse_library_files, preview_library_import
+        try:
+            if not files or len(files) > 32:
+                raise DataError(400, "请选择一个 DB、Excel 或完整的 CSV 文件集。")
+            inputs: list[tuple[str, bytes]] = []
+            total = 0
+            for uploaded in files:
+                name = uploaded.filename or "upload"
+                if Path(name).suffix.lower() not in {".db", ".sqlite", ".sqlite3", ".csv", ".xlsx", ".zip", ".json"}:
+                    raise DataError(422, f"{name}：支持 DB、XLSX、完整 CSV 文件集或 CSV ZIP。")
+                raw = bytearray()
+                while chunk := await uploaded.read(_CHUNK_BYTES):
+                    raw.extend(chunk)
+                    total += len(chunk)
+                    if len(raw) > MAX_BATCH_BYTES or total > MAX_BATCH_BYTES:
+                        raise DataError(413, "一次素材库导入最多 128 MB，请拆分过大的数据集。")
+                inputs.append((name, bytes(raw)))
+            def prepare():
+                batch = parse_library_files(inputs)
+                with runtime.lock:
+                    runtime.expire_batches()
+                    result = dict(preview_library_import(runtime.store, batch))
+                    batch_id = uuid.uuid4().hex
+                    source_dir = _save_sources(runtime, batch_id, inputs)
+                    runtime.pending[batch_id] = PendingBatch(batch, time.monotonic() + BATCH_TTL_SECONDS, source_dir, "library")
+                    result["batch_id"] = batch_id
+                    return result
+            return await run_in_threadpool(prepare)
+        finally:
+            for uploaded in files:
+                await uploaded.close()
+
+    @application.post("/api/library/import/commit")
+    def commit_library(body: CommitRequest):
+        from .library_exchange import commit_library_import
+        with runtime.lock:
+            runtime.expire_batches()
+            pending = runtime.pending.get(body.batch_id)
+            if pending is None or pending.kind != "library":
+                raise DataError(404, "素材库预览已过期或不属于此导入流程，请重新选择完整数据集。")
+            result = commit_library_import(runtime.store, pending.batch, body.policy)
+            del runtime.pending[body.batch_id]
+            return result
+
+    @application.get("/api/library/export")
+    def export_library(format: Literal["db", "csv", "xlsx"] = "db"):
+        from .library_exchange import export_library as export
+        media, filename = {
+            "db": ("application/vnd.sqlite3", "InkReference-library.db"),
+            "csv": ("application/zip", "InkReference-library-csv.zip"),
+            "xlsx": ("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "InkReference-library.xlsx"),
+        }[format]
+        return Response(export(runtime.store, format=format), media_type=media,
+                        headers={"Content-Disposition": f'attachment; filename="{filename}"'})
 
     from .studio import install_studio_routes
     install_studio_routes(application, runtime)
