@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ArrowRight, BookOpen, CheckCircle2, Download, FileSearch, History, Layers3, MessageSquare, RefreshCw, Search, Sparkles, Upload, X, Play } from "lucide-react";
 import { Busy, Empty, Modal, Notice, dateLabel, messageOf } from "./ui";
-import { normalizeList, send, studio, type DocumentMeta, type List, type ModelProfile, type Run, type TextVersion } from "./studio";
+import { normalizeList, send, studio, type DocumentMeta, type List, type ModelProfile, type Run, type RunSummary, type TextVersion } from "./studio";
 import { download } from "./api";
 import { isRemoteModel, modelEndpoint } from "./model-security";
 import { CollectionEditor, FactsEditor, PlotEditor, PromptPanel, ReferenceField } from "./ReferenceEditors";
@@ -10,7 +10,7 @@ import { record, records, sectionCount, stringValue, type ReferenceChunkRange, t
 import "./reference-analysis.css";
 
 type Navigation = (id: "library" | "documents" | "reference" | "jobs" | "workflows" | "models" | "backup") => void;
-type Props = { docs: DocumentMeta[]; runs: Run[]; loading: boolean; navigate: Navigation; onRun: (run: Run) => void; onRefresh: () => Promise<void>; onDirtyChange: (dirty: boolean) => void };
+type Props = { docs: DocumentMeta[]; runs: RunSummary[]; loading: boolean; navigate: Navigation; onRun: (run: Run) => void; onRefresh: () => Promise<void>; onDirtyChange: (dirty: boolean) => void };
 type Transform = { kind: "summarize" | "translate"; entryIndex?: number };
 const narrativeTabs = [["plot", "剧情大纲"], ["characters", "角色"], ["settings", "设定"], ["era_background", "时代背景"], ["features", "语言分析"]];
 const settingTabs = [["raw_entries", "原始文本"], ["settings", "设定"], ["characters", "角色"], ["setting_features", "设定特征"]];
@@ -38,6 +38,7 @@ export default function ReferenceAnalysis({ docs, runs, loading, navigate, onRef
   const [historyOpen, setHistoryOpen] = useState(false);
   const [history, setHistory] = useState<{ revision: number; updated_at: string }[]>([]);
   const [chunkRanges, setChunkRanges] = useState<ReferenceChunkRange[]>([]);
+  const [detailRuns, setDetailRuns] = useState<Run[]>([]);
   const requestId = useRef(0);
   const attemptedInitial = useRef(new Set<string>());
   const dirtyRef = useRef(false);
@@ -50,11 +51,25 @@ export default function ReferenceAnalysis({ docs, runs, loading, navigate, onRef
   const shownState = projection || (!chapterFilter ? state : null);
   const shown = shownState?.sections;
   const readOnly = !!chapterFilter;
-  const docRuns = runs.filter(r => r.document_id === documentId);
+  const legacyRanges = !!state && ["plot", "characters", "settings"].includes(tab) && (tab === "plot" ? Number(record(state.sections.plot).schema_version) !== 2 : !records(state.sections[tab as ReferenceSection]).some(item => item.schema_version === 2));
+  const segmentStyles = tab === "features" && featureView === "segment" && !chapterFilter;
+  const detailIds = state && (legacyRanges || segmentStyles) ? [...new Set(state.commits.filter(commit => segmentStyles ? commit.section === "style" : commit.section === tab || tab === "characters" && commit.section === "plot").map(commit => commit.run_id))].sort() : [];
+  const detailKey = detailIds.join(":");
+  const detailRevisionKey = runs.filter(run => run.document_id === documentId && detailIds.includes(run.id)).map(run => `${run.id}:${run.revision}`).join(":");
+  useEffect(() => {
+    const controller = new AbortController();
+    setDetailRuns([]); setChunkRanges([]); setBusy(current => current === "sources" ? "" : current);
+    if (!documentId || !detailKey) return;
+    setBusy("sources");
+    void Promise.all(detailKey.split(":").map(id => studio<Run>(`/jobs/${encodeURIComponent(id)}`, { signal: controller.signal }))).then(items => {
+      if (!controller.signal.aborted) setDetailRuns(items.filter(run => run.document_id === documentId));
+    }).catch(e => { if (!controller.signal.aborted) setError(messageOf(e)); }).finally(() => { if (!controller.signal.aborted) setBusy(current => current === "sources" ? "" : current); });
+    return () => { controller.abort(); setBusy(current => current === "sources" ? "" : current); };
+  }, [documentId, detailKey, detailRevisionKey]);
   const select = useCallback(async (id: string, discard = false, focusTab?: string) => {
     if (dirtyRef.current && !discard) { setPending({ documentId: id, tab: focusTab }); return; }
     const ticket = ++requestId.current; setBusy("load"); setError(""); setMessage("");
-    try { const next = await studio<ReferenceState>(`/documents/${id}/reference`); if (ticket !== requestId.current) return; setDocumentId(id); setState(next); setProjection(null); setChapter(""); setChapterFilter(""); setDirty(false); const available = next.structure_type === "setting_collection" ? settingTabs : narrativeTabs; setTab(focusTab && available.some(([key]) => key === focusTab) ? focusTab : next.structure_type === "setting_collection" ? "raw_entries" : "plot"); }
+    try { const next = await studio<ReferenceState>(`/documents/${id}/reference`); if (ticket !== requestId.current) return; setDocumentId(id); setState(next); setDetailRuns([]); setChunkRanges([]); setProjection(null); setChapter(""); setChapterFilter(""); setDirty(false); const available = next.structure_type === "setting_collection" ? settingTabs : narrativeTabs; setTab(focusTab && available.some(([key]) => key === focusTab) ? focusTab : next.structure_type === "setting_collection" ? "raw_entries" : "plot"); }
     catch (e) { if (ticket === requestId.current) setError(messageOf(e)); }
     finally { if (ticket === requestId.current) setBusy(""); }
   }, []);
@@ -73,15 +88,15 @@ export default function ReferenceAnalysis({ docs, runs, loading, navigate, onRef
     window.addEventListener("inkreference:catalog-focus", open);
     return () => window.removeEventListener("inkreference:catalog-focus", open);
   }, [docs, documentId, select]);
-  const versionIds = [...new Set(docRuns.map(run => run.version_id))].join(":");
+  const versionIds = [...new Set(detailRuns.map(run => run.version_id))].join(":");
   useEffect(() => {
-    if (!documentId || Number(record(state?.sections.plot).schema_version) >= 2) return; let active = true; setChunkRanges([]);
-    void Promise.all([...new Set(docRuns.map(run => run.version_id))].map(async id => {
+    if (!documentId || !legacyRanges || !detailRuns.length) return; let active = true; setChunkRanges([]);
+    void Promise.all([...new Set(detailRuns.map(run => run.version_id))].map(async id => {
       const [v, plan] = await Promise.all([studio<TextVersion>(`/documents/${documentId}/versions/${id}?include_text=false`), studio<{ volumes: ReferenceRecord[] }>(`/documents/${documentId}/versions/${id}/volumes`)]);
       return { id, version: v, volumes: plan.volumes };
     })).then(versions => {
       if (!active) return; const ranges: ReferenceChunkRange[] = [];
-      for (const run of docRuns) {
+      for (const run of detailRuns) {
         const v = versions.find(v => v.id === run.version_id); if (!v) continue;
         run.candidates.forEach((candidate, i) => {
           const c = candidate as typeof candidate & { start?: number; end?: number };
@@ -98,7 +113,7 @@ export default function ReferenceAnalysis({ docs, runs, loading, navigate, onRef
     return () => { active = false; };
   // Chunk boundaries and source versions are immutable after a task is created.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [documentId, versionIds]);
+  }, [documentId, versionIds, detailKey, legacyRanges, detailRuns]);
   useEffect(() => { const before = (e: BeforeUnloadEvent) => { if (dirtyRef.current) e.preventDefault(); }; window.addEventListener("beforeunload", before); return () => window.removeEventListener("beforeunload", before); }, []);
   useEffect(() => { onDirtyChange(dirty); return () => onDirtyChange(false); }, [dirty, onDirtyChange]);
   const reload = useCallback(async () => {
@@ -139,7 +154,7 @@ export default function ReferenceAnalysis({ docs, runs, loading, navigate, onRef
   const restore = async (revision: number) => { setBusy("restore"); setError(""); try { const next = await send<ReferenceState>(`/documents/${documentId}/reference/restore`, { target_revision: revision, expected_revision: stateRef.current?.revision }); setState(next); stateRef.current = next; setTab(next.structure_type === "setting_collection" ? "raw_entries" : "plot"); setHistoryOpen(false); setMessage("历史内容已恢复为新版本"); } catch (e) { setError(messageOf(e)); } finally { setBusy(""); } };
   useEffect(() => { if (!documentId) { setProjection(null); return; } let active = true; setProjection(null); setBusy("projection"); void studio<ReferenceState>(`/documents/${documentId}/reference/projection${chapterFilter ? `?chapter=${encodeURIComponent(chapterFilter)}` : ""}`).then(next => { if (active) setProjection(next); }).catch(e => { if (active) setError(messageOf(e)); }).finally(() => { if (active) setBusy(""); }); return () => { active = false; }; }, [documentId, chapterFilter, state?.revision]);
   const sectionDirty = useCallback((value: boolean) => setDirty(value), []);
-  const styleChunks = docRuns.flatMap(run => run.candidates.filter(c => state?.commits.some(k => k.run_id === run.id && k.chunk_id === c.chunk_id && k.section === "style")).map(c => ({ run, chunk: c, style: record(record(c.result).reference).style })));
+  const styleChunks = detailRuns.flatMap(run => run.candidates.filter(c => state?.commits.some(k => k.run_id === run.id && k.chunk_id === c.chunk_id && k.section === "style")).map(c => ({ run, chunk: c, style: record(record(c.result).reference).style })));
   return <div className="reference-layout">
     <aside className="surface reference-index"><div className="surface-heading"><h2>参考作品库</h2><span>{docs.length}</span><button className="icon-button" aria-label="刷新参考作品库" onClick={() => void onRefresh().catch(e => setError(messageOf(e)))}><RefreshCw size={15} /></button></div><label className="index-search"><Search size={15} /><input aria-label="搜索参考作品" placeholder="搜索书名、作者或类型" value={query} onChange={e => setQuery(e.target.value)} />{query && <button className="icon-button" aria-label="清除搜索" onClick={() => setQuery("")}><X size={13} /></button>}</label>
       {loading && !docs.length ? <Busy label="正在读取作品" /> : docs.filter(d => `${d.title} ${d.catalog_author || d.author || ""} ${d.work_category || d.book_type || ""}`.normalize("NFKC").toLocaleLowerCase().includes(query.trim().normalize("NFKC").toLocaleLowerCase())).map(d => <button className={`reference-work-item ${documentId === d.id ? "active" : ""}`} key={d.id} onClick={() => void select(d.id)}><span className="reference-work-icon"><BookOpen size={19} /></span><span><strong>{d.title}</strong><small>{(Number(d.current_characters ?? d.source_characters ?? 0) / 10000).toFixed(1)} 万字<span>{d.work_category || d.book_type || "未分类"}</span></small></span>{documentId === d.id && <span className="reference-active-dot" />}</button>)}

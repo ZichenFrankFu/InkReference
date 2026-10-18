@@ -18,6 +18,8 @@ import {
   send,
   normalizeList,
   type Run,
+  type RunSummary,
+  summarizeRun,
   type List,
   type DocumentMeta,
   type EvidenceItem,
@@ -40,6 +42,7 @@ import {
 } from "./ui";
 type Props = {
   initialId?: string;
+  documentId?: string;
   navigate: (
     id: "library" | "documents" | "reference" | "jobs" | "workflows" | "models" | "backup",
   ) => void;
@@ -64,8 +67,8 @@ const stageNames: Record<string, string> = {
   review: "等待人工审核",
   complete: "已完成",
 };
-function LegacyJobReview({ initialId, navigate }: Props) {
-  const [items, setItems] = useState<Run[]>([]);
+function LegacyJobReview({ initialId, documentId, navigate }: Props) {
+  const [items, setItems] = useState<RunSummary[]>([]);
   const [docs, setDocs] = useState<DocumentMeta[]>([]);
   const [selected, setSelected] = useState<Run | null>(null);
   const [draft, setDraft] = useState<Run["results"] | null>(null);
@@ -97,17 +100,18 @@ function LegacyJobReview({ initialId, navigate }: Props) {
     setLoading(true);
     try {
       const [r, d] = await Promise.all([
-        studio<List<Run>>("/jobs"),
+        studio<List<RunSummary>>(`/jobs?summary=true&limit=1000${documentId ? `&document_id=${encodeURIComponent(documentId)}` : ""}`),
         studio<List<DocumentMeta>>("/documents"),
       ]);
-      setItems(normalizeList(r));
+      const listed = normalizeList(r), current = selectedRef.current;
+      setItems(current && (!documentId || current.document_id === documentId) && !listed.some(item => item.id === current.id) ? [summarizeRun(current), ...listed] : listed);
       setDocs(normalizeList(d));
     } catch (e) {
       setError(messageOf(e));
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [documentId]);
   const choose = useCallback(async (id: string, discard = false) => {
     if (dirtyRef.current && selectedRef.current?.id !== id && !discard) {
       setPendingId(id);
@@ -121,6 +125,7 @@ function LegacyJobReview({ initialId, navigate }: Props) {
       const run = await studio<Run>(`/jobs/${id}`);
       if (ticket !== selectionRequest.current) return;
       setSelected(run);
+      setItems(items => [summarizeRun(run), ...items.filter(item => item.id !== run.id)]);
       setDraft(run.results);
       setTab("summary");
     } catch (e) {
@@ -158,7 +163,7 @@ function LegacyJobReview({ initialId, navigate }: Props) {
             setSelected(next);
             if (!dirtyRef.current) setDraft(next.results);
             setItems((items) =>
-              items.map((i) => (i.id === next.id ? next : i)),
+              items.map((i) => (i.id === next.id ? summarizeRun(next) : i)),
             );
           })
           .catch((e) => setError(messageOf(e)));
@@ -316,7 +321,7 @@ function LegacyJobReview({ initialId, navigate }: Props) {
                 </div>
                 <small>
                   {run.workflow_id} ·{" "}
-                  {dateLabel(run.created_at || run.events?.[0]?.time)}
+                  {dateLabel(run.created_at)}
                 </small>
                 <Progress
                   completed={run.completed}
@@ -786,11 +791,32 @@ function LegacyJobReview({ initialId, navigate }: Props) {
 }
 
 
-function useAnalysisLibrary() {
-  const [docs, setDocs] = useState<DocumentMeta[]>([]), [runs, setRuns] = useState<Run[]>([]), [loading, setLoading] = useState(true), [error, setError] = useState("");
-  const load = useCallback(async () => { setLoading(true); try { const [d, r] = await Promise.all([studio<List<DocumentMeta>>("/documents"), studio<List<Run>>("/jobs")]); setDocs(normalizeList(d)); setRuns(normalizeList(r)); setError(""); } catch (e) { setError(messageOf(e)); } finally { setLoading(false); } }, []);
+function mergeRunSummaries(previous: RunSummary[], incoming: RunSummary[]) {
+  return [...new Map([...previous, ...incoming].map(run => [run.id, run])).values()].sort((a, b) => (b.created_at || "").localeCompare(a.created_at || "") || a.id.localeCompare(b.id));
+}
+function useAnalysisLibrary(documentId?: string) {
+  const [docs, setDocs] = useState<DocumentMeta[]>([]), [runs, setRuns] = useState<RunSummary[]>([]), [loading, setLoading] = useState(true), [error, setError] = useState("");
+  const selectedDocument = useRef(documentId), summaries = useRef(runs);
+  selectedDocument.current = documentId; summaries.current = runs;
+  const load = useCallback(async () => { setLoading(true); try {
+    const selected = selectedDocument.current;
+    const [d, globalRuns, selectedRuns] = await Promise.all([
+      studio<List<DocumentMeta>>("/documents"),
+      studio<List<RunSummary>>("/jobs?summary=true&limit=1000"),
+      selected ? studio<List<RunSummary>>(`/jobs?summary=true&limit=1000&document_id=${encodeURIComponent(selected)}`) : Promise.resolve({ items: [] } as List<RunSummary>),
+    ]);
+    setDocs(normalizeList(d)); setRuns(previous => mergeRunSummaries(previous, [...normalizeList(globalRuns), ...normalizeList(selectedRuns)])); setError("");
+  } catch (e) { setError(messageOf(e)); } finally { setLoading(false); } }, []);
+  const lookupRun = useCallback(async (id: string) => {
+    const known = summaries.current.find(run => run.id === id);
+    if (known) return known;
+    const run = await studio<RunSummary>(`/jobs/${encodeURIComponent(id)}?summary=true`);
+    setRuns(previous => mergeRunSummaries(previous, [run]));
+    return run;
+  }, []);
   useEffect(() => { void load(); const refresh = () => { void load(); }; window.addEventListener("inkreference:jobs-refresh", refresh); window.addEventListener("inkreference:library-refresh", refresh); window.addEventListener("inkreference:reference-refresh", refresh); return () => { window.removeEventListener("inkreference:jobs-refresh", refresh); window.removeEventListener("inkreference:library-refresh", refresh); window.removeEventListener("inkreference:reference-refresh", refresh); }; }, [load]);
-  return { docs, runs, loading, error, load };
+  useEffect(() => { if (!documentId) return; let active = true; void studio<List<RunSummary>>(`/jobs?summary=true&limit=1000&document_id=${encodeURIComponent(documentId)}`).then(response => { if (active) setRuns(previous => mergeRunSummaries(previous, normalizeList(response))); }).catch(e => { if (active) setError(messageOf(e)); }); return () => { active = false; }; }, [documentId]);
+  return { docs, runs, loading, error, load, lookupRun };
 }
 export function ReferencePage({ navigate }: Props) {
   const { docs, runs, loading, error, load } = useAnalysisLibrary();
@@ -798,13 +824,13 @@ export function ReferencePage({ navigate }: Props) {
   return <main className="studio-main reference-page"><PageTitle title="参考作品分析" /><Notice error>{error}</Notice><ReferenceAnalysis docs={docs} runs={runs} loading={loading} navigate={navigate} onRun={run => { window.dispatchEvent(new CustomEvent("inkreference:navigate", { detail: { section: "jobs", runId: run.id } })); }} onRefresh={load} onDirtyChange={setDirty} /></main>;
 }
 export default function Jobs({ initialId, navigate }: Props) {
-  const { docs, runs, loading, error, load } = useAnalysisLibrary();
-  const [documentId, setDocumentId] = useState(""), [state, setState] = useState<ReferenceState | null>(null), [dirty, setDirty] = useState(false), [localError, setLocalError] = useState(""), [legacy, setLegacy] = useState(false);
+  const [documentId, setDocumentId] = useState(""), [state, setState] = useState<ReferenceState | null>(null), [dirty, setDirty] = useState(false), [localError, setLocalError] = useState(""), [legacy, setLegacy] = useState(false), [focusedRunId, setFocusedRunId] = useState("");
+  const { docs, runs, loading, error, load, lookupRun } = useAnalysisLibrary(documentId);
   const doc = docs.find(d => d.id === documentId);
   const initialApplied = useRef("");
   useEffect(() => { const target = (event?: Event) => { const id = (event as CustomEvent<{ documentId?: string }> | undefined)?.detail?.documentId || sessionStorage.getItem("inkreference.task-document"); if (id && !dirty) { sessionStorage.removeItem("inkreference.task-document"); setDocumentId(id); } }; target(); window.addEventListener("inkreference:task-document", target); return () => window.removeEventListener("inkreference:task-document", target); }, [dirty]);
-  useEffect(() => { const focus = (event: Event) => { const target = (event as CustomEvent<{ section?: string; runId?: string }>).detail; if (target?.section === "jobs" && target.runId && !dirty) { const run = runs.find(r => r.id === target.runId); if (run) setDocumentId(run.document_id); window.dispatchEvent(new CustomEvent("inkreference:focus-run", { detail: { runId: target.runId } })); } }; window.addEventListener("inkreference:catalog-focus", focus); return () => window.removeEventListener("inkreference:catalog-focus", focus); }, [runs, dirty]);
-  useEffect(() => { if (initialId && initialApplied.current !== initialId) { const run = runs.find(r => r.id === initialId); if (run) { initialApplied.current = initialId; setDocumentId(run.document_id); } } else if (!documentId && docs.length) setDocumentId(docs[0].id); }, [initialId, runs, docs, documentId]);
+  useEffect(() => { const focus = (event: Event) => { const target = (event as CustomEvent<{ section?: string; runId?: string }>).detail; if (target?.section === "jobs" && target.runId && !dirty) { void lookupRun(target.runId).then(run => { setDocumentId(run.document_id); setFocusedRunId(run.id); window.dispatchEvent(new CustomEvent("inkreference:focus-run", { detail: { runId: run.id } })); }).catch(e => setLocalError(messageOf(e))); } }; window.addEventListener("inkreference:catalog-focus", focus); return () => window.removeEventListener("inkreference:catalog-focus", focus); }, [lookupRun, dirty]);
+  useEffect(() => { if (initialId && initialApplied.current !== initialId) { initialApplied.current = initialId; void lookupRun(initialId).then(run => { setDocumentId(run.document_id); setFocusedRunId(run.id); }).catch(e => { initialApplied.current = ""; setLocalError(messageOf(e)); }); } else if (!initialId && !documentId && docs.length) setDocumentId(docs[0].id); }, [initialId, lookupRun, docs, documentId]);
   useEffect(() => { if (!documentId || legacy) return; let active = true; setState(null); void studio<ReferenceState>(`/documents/${documentId}/reference`).then(next => { if (active) setState(next); }).catch(e => { if (active) setLocalError(messageOf(e)); }); return () => { active = false; }; }, [documentId, legacy]);
-  return <main className="studio-main tasks-page"><PageTitle title="任务管理" action={<button className="button secondary" onClick={() => navigate("reference")}><FileSearch size={15} />查看作品分析</button>} /><Notice error>{error || localError}</Notice><section className="surface task-manager-panel"><div className="task-manager-toolbar"><label className="studio-field"><span>参考作品库</span><select aria-label="选择分析作品" value={documentId} disabled={dirty} onChange={e => { setDocumentId(e.target.value); setLocalError(""); }}>{!docs.length && <option value="">暂无作品</option>}{docs.map(d => <option key={d.id} value={d.id}>{d.title}</option>)}</select></label><button className="icon-button" aria-label="刷新任务" disabled={dirty} onClick={() => void load()}><RefreshCw size={16} /></button>{legacy && <button className="button secondary" disabled={dirty} onClick={() => setLegacy(false)}>返回分区审核</button>}</div>{loading && !docs.length && <Busy label="正在读取任务" />}{legacy ? <LegacyJobReview initialId={initialId} navigate={navigate} /> : state && doc ? <ReferenceExtraction key={doc.id} document={doc} state={state} runs={runs.filter(r => r.document_id === doc.id)} initialRunId={initialId} navigate={navigate} onRun={() => setLegacy(true)} onState={setState} onRefresh={load} onDirty={setDirty} /> : !loading && !docs.length ? <Empty icon={FileSearch} title="暂无参考作品" action={<button className="button primary" onClick={() => navigate("documents")}>上传文件<ArrowRight size={14} /></button>} /> : <Busy label="正在读取作品任务" />}</section></main>;
+  return <main className="studio-main tasks-page"><PageTitle title="任务管理" action={<button className="button secondary" onClick={() => navigate("reference")}><FileSearch size={15} />查看作品分析</button>} /><Notice error>{error || localError}</Notice><section className="surface task-manager-panel"><div className="task-manager-toolbar"><label className="studio-field"><span>参考作品库</span><select aria-label="选择分析作品" value={documentId} disabled={dirty} onChange={e => { setDocumentId(e.target.value); setFocusedRunId(""); setLocalError(""); }}>{!docs.length && <option value="">暂无作品</option>}{docs.map(d => <option key={d.id} value={d.id}>{d.title}</option>)}</select></label><button className="icon-button" aria-label="刷新任务" disabled={dirty} onClick={() => void load()}><RefreshCw size={16} /></button>{legacy && <button className="button secondary" disabled={dirty} onClick={() => setLegacy(false)}>返回分区审核</button>}</div>{loading && !docs.length && <Busy label="正在读取任务" />}{legacy ? <LegacyJobReview initialId={focusedRunId || initialId} documentId={documentId} navigate={navigate} /> : state && doc ? <ReferenceExtraction key={doc.id} document={doc} state={state} runs={runs.filter(r => r.document_id === doc.id)} initialRunId={focusedRunId || initialId} navigate={navigate} onRun={run => { setFocusedRunId(run.id); setLegacy(true); }} onState={setState} onRefresh={load} onDirty={setDirty} /> : !loading && !docs.length ? <Empty icon={FileSearch} title="暂无参考作品" action={<button className="button primary" onClick={() => navigate("documents")}>上传文件<ArrowRight size={14} /></button>} /> : <Busy label="正在读取作品任务" />}</section></main>;
 }

@@ -158,6 +158,15 @@ export type Run = {
   snapshots?: unknown;
   created_at?: string;
 };
+/** Metadata returned by /jobs?summary=true; deliberately excludes source/candidates/results. */
+export type RunSummary = Pick<Run, "id" | "document_id" | "version_id" | "workflow_id" | "workflow_version" | "profile_id" | "status" | "stage" | "completed" | "total" | "progress" | "revision" | "error" | "created_at" | "current_stage"> & {
+  updated_at?: string;
+  stages?: { id?: string; stage: string; order?: number; stage_order?: number; completed: number; total: number; progress?: number; status?: string }[];
+};
+export function summarizeRun(run: Run): RunSummary {
+  const { id, document_id, version_id, workflow_id, workflow_version, profile_id, status, stage, completed, total, progress, revision, error, created_at, current_stage, stages } = run;
+  return { id, document_id, version_id, workflow_id, workflow_version, profile_id, status, stage, completed, total, progress, revision, error, created_at, current_stage, stages };
+}
 export type List<T> = { items: T[] };
 export function describe(value: unknown): string {
   return typeof value === "string" ? value : JSON.stringify(value, null, 2);

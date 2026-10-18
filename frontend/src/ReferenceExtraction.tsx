@@ -1,14 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ArrowRight, Check, CheckCircle2, ChevronDown, FileSearch, FileText, Play, Plus, Save, Sparkles, Square } from "lucide-react";
 import { Busy, Modal, Notice, Progress, Status, dateLabel, messageOf } from "./ui";
-import { normalizeList, send, studio, type DocumentMeta, type List, type ModelProfile, type Run, type TextVersion, type Workflow } from "./studio";
+import { normalizeList, send, studio, type DocumentMeta, type List, type ModelProfile, type Run, type RunSummary, type TextVersion, type Workflow } from "./studio";
 import { isRemoteModel, modelEndpoint } from "./model-security";
 import { CollectionEditor, PlotEditor, PromptPanel, RhythmEditor, StyleEditor } from "./ReferenceEditors";
 import { ChronicleEntities, ChroniclePlot, EraBackgroundEditor, LanguageAnalysisEditor } from "./ChronicleEditors";
 import { record, records, stringValue, type ReferenceRecord, type ReferenceResult, type ReferenceSection, type ReferenceState } from "./reference-types";
 
 type Props = {
-  document: DocumentMeta; state: ReferenceState; runs: Run[]; initialRunId?: string;
+  document: DocumentMeta; state: ReferenceState; runs: RunSummary[]; initialRunId?: string;
   navigate: (id: "library" | "documents" | "reference" | "jobs" | "workflows" | "models" | "backup") => void;
   onRun: (run: Run) => void; onState: (state: ReferenceState) => void; onRefresh: () => Promise<void>; onDirty: (dirty: boolean) => void;
 };
