@@ -6,6 +6,7 @@ import {
   ChevronRight,
   FileText,
   History,
+  RotateCcw,
   Plus,
   RefreshCw,
   Search,
@@ -15,6 +16,8 @@ import {
 } from "lucide-react";
 import { download } from "./api";
 import Conversions from "./Conversions";
+import ChapterWorkbench from "./ChapterWorkbench";
+import { VolumePanel, SourceFiles } from "./VolumePanel";
 import { isRemoteModel, modelEndpoint } from "./model-security";
 import {
   studio,
@@ -46,15 +49,10 @@ type Props = {
 };
 export default function Documents({ navigate, onJob }: Props) {
   const [view, setView] = useState("documents");
-  const [fullLoaded, setFullLoaded] = useState(true);
-  const [pageStart, setPageStart] = useState(0);
-  const [pageTotal, setPageTotal] = useState(0);
-  const [pageText, setPageText] = useState("");
   const [items, setItems] = useState<DocumentMeta[]>([]);
   const [selected, setSelected] = useState<DocumentMeta | null>(null);
   const [version, setVersion] = useState<TextVersion | null>(null);
-  const [tab, setTab] = useState("clean");
-  const [chapter, setChapter] = useState(-1);
+  const [tab, setTab] = useState("chapters");
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
@@ -65,8 +63,10 @@ export default function Documents({ navigate, onJob }: Props) {
   const [encoding, setEncoding] = useState("auto");
   const [workId, setWorkId] = useState("");
   const [cleanOpen, setCleanOpen] = useState(false);
-  const [manual, setManual] = useState("");
-  const [manualEnabled, setManualEnabled] = useState(false);
+  const [chapterDirty, setChapterDirty] = useState(false);
+  const [chapterReset, setChapterReset] = useState(0);
+  const [restoreOpen, setRestoreOpen] = useState(false);
+  const [restoreTarget, setRestoreTarget] = useState("");
   const [options, setOptions] = useState<Record<string, unknown>>({});
   const [startOpen, setStartOpen] = useState(false);
   const [profiles, setProfiles] = useState<ModelProfile[]>([]);
@@ -79,10 +79,7 @@ export default function Documents({ navigate, onJob }: Props) {
   const fileInput = useRef<HTMLInputElement>(null);
   const continueAfterModels = useRef(false);
   const selectionRequest = useRef(0);
-  const cleanDirty = !!version && (
-    JSON.stringify(options) !== JSON.stringify(version.options || {}) ||
-    (manualEnabled && manual !== version.text)
-  );
+  const cleanDirty = chapterDirty || (!!version && cleanOpen && JSON.stringify(options) !== JSON.stringify(version.options || {}));
   const cleanDirtyRef = useRef(cleanDirty);
   cleanDirtyRef.current = cleanDirty;
   const selectedProfile = profiles.find((p) => p.id === profile);
@@ -120,8 +117,7 @@ export default function Documents({ navigate, onJob }: Props) {
     setBusy("version");
     const ticket = ++selectionRequest.current;
     setError("");
-    setChapter(-1);
-    setTab("clean");
+
     try {
       const doc = await studio<DocumentMeta>(
         `/documents/${encodeURIComponent(id)}`,
@@ -130,29 +126,11 @@ export default function Documents({ navigate, onJob }: Props) {
       const meta = await studio<TextVersion>(
         `${versionPath}?include_text=false`,
       );
-      const complete = Number(meta.characters || 0) <= 200000;
-      let result = meta;
-      let preview: { text: string; start: number; total: number } | null = null;
-      if (complete) {
-        result = await studio<TextVersion>(versionPath);
-      } else {
-        preview = await studio<{
-          text: string;
-          start: number;
-          total: number;
-        }>(`${versionPath}/text?start=0&limit=20000`);
-        result = { ...meta, text: "", source_text: "", diff: "" };
-      }
       if (ticket !== selectionRequest.current) return;
       setSelected(doc);
-      setFullLoaded(complete);
-      setPageStart(preview?.start || 0);
-      setPageTotal(preview?.total || Number(meta.characters || 0));
-      setPageText(preview?.text || "");
-      setVersion(result);
-      setOptions(result.options || {});
-      setManual(complete ? result.text || "" : "");
-      setManualEnabled(false);
+      setVersion(meta);
+      setOptions(meta.options || {});
+      setChapterDirty(false);
       cleanDirtyRef.current = false;
     } catch (e) {
       if (ticket === selectionRequest.current) setError(messageOf(e));
@@ -195,7 +173,6 @@ export default function Documents({ navigate, onJob }: Props) {
         {
           base_version_id: version.id,
           options,
-          ...(manualEnabled ? { manual_text: manual } : {}),
         },
       );
       setCleanOpen(false);
@@ -286,83 +263,37 @@ export default function Documents({ navigate, onJob }: Props) {
       setBusy("");
     }
   };
-  const readPage = async (start: number, kind: string = tab, part?: number) => {
-    if (!selected || !version) return;
-    if (fullLoaded) {
-      setPageStart(start);
-      setPageTotal(
-        Array.from(kind === "source" ? version.source_text : version.text)
-          .length,
-      );
-      return;
-    }
-    setBusy("page");
-    setError("");
-    try {
-      const p = part !== undefined && part >= 0 ? version.chapters[part] : null;
-      const limit = Math.max(
-        1,
-        Math.min(20000, p?.end !== undefined ? p.end - start : 20000),
-      );
-      const result = await studio<{
-        text: string;
-        start: number;
-        total: number;
-      }>(
-        `/documents/${selected.id}/versions/${version.id}/text?start=${start}&limit=${limit}&kind=${kind === "source" ? "source" : "cleaned"}`,
-      );
-      setPageText(result.text);
-      setPageStart(result.start);
-      setPageTotal(result.total);
-    } catch (e) {
-      setError(messageOf(e));
-    } finally {
-      setBusy("");
-    }
-  };
-  const selectTab = async (id: string) => {
-    setTab(id);
-    setChapter(-1);
-    if (["source", "clean"].includes(id)) await readPage(0, id);
-    if (id === "diff" && version && !version.diff) {
-      setBusy("diff");
-      try {
-        const result = await studio<{ diff: string; diff_truncated: boolean }>(
-          `/documents/${selected?.id}/versions/${version.id}/diff`,
-        );
-        setVersion((v) => (v ? { ...v, ...result } : v));
-      } catch (e) {
-        setError(messageOf(e));
-      } finally {
-        setBusy("");
+  const chooseRef = useRef(choose); chooseRef.current = choose;
+  useEffect(() => {
+    const open = (event: Event) => {
+      const detail = (event as CustomEvent<{ document_id: string; tab?: string }>).detail;
+      if (detail?.document_id) {
+        setView("documents");
+        setTab(detail.tab === "files" ? "files" : "chapters");
+        void chooseRef.current(detail.document_id);
       }
-    }
+    };
+    window.addEventListener("inkreference:document-open", open);
+    try {
+      const pending = sessionStorage.getItem("inkreference:pending-document");
+      if (pending) { sessionStorage.removeItem("inkreference:pending-document"); const detail = JSON.parse(pending); open(new CustomEvent("inkreference:document-open", { detail })); }
+    } catch { /* Navigation hints never alter document contents. */ }
+    return () => window.removeEventListener("inkreference:document-open", open);
+  }, []);
+  const restore = async () => {
+    if (!selected || !version) return;
+    setBusy("restore"); setError("");
+    try {
+      const next = await send<TextVersion>(`/documents/${selected.id}/chapters/restore`, { base_version_id: selected.latest_version_id, target_version_id: restoreTarget || version.id });
+      await choose(selected.id, next.id, true); setRestoreOpen(false); void load();
+    } catch (e) { setError(messageOf(e)); } finally { setBusy(""); }
   };
-  const cpSlice = (s: string, a: number, b?: number) =>
-    Array.from(s).slice(a, b).join("");
-  const source = version
-    ? (tab === "source" ? version.source_text : version.text) || ""
-    : "";
-  const chosenChapter =
-    version && chapter >= 0 ? version.chapters[chapter] : null;
-  const content = !fullLoaded
-    ? pageText
-    : cpSlice(
-        source,
-        pageStart,
-        Math.min(
-          pageStart + 20000,
-          chosenChapter?.end ??
-            chosenChapter?.end_offset ??
-            Array.from(source).length,
-        ),
-      );
   return (
     <main className="studio-main">
       <PageTitle
         kicker=""
         title="全文与清洗"
-        description="保留原件，逐版整理故事。"
+        description=""
         action={
           <button
             className="button primary"
@@ -405,8 +336,6 @@ export default function Documents({ navigate, onJob }: Props) {
           <Notice error={!!error} success={!error && !!message}>
             {error || message}
           </Notice>
-          {busy === "version" && !selected && <Busy label="正在读取全文版本" compact />}
-          {busy === "config" && !startOpen && <Busy label="正在读取分析配置" compact />}
           <div className="document-layout">
             <aside className="surface document-index">
               <div className="surface-heading">
@@ -445,7 +374,7 @@ export default function Documents({ navigate, onJob }: Props) {
                         <strong>{doc.title || doc.filename}</strong>
                         <small>
                           {doc.format?.toUpperCase()} ·{" "}
-                          {Number(doc.source_characters || 0).toLocaleString()}{" "}
+                          {Number(doc.current_characters ?? doc.source_characters ?? 0).toLocaleString()}{" "}
                           字
                         </small>
                       </span>
@@ -457,6 +386,7 @@ export default function Documents({ navigate, onJob }: Props) {
               )}
             </aside>
             <section className="surface document-content">
+              <div className={`document-detail-progress ${busy ? "active" : ""}`}><div className="indeterminate" role={busy ? "progressbar" : undefined} aria-label={busy === "version" ? "正在读取全文版本" : "正在处理"}><i /></div></div>
               {!selected ? (
                 <Empty
                   icon={FileText}
@@ -486,15 +416,15 @@ export default function Documents({ navigate, onJob }: Props) {
                     <div className="inline-actions">
                       <button
                         className="button secondary"
-                        disabled={!!busy || !version}
+                        disabled={!!busy || !version || chapterDirty}
                         onClick={() => setCleanOpen(true)}
                       >
                         <RefreshCw size={15} />
-                        清洗与修订
+                        文本分块
                       </button>
                       <button
                         className="button primary"
-                        disabled={!!busy || !version}
+                        disabled={!!busy || !version || chapterDirty}
                         onClick={() => void startDialog()}
                       >
                         <ArrowRight size={15} />
@@ -502,261 +432,22 @@ export default function Documents({ navigate, onJob }: Props) {
                       </button>
                     </div>
                   </div>
-                  {busy && (
-                    <Busy
-                      label={
-                        {
-                          version: "正在读取版本",
-                          upload: "正在导入与解析全文",
-                          clean: "正在生成清洗版本",
-                          config: "正在读取模型与工作流",
-                          start: "正在创建分析任务",
-                          download: "正在准备下载",
-                          page: "正在读取正文片段",
-                          diff: "正在读取清洗差异",
-                        }[busy]
-                      }
-                      compact
-                    />
-                  )}
                   {version && (
                     <>
                       <div className="document-subbar">
-                        <div className="segmented" aria-label="全文视图">
-                          {[
-                            ["clean", "清洗正文"],
-                            ["source", "原始文本"],
-                            ["diff", "清洗差异"],
-                            ["diagnostics", "诊断"],
-                          ].map(([id, label]) => (
-                            <button
-                              key={id}
-                              className={tab === id ? "active" : ""}
-                              onClick={() => void selectTab(id)}
-                            >
-                              {label}
-                            </button>
-                          ))}
+                        <div className="document-review-tabs" role="tablist" aria-label="全文工作区">
+                          {[["chapters", "章节清洗"], ["volumes", "分卷规划"], ["files", "原始文件"], ["diagnostics", "诊断"]].map(([id,label]) => <button key={id} role="tab" aria-selected={tab===id} className={tab===id ? "active" : ""} onClick={() => { if (chapterDirty) { setDiscardClean(true); return; } setTab(id); }}>{label}</button>)}
                         </div>
-                        <div className="version-select">
-                          <History size={14} />
-                          <select
-                            aria-label="全文版本"
-                            value={version.id}
-                            onChange={(e) =>
-                              void choose(selected.id, e.target.value)
-                            }
-                          >
-                            {(selected.versions || []).map((v) => (
-                              <option key={v.id} value={v.id}>
-                                版本 {v.version_number} ·{" "}
-                                {dateLabel(v.created_at)}
-                              </option>
-                            ))}
-                          </select>
+                        <div className="document-version-history">
+                          <div className="version-select"><History size={14}/><select aria-label="全文版本" value={version.id} disabled={!!busy} onChange={(e) => void choose(selected.id,e.target.value)}>{(selected.versions||[]).map((v) => <option value={v.id} key={v.id}>版本 {v.version_number} · {dateLabel(v.created_at)}</option>)}</select></div>
+                          {version.id!==selected.latest_version_id && <button className="text-button" disabled={!!busy} onClick={() => { setRestoreTarget(version.id); setRestoreOpen(true); }}><RotateCcw size={13}/>恢复</button>}
+                          {version.id===selected.latest_version_id && (version as TextVersion & { parent_version_id?: string }).parent_version_id && <button className="text-button" disabled={!!busy || chapterDirty} onClick={() => { setRestoreTarget((version as TextVersion & { parent_version_id: string }).parent_version_id); setRestoreOpen(true); }}><RotateCcw size={13}/>撤销上次更改</button>}
                         </div>
                       </div>
-                      {tab === "diff" ? (
-                        <pre className="diff-view">
-                          {typeof version.diff === "string"
-                            ? version.diff
-                            : describe(version.diff || version.changes)}
-                          {version.diff_truncated
-                            ? "\n…差异过长，当前展示已截断。"
-                            : ""}
-                        </pre>
-                      ) : tab === "diagnostics" ? (
-                        <div className="diagnostics-view">
-                          <h3>文本诊断</h3>
-                          {Array.isArray(version.diagnostics) &&
-                          version.diagnostics.length ? (
-                            <div className="diagnostic-cards">
-                              {version.diagnostics.map(
-                                (
-                                  item: {
-                                    message?: string;
-                                    sample?: string;
-                                    start?: number;
-                                    end?: number;
-                                  },
-                                  i: number,
-                                ) => (
-                                  <div key={i}>
-                                    <strong>
-                                      {item.message || "发现需要检查的文本"}
-                                    </strong>
-                                    <span>
-                                      字符 {item.start}–{item.end}
-                                    </span>
-                                    {item.sample && (
-                                      <blockquote>{item.sample}</blockquote>
-                                    )}
-                                  </div>
-                                ),
-                              )}
-                            </div>
-                          ) : (
-                            <div className="diagnostic-ok">
-                              <Check size={17} />
-                              未发现需要手动检查的文本问题
-                            </div>
-                          )}
-                          <h3>清洗变更</h3>
-                          {Array.isArray(version.changes) &&
-                          version.changes.length ? (
-                            <div className="clean-change-list">
-                              {version.changes.map(
-                                (
-                                  item: {
-                                    stage?: string;
-                                    count?: number;
-                                    input_characters?: number;
-                                    output_characters?: number;
-                                  },
-                                  i: number,
-                                ) => (
-                                  <div key={i}>
-                                    <span>
-                                      {(
-                                        {
-                                          line_endings: "换行规范化",
-                                          html_entities: "还原 HTML 转义",
-                                          confirmed_random_ids:
-                                            "移除确认的采集 ID",
-                                          manual_edit: "手动修订",
-                                        } as Record<string, string>
-                                      )[item.stage || ""] || item.stage}
-                                    </span>
-                                    <strong>{item.count} 处</strong>
-                                    <small>
-                                      {item.input_characters} →{" "}
-                                      {item.output_characters} 字
-                                    </small>
-                                  </div>
-                                ),
-                              )}
-                            </div>
-                          ) : (
-                            <div className="index-empty">
-                              本版本没有清洗变更
-                            </div>
-                          )}
-                          <h3>覆盖检查</h3>
-                          <div className="diagnostic-ok">
-                            <Check size={17} />
-                            {version.coverage?.complete &&
-                            version.coverage?.chunks_complete
-                              ? "章节与分析块覆盖完整"
-                              : "覆盖信息尚不完整"}
-                          </div>
-                          <details className="diagnostic-details">
-                            <summary>查看校验详情</summary>
-                            <pre>{describe(version.coverage || {})}</pre>
-                          </details>
-                        </div>
-                      ) : (
-                        <div className="reader-layout">
-                          {tab === "clean" && (
-                            <aside className="chapter-index">
-                              <div>
-                                章节目录{" "}
-                                <span>{version.chapters?.length || 0}</span>
-                              </div>
-                              <button
-                                className={chapter === -1 ? "active" : ""}
-                                onClick={() => {
-                                  setChapter(-1);
-                                  void readPage(0);
-                                }}
-                              >
-                                全文预览
-                              </button>
-                              {version.chapters?.map((part, i) => (
-                                <button
-                                  key={i}
-                                  className={chapter === i ? "active" : ""}
-                                  onClick={() => {
-                                    setChapter(i);
-                                    void readPage(
-                                      part.start ?? part.start_offset ?? 0,
-                                      "clean",
-                                      i,
-                                    );
-                                  }}
-                                >
-                                  <span>{String(i + 1).padStart(2, "0")}</span>
-                                  {part.title || `第 ${i + 1} 章`}
-                                </button>
-                              ))}
-                            </aside>
-                          )}
-                          <article className="text-reader">
-                            <div className="reader-meta">
-                              <span>
-                                {chosenChapter?.title ||
-                                  (tab === "source" ? "原始文本" : "清洗正文")}
-                              </span>
-                              <span>
-                                {Array.from(content).length.toLocaleString()} 字
-                              </span>
-                            </div>
-                            <pre>{content}</pre>
-                            {Math.min(
-                              pageTotal,
-                              chosenChapter?.end ?? pageTotal,
-                            ) -
-                              (chosenChapter?.start ?? 0) >
-                              20000 && (
-                              <div className="reader-pagination">
-                                <button
-                                  className="button secondary"
-                                  disabled={
-                                    !!busy ||
-                                    pageStart <= (chosenChapter?.start || 0)
-                                  }
-                                  onClick={() =>
-                                    void readPage(
-                                      Math.max(
-                                        chosenChapter?.start || 0,
-                                        pageStart - 20000,
-                                      ),
-                                      tab,
-                                      chapter,
-                                    )
-                                  }
-                                >
-                                  上一段
-                                </button>
-                                <span>
-                                  字符 {pageStart}–
-                                  {pageStart + Array.from(content).length} /{" "}
-                                  {pageTotal.toLocaleString()}
-                                </span>
-                                <button
-                                  className="button secondary"
-                                  disabled={
-                                    !!busy ||
-                                    pageStart + Array.from(content).length >=
-                                      Math.min(
-                                        pageTotal,
-                                        chosenChapter?.end || pageTotal,
-                                      )
-                                  }
-                                  onClick={() =>
-                                    void readPage(
-                                      pageStart + Array.from(content).length,
-                                      tab,
-                                      chapter,
-                                    )
-                                  }
-                                >
-                                  下一段
-                                </button>
-                              </div>
-                            )}
-                          </article>
-                        </div>
-                      )}
+                      <div hidden={tab!=="chapters"}><ChapterWorkbench key={`${selected.id}:${chapterReset}`} documentId={selected.id} version={version} onDirty={setChapterDirty} onVersion={async (id) => { cleanDirtyRef.current=false; setChapterDirty(false); await choose(selected.id,id,true); void load(); }}/></div>
+                      {tab==="volumes" && <VolumePanel documentId={selected.id} versionId={version.id}/>}
+                      {tab==="files" && <SourceFiles documentId={selected.id} versionId={version.id}/>}
+                      {tab==="diagnostics" && <div className="diagnostics-view"><h3>文本诊断</h3>{Array.isArray(version.diagnostics)&&version.diagnostics.length ? <div className="diagnostic-cards">{version.diagnostics.map((item:{message?:string;sample?:string;start?:number;end?:number},i:number)=><div key={i}><strong>{item.message||"文本问题"}</strong><span>字符 {item.start}–{item.end}</span>{item.sample&&<blockquote>{item.sample}</blockquote>}</div>)}</div> : <div className="diagnostic-ok"><Check size={17}/>未发现文本编码问题</div>}<h3>覆盖检查</h3><div className="diagnostic-ok"><Check size={17}/>{version.coverage?.complete&&version.coverage?.chunks_complete ? "章节与分析块覆盖完整" : "覆盖信息尚不完整"}</div><details className="diagnostic-details"><summary>查看校验详情</summary><pre>{describe(version.coverage||{})}</pre></details></div>}
                       <div className="document-footer">
                         <span>
                           版本 {version.version_number} ·{" "}
@@ -788,7 +479,7 @@ export default function Documents({ navigate, onJob }: Props) {
                             }
                           >
                             <ArrowDownToLine size={13} />
-                            清洗全文
+                            导出 TXT
                           </button>
                         </div>
                       </div>
@@ -810,7 +501,7 @@ export default function Documents({ navigate, onJob }: Props) {
             <input
               ref={fileInput}
               type="file"
-              accept=".txt,.md,.epub,.docx,.srt,.vtt"
+              accept=".txt,.md,.epub,.docx,.srt"
               hidden
               onChange={(e) => {
                 setFile(e.target.files?.[0] || null);
@@ -881,7 +572,7 @@ export default function Documents({ navigate, onJob }: Props) {
       )}
       {cleanOpen && (
         <Modal
-          title="生成新的清洗版本"
+          title="文本分块"
           onClose={() => cleanDirty ? setDiscardClean(true) : setCleanOpen(false)}
           wide
           busy={busy === "clean"}
@@ -892,7 +583,7 @@ export default function Documents({ navigate, onJob }: Props) {
             </p>
             <div className="clean-options">
               {Object.entries(options)
-                .filter(([, value]) => typeof value === "boolean")
+                .filter(([key, value]) => key !== "remove_random_ids" && typeof value === "boolean")
                 .map(([key, value]) => (
                   <label className="check-line" key={key}>
                     <input
@@ -941,28 +632,6 @@ export default function Documents({ navigate, onJob }: Props) {
                 </label>
               ))}
             </div>
-            <label className="check-line manual-check">
-              <input
-                type="checkbox"
-                disabled={!fullLoaded}
-                checked={manualEnabled}
-                onChange={(e) => setManualEnabled(e.target.checked)}
-              />
-              同时手动修订正文
-            </label>
-            {!fullLoaded && (
-              <p className="helper">
-                超长全文使用只读分页。需要修改时请下载全文，修订后重新导入。
-              </p>
-            )}
-            {manualEnabled && (
-              <textarea
-                className="manual-editor"
-                value={manual}
-                onChange={(e) => setManual(e.target.value)}
-                aria-label="手动修订正文"
-              />
-            )}
             <Notice error>{error}</Notice>
             {busy === "clean" && <Busy label="正在生成并校验新版本" />}
           </div>
@@ -1065,14 +734,15 @@ export default function Documents({ navigate, onJob }: Props) {
           </div>
         </Modal>
       )}
+      {restoreOpen && <Modal title="恢复历史版本" busy={busy==="restore"} onClose={() => setRestoreOpen(false)}><div className="modal-body"><p>将所选历史版本恢复为新的最新版本，已有版本保留。</p><Notice error>{error}</Notice>{busy==="restore"&&<Busy label="正在恢复全文版本"/>}</div><div className="modal-footer"><button className="button secondary" disabled={!!busy} onClick={()=>setRestoreOpen(false)}>取消</button><button className="button primary" disabled={!!busy} onClick={()=>void restore()}><RotateCcw size={15}/>恢复此版本</button></div></Modal>}
       {discardClean && (
-        <Modal title="有未保存的清洗修订" onClose={() => { setDiscardClean(false); setPendingDocument(null); }}>
-          <div className="modal-body"><p>保存为新版本后，修订才会写入全文库。</p></div>
+        <Modal title={chapterDirty ? "章节修订尚未保存" : "整理选项尚未保存"} onClose={() => { setDiscardClean(false); setPendingDocument(null); }}>
+          <div className="modal-body"><p>离开前，请保存当前修订。</p></div>
           <div className="modal-footer">
-            <button className="button secondary" onClick={() => { setDiscardClean(false); setPendingDocument(null); setCleanOpen(true); }}>继续修订</button>
+            <button className="button secondary" onClick={() => { setDiscardClean(false); setPendingDocument(null); if (!chapterDirty) setCleanOpen(true); }}>继续修订</button>
             <button className="button danger" onClick={() => {
               setDiscardClean(false); setCleanOpen(false);
-              setOptions(version?.options || {}); setManual(version?.text || ""); setManualEnabled(false); cleanDirtyRef.current = false;
+              setOptions(version?.options || {}); setChapterDirty(false); setChapterReset((n) => n+1); cleanDirtyRef.current = false;
               if (pendingDocument) void choose(pendingDocument.id, pendingDocument.vid, true);
               setPendingDocument(null);
             }}>放弃修订</button>

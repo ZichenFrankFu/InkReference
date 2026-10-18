@@ -1,0 +1,130 @@
+# InkOctoBot 参考数据库：逐项复刻基线
+
+审查对象：[`ZichenFrankFu/InkOctoBot`](https://github.com/ZichenFrankFu/InkOctoBot)，提交 `51c82b6f01f6a5b5210e1bae9302be257b3b8083`。本清单来自当前实际渲染的页面、事件处理及后端函数；旧注释、未挂载组件和仅存在的 API 不算作页面已实现功能。
+
+本文件先明确完整审查范围与验收方法。表内“复刻目标”是需求与设计，不代表该行已通过运行验收；本轮实际实现、差异和独立验收结果见末尾，跨平台及浏览器结果见 `docs/validation.md`。
+
+## 页面与作品
+
+叙事型作品的实际 7 个 tab 来自 `ui/frontend/src/pages/ReferenceLibraryPage.tsx` 的 `WorkDetailTab` / `TABS`：**原始文件、预处理、特征提取、剧情大纲、角色、设定、文本特征**。
+
+纯设定作品使用 `ui/frontend/src/components/reference/PureSettingPanel.tsx` 的 `PURE_SETTING_TABS`：**原始文本、设定、角色、特征提取、设定特征**。旧注释中的“快捷输入”不是当前实际 tab 文案。创建作品时选择 `structure_type=setting_collection` 才进入该模式。
+
+| 编号 | 实际上游能力 | 复刻目标 / 验收 |
+|---|---|---|
+| W01 | 搜索、媒介类型筛选、作品列表、星级、单个及批量删除 | 作品应能独立定位，不按同名合并；作品级数据、正文和分析保持关联 |
+| W02 | 新建作品：名称、作者、媒介、题材、喜欢原因、评分、叙事/纯设定 | 保留作品元数据；未知字段与 v8 CSV 不被覆盖 |
+| W03 | 作品摘要：状态、全文、时间段/事件/角色/设定数、按已提交四节计算的章节处理进度 | 数量与审核提交结果一致，未审核内容不计已完成 |
+| W04 | 评分、为什么喜欢、按章笔记 `{chapter,text}` 新增/编辑/删除 | 可保存和重新打开；按章排序不改变原始备注 |
+
+## 原始文件与章节预处理
+
+源文件：`FilesPanel.tsx`、`PreprocessPanel.tsx`、`ui/backend/app/routers/reference/works.py`、`ui/backend/app/routers/reference_api.py`、`reference_pipeline/chapter_parser.py`、`reference_pipeline/preprocess_jobs.py`。
+
+| 编号 | 实际上游能力 | 复刻目标 / 验收 |
+|---|---|---|
+| D01 | 首次上传、覆盖全部、追加文件；上传文件清单、逐文件内容、删除文件、清空 | 续传创建新版本，原先章节及不可变原件仍可追溯；新正文确实接在末尾 |
+| D02 | UTF-8 / GB18030 严格解码；TXT 正文 | 保留现有多格式入口和原件，不静默丢失无法解码字符 |
+| D03 | 扫描章节格式候选，给出匹配数/置信排序；用户确认一个或多个格式后识别 | 能识别 `第N章/回/节`、`Chapter N`、`N、`、`N.`、中文/全角数字；混合格式不重复切分 |
+| D04 | 自定义 `N` 格式模板或高级正则、启用/禁用及预览匹配 | 格式变更前可预览；无匹配时全文仍完整覆盖，不丢前言与结尾 |
+| D05 | 无编号缩进对比、独立“作者说章节”、分卷标题识别 | 标题与正文边界准确，首字不能被消耗；重复章号用稳定 ID 区分 |
+| D06 | 作者说关键词配置及恢复默认；整章作者说评分/原因 | 显示原因与章节标记，用户决定整章是否清理 |
+| D07 | 正文章内题外话段落：扫描、逐条预览、默认勾选、手动取消后批量删除 | 每章同一正文内红色标注候选删除；点击/键盘可保留；保存只移除选定原文区间 |
+| D08 | 乱码检测、自定义检测模式、尝试编码还原及逐章兜底；仍无法修复单独标记 | 缺字/替换符和可疑乱码显示不同于题外话的颜色；禁止把缺字自动“猜对” |
+| D09 | 长度异常、兼容历史拆分标记、已编辑、已清题外话、缺章提示 | 章列表有语义颜色及可访问标签；异常是提示，不擅自删正文；当前上游已移除自动拆分长章 |
+| D10 | 手动逐章编辑正文、仅改标题、在本章后插入、删除本章；缺章处插入 | 新版本只改变目标章；并发旧版本提交冲突；非 BMP 字符的偏移不出错 |
+| D11 | 多选章节删除、整章作者说批量清理；撤销上次清理 | 不可变版本提供更完整撤销；相同候选重复操作幂等 |
+| D12 | 保存全部已识别章节、已存章节概览、导出清洗后全书 TXT | 所有章节均参与，不只当前预览页；原件仍可下载 |
+| D13 | 识别后台任务状态/阶段、暂停/继续/取消、日志 | 有进度；章切换使用缓存/局部叠层，不能插入加载条挤压正文 |
+| D14 | 分卷自动建议、LLM 检测、手工编辑卷号/标题/章范围、插入/删除卷 | 分卷边界明确且全覆盖；支持复制分卷 prompt 与粘贴 JSON 后确认 |
+
+上游段落检测并不是“出现月票就删除”：`detect_aside_paragraphs` 跳过明显人物对话和较长叙述；依据短段落的元叙事关键词、章末位置、末尾分隔线评分。每个候选同时保留 `text`，在应用时核对实际文本，避免只按可能过期的段落序号删除。
+
+## 特征提取与审核
+
+源文件：`UnifiedExtractionPanel.tsx`、`AnalysisEditors.tsx` 的 `PromptCopyPanel`、`referenceMerge.ts`、`reference_pipeline/ai_extractor.py` / `prompts.py` / `nlp_stats.py`，后端 `reference_api.py` 的 `extract_chunk_all`、提示词路由 `reference/prompts.py`。
+
+| 编号 | 实际上游能力 | 复刻目标 / 验收 |
+|---|---|---|
+| E01 | 卷 → 分段列表；展开段落元数据；起止章节、字数、用时、错误 | 段与不可变正文版本绑定，不能显示新正文配旧引文 |
+| E02 | 每段一次 LLM 调用同时返回 `events/characters/settings/style`，并合并本地 NLP 风格统计 | LangGraph 完整返回四节；保留证据校验、token/费用台账与模型固定快照 |
+| E03 | 每段 API 提取、失败重试/重新提取 | 重试不覆盖已经人工修改的结果；取消/继续不重复处理成功段 |
+| E04 | 复制当前段或全部分段 prompt；粘贴网页模型 JSON；本地统计补全 | 不触发模型 API 的粘贴路径可单独使用；先预览再保存，格式错误清楚呈现 |
+| E05 | 四节各自“确认入库”：事件、角色、设定、风格/节奏；独立提交状态 | 可分别修改、审核提交；每节持久化、重复提交不产生重复记录 |
+| E06 | 角色/设定跨段合并；故事相对时间锚点归并；风格按字数聚合；由章节信号生成节奏 | 保留章来源、首次出现信息和多段事实；未知日期不强行推断 |
+| E07 | 全部未处理分段批量提取、成功/失败计数、中途取消 | 复刻批处理能力，保留人审；仅四节都完成才算该段完成 |
+
+上游 `runAll` 会直接提交四节，且任意 ledger 项存在就跳过该段。InkReference 应修正这两个行为，保留人审和逐节完成判断，不照搬其缺陷。上游粘贴解析的激进字符串修补也不应静默改变事实内容。
+
+## 剧情、角色、设定与文本特征
+
+| 编号 | 实际上游能力 | 结构 / 复刻验收 |
+|---|---|---|
+| A01 | 剧情大纲，分段视图、全书故事时间线 | `epochs[{title,periods:[{time,events}]}]`；时间线只重排显示，不改存储 |
+| A02 | 逐事件编辑；事件/时间段/大段删除 | 事件字段：`subject/category/name/description/time_marker/time_markers/first_chapter`；用稳定数据定位修改，不能用时间线排序后的索引回写 |
+| A03 | 大纲粒度：章节、大事件、卷、全书；API 概括或复制 prompt/粘贴 JSON、预览后应用 | 颗粒度结果需真实生成/粘贴、持久化；保留细粒度原稿或历史 |
+| A04 | 角色全书/分段视图、定位与出场量、独立编辑/删除 | `name/intro/role_tag/first_seen_at/first_chapter/speech_samples/appearance_chapters/appearance_word_count/mentions` |
+| A05 | 角色外貌、性格、经历的逐章事实列表，独立增加/编辑/删除 | `appearance/personality/experiences: [{chapter,text}]`；不能压平成单一简介 |
+| A06 | 设定按分类/分段展示、独立编辑/删除、逐章演变记录 | `category/title/content/first_introduced_at/first_chapter/updates[{chapter,text}]`；七类力量体系/势力组织/地理/社会规则/历史/世界观/其他 |
+| A07 | 风格全书/分段视图；统计与语义指标 | 本地统计 `avg_sentence_length/vocab_complexity/punctuation_profile`；模型指标 `dialogue_ratio/description_density/rhetoric_frequency/payoff_density/info_density/hook_density/pacing_profile`，不得伪造语义指标 |
+| A08 | 开篇模式显示 | 来自 `rhythm_json.opening_pattern`，兼容旧 `narrative_structure_json` |
+| A09 | 节奏图谱、覆盖章节/字数、高潮章、爽点、钩子、章节特征表、节奏分段 | `chapter_signals` 包含章节/类型/信息密度/摘要/爽点 `{type,plot}` /钩子 `{position,content}`；能编辑章节类型、密度、摘要 |
+
+章节类型枚举：日常、战斗、高潮、角色个人回、主线事件、支线事件、伏笔铺垫、收束、转折、其他。节奏落库结构还包含 `coverage/climax_positions/shuangdian/chapter_features/info_density_curve/pacing_segments`。
+
+当前上游 `PlotOutlineEditor` 明确移除了全局编辑、快捷新增和整份大纲直接粘贴按钮；当前实际入口是逐事件编辑和各层删除，另有粒度转换粘贴。这些额外功能可以在新应用改进，但不能误写成原页面现有能力。
+
+## 纯设定作品
+
+源文件：`PureSettingPanel.tsx`、`ui/backend/app/routers/reference/pure_setting.py`。
+
+| 编号 | 实际上游能力 | 结构 / 复刻验收 |
+|---|---|---|
+| P01 | 原始文本条目折叠、新增/编辑/删除 | `raw_entries: [{title,content}]`，不要求叙事章节或剧情时间线 |
+| P02 | TXT 导出；TXT 导入合并/替换 | 文件可往返原始文本、设定、角色、特征，明确导入策略 |
+| P03 | 单条翻译：模型 API 或复制 prompt/粘贴译文，确认应用 | 不覆盖原文历史；模型路径进入正常 token 台账 |
+| P04 | 设定条目 CRUD 和七类分类 | `{category,title,content}` |
+| P05 | 静态角色 CRUD | `{name,role,description}` |
+| P06 | 设定特征 CRUD、按核心冲突/高概念分组 | `{category,title,description}` |
+| P07 | 汇合原始条目/现有设定/角色后分段提取 | 同时输出新设定、角色和设定特征；API 或 prompt/粘贴结果；逐段或批量 |
+| P08 | 三节各自确认、合并到已有数据，逐节状态 | 不能因角色已提交而跳过未提交特征；刷新仍保留完成状态 |
+
+## 复用边界与验收记录
+
+复用的是 MIT 上游的章节规则、提取声明、合并/统计思路和实际业务操作。新应用继续使用不可变正文版本、SQLite、LangGraph、本地凭据、可审核提交；不复制上游全局模型路由、直接覆写正文、只保存一次撤销、静默解码失败和前端非事务写多个 JSON 字段的限制。具体代码来源与改动见 `THIRD_PARTY_NOTICES.md`。
+
+本轮必须进行的验收包含：续传与逐章 CRUD 的文本覆盖测试；误报段落取消清理后保留；所有章候选范围有效；表情/罕见字代码点偏移；并发旧版本拒绝；分节审核幂等；分段与全书视图数据相同；纯设定导入导出往返；真实 API 浏览器中连续切章无布局位移；蓝色主题及异常色语义；Windows/macOS CI。真实商业模型/OCR 未运行时需分别注明，不能由合成模型测试推断质量。
+
+## 本轮实际落地对应
+
+以下为源码逐项复核后的覆盖范围。“已实现”表示存在实际 GUI、后端或持久化操作，不代表已经在所有系统逐项人工验收。Windows/macOS CI 与真实浏览器记录单列于 `docs/validation.md`。
+
+| 基线 | 当前入口与实现 | 覆盖与改动 |
+|---|---|---|
+| W01–04 | `ReferenceAnalysis.tsx`、`ReferenceEditors.tsx`、`reference_analysis.py`；原有 `Library.tsx` / v8 API | 作品搜索、评分、喜欢原因、章节笔记、独立素材作品 CRUD；参考分析以全文条目为中心。媒介筛选和批量作品删除没有完整复制到参考分析列表 |
+| D01–02 | `Documents.tsx`、`ChapterWorkbench.tsx`、`VolumePanel.tsx::SourceFiles`、`documents.py::{upload,append,list_sources,get_source_original}` | 多格式严格解码、多个文件接续、上传清单、各原件下载、不可变续传版本；按单个文件范围移除正文暂未提供 |
+| D03–05 | `ChapterWorkbench.tsx` 识别设置；`text_processing.py`、`chapter_preprocessing.py` | 格式候选、多格式、中文/全角/英文编号、自定义 N 模板和超时受限正则；自定义格式逐条新增/修改/启停/删除；前言/尾文完整覆盖，重复章号不丢章 |
+| D06–09 | `chapter_preprocessing.py`、章节工作台目录与标注 | 整章作者说、章内题外话、尾部/对话保护、缺字/乱码、长度/缺号/重号、可配置关键词及杂字规则；不可恢复的缺字仅诊断。未提供上游自动编码往返修复 |
+| D07、D11–12 | `documents.py::apply_chapter_cleaning`、章节工作台的清理本章/全部标记；全文版本下载 | 每章同一正文内红色删除候选可逐处保留；保存仅移除所选区间，长章分页仍有全章候选索引；生成新版本，可撤销/恢复，导出全书 TXT |
+| D10–12 | `documents.py` 逐章 edit/rename/insert/delete/restore；`ReferenceDocumentPanels.tsx` | 单章正文、改名、插入/删除、自由多选章节批量删除、版本历史、恢复/撤销；GUI 单章编辑上限 200,000 个 Unicode 字符，超过时需先调整切分 |
+| D13 | 固定进度区域、章节缓存和预取；规则操作放入线程池；`workflows.py` 的任务状态 | 章切换不插入占位条挤动内容；规则解析使用即时版本操作，没有复制预处理任务专用的暂停/继续/日志。模型提取继续支持持久化、取消/恢复 |
+| D14 | `VolumePanel.tsx`、`volumes.py`、`studio.py` 分卷路由 | 标题规则建议、手工范围、模型检测、复制 prompt/粘贴预览；版本固定、保存检查连续覆盖 |
+| E01–07 | `ReferenceExtraction.tsx`、`workflows.py`、`reference_analysis.py`、`skills.py` / `workflow_definitions.py` | 固定版本的 LangGraph 分段、按卷筛选、单段/批量提取、提示词/粘贴、逐段预览、四节独立审核与完成记录、幂等合并；批量不再自动确认事实 |
+| A01–03 | `ReferenceEditors.tsx::PlotEditor`、`ReferenceAnalysis.tsx::TransformDialog`、`workflows.py::reference_transform` | 事件/篇章结构编辑、分段/故事时间视图、四档粒度；API 或 prompt/粘贴、预览后应用，历史可恢复 |
+| A04–06 | `ReferenceEditors.tsx::CollectionEditor`、`reference_analysis.py::merge_named` | 角色丰富字段、逐章外貌/性格/经历、设定分类与演进；全书与实际提取段范围分组；逐条编辑/新增/删除，人工标量修订优先 |
+| A07–09 | `StyleEditor` / `RhythmEditor`、`compute_nlp_style` / `aggregate_style` / `rhythm_from_style` | 全书/分段风格、开篇、章节密度图、类型/摘要/爽点/钩子、节奏分段和手工修订。本地句长、词汇及标点为确定性 Unicode 字符统计，不使用 jieba，不代表语义判断质量 |
+| P01–06 | “新建设定集”、五个实际 tab、`ReferenceAnalysis.tsx`、`ReferenceEditors.tsx`；`ReferenceAnalysisStore` | 无需伪造上传文件即可创建空设定集；原始条目/静态角色/设定/核心冲突/高概念 CRUD；四节 TXT 合并/替换导入导出；翻译 API 或 prompt/粘贴，预览应用 |
+| P07–08 | `ReferenceAnalysisStore::build_source`、`documents.py::create_literal_version`、特征提取 tab | 原始条目、已有角色、设定合成固定材料版本，三节独立人审。模型请求统一用量台账，网页粘贴不伪造 API token |
+| 额外完整性 | `reference_analysis_history`、活动提交/人工覆盖快照、`tests/test_reference_collection.py` | 分析历史恢复时同步恢复有效提交和人工覆盖，允许重新审核已撤销的段；来源正文版本随提交保留，旧版证据不会假装属于新正文 |
+
+### 尚未完整复制的细节
+
+- 上传文件的逐文件范围删除、覆盖全部、清空全部没有照搬；现有原件不可变，正文可通过章节操作及恢复历史版本调整。
+- 疑似乱码已定位与标记，尚无上游的一键编码往返修复；可按正确编码重新导入或逐章修订。字体是否具有某个正常 Unicode 字符的实际字形与文本中的缺字/替换符不同，当前只诊断文本层问题。
+- 预处理规则解析未保留上游单独的后台任务暂停/继续/日志界面。模型提取的取消/恢复属于独立的 LangGraph 工作流。
+- 参考分析列表没有完全复制上游媒介过滤与批量作品删除；v8 素材库与全文库仍保留各自原有的管理入口。
+- 设定集导出使用带格式头的可读 UTF-8 TXT，保留 JSON 结构和多行字段；兼容本应用条目 v1 和普通 TXT。并非上游含 `## 设定` 等标记的导出格式解析器；普通 TXT 被当作一个原始条目导入，以避免标记歧义导致丢文。
+
+### 独立复核证据
+
+`tests/test_reference_collection.py` 本地运行 **8 passed**，覆盖四节 TXT 往返、未知字段/换行/伪标记/表情与罕见字、重复合并、损坏导入整批不写入、过期 revision 冲突、恢复后重新审核、有效提交来源版本和风格人工覆盖的历史恢复。该测试只运行本地存储，不调用模型，不能视为商业模型、OCR、Windows/macOS 原生窗口或整套 GUI 的验收。

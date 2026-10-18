@@ -18,6 +18,8 @@ DEFAULT_WORKFLOW = {
     "custom_prompt": "", "chunk_chars": 6000, "retry_limit": 2,
     "max_input_tokens": 12000, "max_output_tokens": 3000, "budget_tokens": 100000,
 }
+REFERENCE_WORKFLOW = {**copy.deepcopy(DEFAULT_WORKFLOW), "version": "1.1.0", "skill_version": "1.1.0",
+                      "chunk_chars": 4000, "max_input_tokens": 16000, "max_output_tokens": 6000, "budget_tokens": 200000}
 
 
 def validate_workflow(definition: Any) -> dict[str, Any]:
@@ -53,13 +55,23 @@ def validate_workflow(definition: Any) -> dict[str, Any]:
 
 class WorkflowStore(_VersionedDefinitions):
     def __init__(self, data_dir: str | Path):
-        super().__init__(data_dir, "workflow_definitions.sqlite3", validate_workflow(DEFAULT_WORKFLOW))
+        super().__init__(data_dir, "workflow_definitions.sqlite3", validate_workflow(REFERENCE_WORKFLOW))
         with self._db() as connection:
             connection.execute("CREATE TABLE IF NOT EXISTS layouts (workflow_id TEXT NOT NULL, workflow_version TEXT NOT NULL, revision INTEGER NOT NULL, layout_json TEXT NOT NULL, PRIMARY KEY(workflow_id,workflow_version))")
 
     def save(self, definition: dict[str, Any]) -> dict[str, Any]:
         """Save a new immutable version. retry_limit is *additional* attempts."""
+        if isinstance(definition, dict) and (definition.get("id"), definition.get("version")) == (DEFAULT_WORKFLOW["id"], DEFAULT_WORKFLOW["version"]):
+            valid = validate_workflow(definition)
+            if _dump(valid) != _dump(DEFAULT_WORKFLOW):
+                raise DataError(409, "内建版本不可修改；请使用新 ID 或新 version")
+            return self.get(DEFAULT_WORKFLOW["id"], DEFAULT_WORKFLOW["version"])
         return self._save_validated(validate_workflow(definition))
+
+    def get(self, identifier: str | None = None, version: str | None = None) -> dict[str, Any]:
+        if identifier == DEFAULT_WORKFLOW["id"] and version == DEFAULT_WORKFLOW["version"]:
+            return copy.deepcopy(DEFAULT_WORKFLOW) | {"builtin": True}
+        return super().get(identifier, version)
 
     def get_layout(self, identifier: str = "default", version: str = "1.0.0") -> dict[str, Any]:
         self.get(identifier, version)

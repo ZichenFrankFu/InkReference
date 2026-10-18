@@ -59,6 +59,7 @@ export type DocumentMeta = {
   latest_version_id: string;
   created_at: string;
   source_characters: number;
+  current_characters?: number;
   work_id?: string;
   versions?: { id: string; version_number: number; created_at: string }[];
 };

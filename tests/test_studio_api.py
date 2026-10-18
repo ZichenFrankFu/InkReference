@@ -240,7 +240,7 @@ def test_project_backup_restores_document_custom_skill_workflow_layout_and_profi
     workflow.pop("builtin", None)
     workflow.update({"id": "backup-workflow", "name": "备份工作流", "skill_id": "backup-skill"})
     assert client.post(PREFIX + "/workflows", json=workflow).status_code == 201
-    layout_path = PREFIX + "/workflows/backup-workflow/versions/1.0.0/layout"
+    layout_path = PREFIX + f"/workflows/backup-workflow/versions/{workflow['version']}/layout"
     layout = {"nodes": [{"id": "extract", "position": {"x": 120, "y": 80}}], "edges": []}
     saved_layout = client.put(layout_path, json={"layout": layout, "expected_revision": 0})
     assert saved_layout.status_code == 200, saved_layout.text
