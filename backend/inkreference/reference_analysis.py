@@ -16,17 +16,23 @@ import json
 import math
 import re
 import sqlite3
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
 from .database import DataError
+from .chronicle_schema import (is_v2, is_v3, is_modern, validate_v2_section, validate_v3_section, validate_links,
+                               normalize_v3_section, adapt_v2_section, is_v4, normalize_v4_section, validate_v4_section, adapt_v3_section)
+from .analysis_projection import project_sections
+from .language_analysis import compute_language_statistics, naming_statistics
 
 ARRAY_SECTIONS = {"characters", "settings", "setting_features", "raw_entries"}
-OBJECT_SECTIONS = {"plot", "style", "rhythm", "opening", "metadata"}
+OBJECT_SECTIONS = {"plot", "style", "rhythm", "opening", "metadata", "era_background"}
 SECTIONS = ARRAY_SECTIONS | OBJECT_SECTIONS
 DEFAULT_SECTIONS = {"plot": {"logline": "", "epochs": []}, "characters": [], "settings": [],
-                    "style": {}, "rhythm": {}, "opening": {}, "metadata": {}, "setting_features": [], "raw_entries": []}
+                    "style": {}, "rhythm": {}, "opening": {}, "metadata": {}, "setting_features": [], "raw_entries": [], "era_background": {}}
+ANALYSIS_HISTORY_LIMIT = 10
 
 
 def _dump(value: Any) -> str:
@@ -70,6 +76,31 @@ def validate_section(section: str, data: Any) -> Any:
     elif not isinstance(data, dict):
         raise DataError(422, "此分析分区需为对象")
     _bounded(data)
+    if is_modern(section, data):
+        if section in {"characters", "settings"}:
+            result = []
+            for original in data:
+                item = copy.deepcopy(original)
+                if item.get("schema_version") in (3, 4):
+                    item.pop("current_snapshot", None)
+                    for snapshot in item.get("snapshots", []): snapshot.pop("events", None)
+                    result.append((validate_v4_section if item.get("schema_version") == 4 else validate_v3_section)(section, [item])[0])
+                elif item.get("schema_version") == 2: result.append(validate_v2_section(section, [item])[0])
+                else: result.append(validate_section(section, [item])[0])
+            return result
+        computed = {}
+        candidate = copy.deepcopy(data)
+        for key in ({"plot": ("epochs", "legacy", "views", "outlines"), "style": ("deterministic_statistics", "legacy"),
+                     "rhythm": ("legacy",), "opening": ("legacy",), "era_background": ("statistics", "legacy")}.get(section, ())):
+            if key in candidate:
+                derived = candidate.pop(key)
+                if candidate.get("schema_version") not in (3, 4) or key not in {"views", "outlines", "statistics"}: computed[key] = derived
+        if section == "plot" and candidate.get("schema_version") in (3, 4):
+            for line in candidate.get("plotlines", []): line.pop("current_status", None)
+        validator = validate_v4_section if candidate.get("schema_version") == 4 else validate_v3_section if candidate.get("schema_version") == 3 else validate_v2_section
+        value = validator(section, candidate)
+        if computed: value.update(computed)
+        return value
     def objects(value: Any, label: str) -> list[dict]:
         if not isinstance(value, list) or any(not isinstance(item, dict) for item in value):
             raise DataError(422, f"{label} 需为对象数组")
@@ -116,6 +147,7 @@ def validate_reference(data: Any, source: str | None = None, *, require_evidence
     result = {section: validate_section(section, value) for section, value in data.items()}
     if require_evidence:
         facts = [item for section in ("characters", "settings", "setting_features") for item in result.get(section, [])]
+        facts.extend(result.get("plot", {}).get("events", []))
         facts.extend(event for epoch in result.get("plot", {}).get("epochs", []) for period in epoch.get("periods", []) for event in period.get("events", []))
         if any(not isinstance(fact.get("evidence"), str) or not fact["evidence"].strip() for fact in facts):
             raise DataError(422, "模型分析事实必须保留非空连续原文 evidence")
@@ -147,6 +179,8 @@ def merge_named(existing: list[dict], incoming: list[dict], section: str) -> lis
     """Port of referenceMerge.ts name/category+title merge, retaining evidence."""
     result = copy.deepcopy(existing)
     def key(item: dict) -> tuple:
+        if item.get("id"):
+            return ("id", item["id"])
         return (item.get("name", "").strip(),) if section == "characters" else (item.get("category", "other"), item.get("title", "").strip())
     indices = {key(item): i for i, item in enumerate(result)}
     for item in incoming:
@@ -156,9 +190,24 @@ def merge_named(existing: list[dict], incoming: list[dict], section: str) -> lis
             result.append(copy.deepcopy(item))
             continue
         old = result[indices[k]]
+        if old.get("schema_version") == 4 or item.get("schema_version") == 4:
+            old = adapt_v3_section(section, [old])[0]
+            item = adapt_v3_section(section, [item])[0]
+            result[indices[k]] = old
+        if old.get("schema_version") == 3 and item.get("schema_version") != 3:
+            item = adapt_v2_section(section, [item])[0]
+        if item.get("schema_version") == 3 and old.get("schema_version") != 3:
+            old = adapt_v2_section(section, [old])[0]
+            result[indices[k]] = old
         for field, value in item.items():
+            if field == "initial_state" and isinstance(value, dict) and isinstance(old.get(field), dict):
+                previous = old[field].get("narrative_progress")
+                incoming = value.get("narrative_progress")
+                if old.get("origin") != "manual" and type(previous) in (int, float) and type(incoming) in (int, float) and incoming < previous:
+                    old[field] = copy.deepcopy(value)
+                continue
             if isinstance(value, list) and isinstance(old.get(field, []), list):
-                old[field] = _union(old.get(field, []), value)
+                old[field] = merge_by_id(old.get(field, []), value) if field in {"states", "experiences", "snapshots"} else _union(old.get(field, []), value)
             elif field not in old or old[field] in (None, "", [], {}):
                 old[field] = copy.deepcopy(value)
             elif field == "first_chapter":
@@ -167,6 +216,44 @@ def merge_named(existing: list[dict], incoming: list[dict], section: str) -> lis
                     old[field] = value
             # Existing edited scalar facts intentionally win. New chapter facts
             # remain in rich lists instead of replacing a user's description.
+    for entity in result:
+        if entity.get("schema_version") not in (3, 4): continue
+        snapshots = sorted(entity.get("snapshots", []), key=lambda state: (state.get("narrative_range", {}).get("start", 0), (state.get("revealed_at") or {}).get("offset") or 0, state.get("id", "")))
+        for previous, following in zip(snapshots, snapshots[1:]):
+            span = previous.get("narrative_range", {})
+            point = following.get("narrative_range", {}).get("start")
+            if previous.get("origin") != "manual" and span.get("end") is None and type(point) in (int, float) and point >= span.get("start", 0): span["end"] = point
+    return result
+
+
+def merge_by_id(existing: list[dict], incoming: list[dict]) -> list[dict]:
+    """ID-based idempotent union; immutable existing facts win scalar conflicts."""
+    result = copy.deepcopy(existing)
+    index = {item.get("id", item.get("event_id")): i for i, item in enumerate(result) if item.get("id", item.get("event_id"))}
+    for item in incoming:
+        identity = item.get("id", item.get("event_id"))
+        if identity and identity in index:
+            old = result[index[identity]]
+            for key, value in item.items():
+                if isinstance(value, list) and isinstance(old.get(key), list):
+                    old[key] = merge_by_id(old[key], value) if value and all(isinstance(part, dict) for part in value) else _union(old[key], value)
+                elif key not in old or old[key] in ("", None, [], {}):
+                    old[key] = copy.deepcopy(value)
+        else:
+            if identity: index[identity] = len(result)
+            if item not in result: result.append(copy.deepcopy(item))
+    return result
+
+
+def merge_object(old: dict, value: dict) -> dict:
+    if value.get("schema_version") in (2, 3, 4) and old and old.get("schema_version") != value.get("schema_version"):
+        return {**copy.deepcopy(value), "legacy": copy.deepcopy(old)}
+    result = copy.deepcopy(old)
+    for key, child in value.items():
+        if isinstance(child, list) and isinstance(result.get(key), list):
+            result[key] = merge_by_id(result[key], child) if all(isinstance(item, dict) for item in child) else _union(result[key], child)
+        elif key not in result or result[key] in ("", None, [], {}):
+            result[key] = copy.deepcopy(child)
     return result
 
 
@@ -196,6 +283,32 @@ def aggregate_style(entries: list[dict]) -> dict:
             result[key] = _union([], [item for value, _ in values for item in value])
         else:
             result[key] = copy.deepcopy(values[0][0])
+    return result
+
+
+
+def aggregate_style_v4(entries: list[dict]) -> dict:
+    if not entries: return {}
+    result = copy.deepcopy(entries[0]["data"])
+    total = sum(max(0, entry["chars"]) for entry in entries) or len(entries)
+    votes = {}
+    for entry in entries:
+        view = entry["data"].get("focalization")
+        if view is not None: votes[view] = votes.get(view, 0) + max(1, entry["chars"])
+    result["focalization"] = max(votes, key=votes.get) if votes else None
+    result["rhetoric"] = _union([], [judgment for entry in entries for judgment in entry["data"].get("rhetoric", [])])
+    result["dialogue_style"] = {"description": "\n".join(dict.fromkeys(entry["data"].get("dialogue_style", {}).get("description", "") for entry in entries if entry["data"].get("dialogue_style", {}).get("description"))),
+        "examples": _union([], [example for entry in entries for example in entry["data"].get("dialogue_style", {}).get("examples", [])])}
+    result["naming_style"] = "\n".join(dict.fromkeys(entry["data"].get("naming_style", "") for entry in entries if entry["data"].get("naming_style")))
+    result["narrative_composition"] = []
+    for kind in ("action", "description", "psychology", "exposition"):
+        facts = [(next(item for item in entry["data"]["narrative_composition"] if item["kind"] == kind), entry["chars"] or 1) for entry in entries]
+        fact = copy.deepcopy(facts[0][0])
+        fact["percentage"] = round(sum(item["percentage"] * weight for item, weight in facts) / sum(weight for _, weight in facts), 4)
+        fact["assessment"] = "\n".join(dict.fromkeys(item.get("assessment", "") for item, _ in facts if item.get("assessment")))
+        result["narrative_composition"].append(fact)
+    result["narrative_composition"][-1]["percentage"] = round(100 - sum(item["percentage"] for item in result["narrative_composition"][:-1]), 4)
+    result["schema_version"] = 4
     return result
 
 
@@ -260,7 +373,10 @@ class ReferenceAnalysisStore:
         self.path = Path(data_dir) / "workbench.sqlite3"
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.documents = documents
+        self.catalog_sync = None
+        self.write_lock = threading.RLock()
         with self._connect() as db:
+            db.execute("CREATE TABLE IF NOT EXISTS reference_contract_archives (document_id TEXT NOT NULL,section TEXT NOT NULL,contract_version INTEGER NOT NULL,data_json TEXT NOT NULL,PRIMARY KEY(document_id,section,contract_version))")
             db.execute("CREATE TABLE IF NOT EXISTS reference_analysis (document_id TEXT PRIMARY KEY,revision INTEGER NOT NULL,structure_type TEXT NOT NULL,sections_json TEXT NOT NULL,updated_at TEXT NOT NULL)")
             db.execute("CREATE TABLE IF NOT EXISTS reference_section_commits (document_id TEXT NOT NULL,run_id TEXT NOT NULL,chunk_id TEXT NOT NULL,section TEXT NOT NULL,data_json TEXT NOT NULL,chars INTEGER NOT NULL,committed_at TEXT NOT NULL,PRIMARY KEY(document_id,run_id,chunk_id,section))")
             columns = {row[1] for row in db.execute("PRAGMA table_info(reference_section_commits)")}
@@ -270,35 +386,156 @@ class ReferenceAnalysisStore:
             db.execute("CREATE TABLE IF NOT EXISTS reference_analysis_history (document_id TEXT NOT NULL,revision INTEGER NOT NULL,structure_type TEXT NOT NULL,sections_json TEXT NOT NULL,updated_at TEXT NOT NULL,PRIMARY KEY(document_id,revision))")
             if "commits_json" not in {row[1] for row in db.execute("PRAGMA table_info(reference_analysis_history)")}:
                 db.execute("ALTER TABLE reference_analysis_history ADD COLUMN commits_json TEXT NOT NULL DEFAULT '[]'")
+            db.execute("""DELETE FROM reference_analysis_history WHERE rowid IN (
+                SELECT rowid FROM (SELECT rowid,ROW_NUMBER() OVER (
+                PARTITION BY document_id ORDER BY revision DESC) AS age FROM reference_analysis_history)
+                WHERE age>?)""", (ANALYSIS_HISTORY_LIMIT,))
 
     @contextlib.contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
-        connection = sqlite3.connect(self.path, timeout=30)
-        try:
-            with connection:
-                yield connection
-        finally:
-            connection.close()
+        # Acquire the workspace lock before any SQLite lock. Catalog bridges
+        # attach this database in the reverse direction; one reentrant order
+        # prevents catalog/reference concurrent writes from waiting on each other.
+        with self.write_lock:
+            connection = sqlite3.connect(self.path, timeout=30)
+            try:
+                with connection:
+                    yield connection
+            finally:
+                connection.close()
 
     def _ensure(self, db: sqlite3.Connection, document_id: str) -> None:
         if self.documents:
             self.documents.get_document(document_id)
         db.execute("INSERT OR IGNORE INTO reference_analysis VALUES (?,0,'narrative',?,?)", (document_id, _dump(DEFAULT_SECTIONS), datetime.now(timezone.utc).isoformat()))
-        db.execute("INSERT OR IGNORE INTO reference_analysis_history (document_id,revision,structure_type,sections_json,updated_at,commits_json) SELECT document_id,revision,structure_type,sections_json,updated_at,? FROM reference_analysis WHERE document_id=?", (self._ledger(db, document_id), document_id))
+        snapshot_exists = db.execute("SELECT 1 FROM reference_analysis_history h JOIN reference_analysis a ON a.document_id=h.document_id AND a.revision=h.revision WHERE a.document_id=?", (document_id,)).fetchone()
+        if not snapshot_exists:
+            db.execute("INSERT OR IGNORE INTO reference_analysis_history (document_id,revision,structure_type,sections_json,updated_at,commits_json) SELECT document_id,revision,structure_type,sections_json,updated_at,? FROM reference_analysis WHERE document_id=?", (self._ledger(db, document_id), document_id))
 
     @staticmethod
     def _ledger(db: sqlite3.Connection, document_id: str) -> str:
         return _dump({"commits": [list(row) for row in db.execute("SELECT document_id,run_id,chunk_id,section,data_json,chars,committed_at,source_version_id FROM reference_section_commits WHERE document_id=? ORDER BY committed_at,run_id,chunk_id,section", (document_id,))],
                       "overrides": [list(row) for row in db.execute("SELECT document_id,section,data_json FROM reference_section_overrides WHERE document_id=? ORDER BY section", (document_id,))]})
 
+    @staticmethod
+    def _modern_sections(sections: dict) -> dict:
+        result = {}
+        for name, value in sections.items():
+            if name in {"characters", "settings"}:
+                entries = [item for item in value if item.get("schema_version") in (2, 3, 4)]
+                if entries: result[name] = entries
+            elif is_modern(name, value):
+                # Saved compatibility snapshots are not new claimed evidence.
+                result[name] = {key: item for key, item in value.items() if key not in {"legacy", "epochs", "deterministic_statistics"}}
+        return result
+
+    def _validate_sources(self, db: sqlite3.Connection, document_id: str, sections: dict, cache: dict | None = None) -> None:
+        if not self.documents:
+            return
+        cache = {} if cache is None else cache
+        has_versions = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='doc_versions'").fetchone()
+        def source(version_id):
+            if not version_id:
+                raise DataError(422, "分析证据缺少正文版本 source_version_id")
+            if version_id not in cache:
+                if has_versions:
+                    row = db.execute("SELECT payload_json FROM doc_versions WHERE document_id=? AND id=?", (document_id, version_id)).fetchone()
+                    if row is None: raise DataError(422, "分析证据引用的正文版本不存在或不属于当前作品")
+                    cache[version_id] = json.loads(row[0])
+                else:
+                    try: cache[version_id] = self.documents.get_version(document_id, version_id)
+                    except DataError as exc: raise DataError(422, "分析证据引用的正文版本不存在或不属于当前作品") from exc
+            return cache[version_id]
+        def walk(node):
+            if isinstance(node, dict):
+                if "evidence" in node:
+                    version = source(node.get("source_version_id", ""))
+                    text = version["text"]
+                    quote, anchor = node["evidence"], node["revealed_at"]
+                    offset = anchor["offset"]
+                    if offset is None:
+                        # Unknown location remains unknown. A declared chapter
+                        # must still contain the exact quote at a valid position.
+                        chapter = anchor["chapter"]
+                        candidates = [item for item in version.get("chapters", []) if isinstance(item, dict) and item.get("number") == chapter]
+                        if chapter is not None and candidates:
+                            matched = any(item["start"] <= text.find(quote, item["start"], item["end"] + len(quote)) < item["end"] for item in candidates)
+                        else: matched = quote in text
+                    else:
+                        matched = text[offset:offset + len(quote)] == quote
+                    if not matched:
+                        raise DataError(422, "分析证据 evidence 与正文版本或 offset 不一致")
+                    chapter = anchor["chapter"]
+                    declared = [item for item in version.get("chapters", []) if isinstance(item, dict) and type(item.get("number")) is int]
+                    if chapter is not None and declared:
+                        matching = [item for item in declared if item["number"] == chapter]
+                        if not matching or offset is not None and not any(item["start"] <= offset < item["end"] for item in matching):
+                            raise DataError(422, "分析证据 revealed_at.chapter 与原文位置不一致")
+                for child in node.values(): walk(child)
+            elif isinstance(node, list):
+                for child in node: walk(child)
+        walk(self._modern_sections(sections))
+
+    @staticmethod
+    def _archive_contract(db, document_id, section, value):
+        if not value: return
+        if isinstance(value, dict):
+            if value.get("schema_version") == 4: return
+            version = value.get("schema_version", 1)
+        else:
+            old = [item for item in value if item.get("schema_version") != 4]
+            if not old: return
+            version = max((item.get("schema_version", 1) if type(item.get("schema_version", 1)) is int else 1 for item in old), default=1)
+        if type(version) is not int: version = 1
+        db.execute("INSERT OR IGNORE INTO reference_contract_archives VALUES (?,?,?,?)", (document_id, section, version, _dump(value)))
+
     def _write(self, db: sqlite3.Connection, document_id: str, sections: dict, structure_type: str) -> None:
+        validate_links(self._modern_sections(sections))
+        if sections.get("style", {}).get("schema_version") == 4:
+            sections["style"].setdefault("deterministic_statistics", {})["naming"] = naming_statistics(sections.get("characters", []))
+        sync = getattr(self, "catalog_sync", None)
+        if sync is not None: sync(db, document_id, sections)
         db.execute("UPDATE reference_analysis SET sections_json=?,structure_type=?,revision=revision+1,updated_at=? WHERE document_id=?", (_dump(sections), structure_type, datetime.now(timezone.utc).isoformat(), document_id))
         db.execute("INSERT INTO reference_analysis_history (document_id,revision,structure_type,sections_json,updated_at,commits_json) SELECT document_id,revision,structure_type,sections_json,updated_at,? FROM reference_analysis WHERE document_id=?", (self._ledger(db, document_id), document_id))
+        # Only recovery snapshots are bounded. Current facts and the authoritative
+        # per-chunk contribution ledger remain intact for idempotent approvals.
+        db.execute("DELETE FROM reference_analysis_history WHERE document_id=? AND revision NOT IN (SELECT revision FROM reference_analysis_history WHERE document_id=? ORDER BY revision DESC LIMIT ?)", (document_id, document_id, ANALYSIS_HISTORY_LIMIT))
 
     def _get(self, db: sqlite3.Connection, document_id: str) -> dict:
         row = db.execute("SELECT * FROM reference_analysis WHERE document_id=?", (document_id,)).fetchone()
         return {"document_id": document_id, "revision": row[1], "structure_type": row[2], "sections": {**copy.deepcopy(DEFAULT_SECTIONS), **json.loads(row[3])}, "updated_at": row[4],
                 "commits": [{"run_id": item[0], "chunk_id": item[1], "section": item[2], "committed_at": item[3], "source_version_id": item[4]} for item in db.execute("SELECT run_id,chunk_id,section,committed_at,source_version_id FROM reference_section_commits WHERE document_id=? ORDER BY committed_at", (document_id,))]}
+
+    def project(self, document_id: str, chapter: int | None = None, *, volumes: list[dict] | None = None, target_version: int | None = None, progress: float | None = None) -> dict:
+        state = self.get(document_id)
+        sources = {}
+        declared_sources = set()
+        ledger_sources = {item.get("source_version_id") for item in state["commits"] if item.get("source_version_id")}
+        legacy_source = next(iter(ledger_sources)) if len(ledger_sources) == 1 else "" if ledger_sources else None
+        if target_version in (3, 4) and self.documents:
+            def collect(node):
+                if isinstance(node, dict):
+                    identity = node.get("source_version_id")
+                    if identity: declared_sources.add(identity)
+                    if identity and identity not in sources:
+                        try: sources[identity] = self.documents.get_version(document_id, identity)
+                        except DataError: pass
+                    for child in node.values(): collect(child)
+                elif isinstance(node, list):
+                    for child in node: collect(child)
+            collect(state["sections"])
+            if legacy_source and legacy_source not in sources:
+                try: sources[legacy_source] = self.documents.get_version(document_id, legacy_source)
+                except DataError: pass
+        state["sections"] = project_sections(state["sections"], chapter, volumes=volumes, target_version=target_version, source_versions=sources, progress=progress, legacy_source_version_id=legacy_source)
+        state["projection"] = {"chapter": chapter, "schema_version": target_version or 2, "progress": progress}
+        if target_version == 4 and self.documents:
+            all_sources = declared_sources | ledger_sources
+            if len(all_sources) > 1: state["narrative_context"] = {"chapter_count": 0}
+            else:
+                identity = next(iter(all_sources), None)
+                state["narrative_context"] = self.documents.get_narrative_context(document_id, identity)
+        return state
 
     def get(self, document_id: str) -> dict:
         with self._connect() as db:
@@ -322,12 +559,37 @@ class ReferenceAnalysisStore:
             return self._get(db, document_id)
 
     def save_section(self, document_id: str, section: str, data: Any, expected_revision: int) -> dict:
-        value = validate_section(section, data)
+        value = validate_section(section, normalize_v4_section(section, data, manual=True) if is_v4(section, data) else normalize_v3_section(section, data, manual=True) if is_v3(section, data) else data)
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             self._ensure(db, document_id)
             state = self._get(db, document_id)
             self._revision(state, expected_revision)
+            if section == "style" and value.get("schema_version") in (2, 3, 4):
+                value.pop("deterministic_statistics", None)
+                old_statistics = state["sections"]["style"].get("deterministic_statistics")
+                if old_statistics: value["deterministic_statistics"] = copy.deepcopy(old_statistics)
+            if is_v3(section, value) or is_v4(section, value):
+                old_ids = {}
+                def index_facts(node):
+                    if isinstance(node, dict):
+                        if node.get("id"): old_ids[node["id"]] = node
+                        for child in node.values(): index_facts(child)
+                    elif isinstance(node, list):
+                        for child in node: index_facts(child)
+                index_facts(state["sections"][section])
+                def mark_manual(node):
+                    if isinstance(node, dict):
+                        if "origin" in node or "evidence" in node:
+                            old = old_ids.get(node.get("id"))
+                            business = lambda item: {key: child for key, child in (item or {}).items() if key not in {"origin", "revealed_at", "source_version_id", "evidence"}}
+                            if old is None or business(old) != business(node): node["origin"] = "manual"
+                        for child in node.values(): mark_manual(child)
+                    elif isinstance(node, list):
+                        for child in node: mark_manual(child)
+                mark_manual(value)
+            self._validate_sources(db, document_id, {section: value})
+            if is_v4(section, value): self._archive_contract(db, document_id, section, state["sections"][section])
             state["sections"][section] = value
             if section in {"style", "rhythm", "opening"}:
                 db.execute("INSERT INTO reference_section_overrides VALUES (?,?,?) ON CONFLICT(document_id,section) DO UPDATE SET data_json=excluded.data_json", (document_id, section, _dump(value)))
@@ -354,28 +616,76 @@ class ReferenceAnalysisStore:
                 return state
             self._revision(state, expected_revision)
             now = datetime.now(timezone.utc).isoformat()
+            source_cache = {}
             for section in pending:
                 value = incoming[section]
+                if is_v3(section, value) or is_v4(section, value): value = (validate_v4_section if is_v4(section, value) else validate_v3_section)(section, value, require_evidence=True)
+                self._validate_sources(db, document_id, {section: value}, source_cache)
+                if section == "style" and is_v4(section, value) and self.documents:
+                    source = source_cache.get(run["version_id"]) or self.documents.get_version(document_id, run["version_id"])
+                    value = validate_v4_section(section, value, source["text"], source_version_id=run["version_id"], require_evidence=True)
+                if is_v3(section, value) or is_v4(section, value):
+                    value = (normalize_v4_section if is_v4(section, value) else normalize_v3_section)(section, value, source_versions=source_cache)
+                    value = validate_section(section, value)
                 old = state["sections"][section]
+                if is_v4(section, old) or is_v4(section, value):
+                    self._archive_contract(db, document_id, section, old)
+                    old = normalize_v4_section(section, old, source_versions=source_cache)
+                    value = normalize_v4_section(section, value, source_versions=source_cache)
+                if isinstance(old, dict) and old.get("schema_version") == 3 and isinstance(value, dict) and value.get("schema_version") == 2:
+                    value = adapt_v2_section(section, value, source_versions=source_cache)
                 if section in {"characters", "settings", "setting_features"}:
                     state["sections"][section] = merge_named(old, value, section)
                 elif section == "plot":
                     plot = copy.deepcopy(old)
-                    plot["epochs"] = _union(plot.get("epochs", []), value.get("epochs", []))
+                    if value.get("schema_version") == 4: plot.pop("epochs", None)
+                    else: plot["epochs"] = _union(plot.get("epochs", []), value.get("epochs", []))
+                    if value.get("schema_version") in (2, 3, 4):
+                        if value.get("schema_version") in (3, 4) and plot.get("schema_version") != value.get("schema_version"):
+                            legacy = copy.deepcopy(plot)
+                            plot = (adapt_v3_section if value.get("schema_version") == 4 else adapt_v2_section)("plot", plot, source_versions=source_cache)
+                            if legacy: plot["legacy"] = legacy
+                        plot["schema_version"] = value["schema_version"]
+                        plot["events"] = merge_by_id(plot.get("events", []), value.get("events", []))
+                        plot["plotlines"] = merge_by_id(plot.get("plotlines", []), value.get("plotlines", []))
                     if not plot.get("logline"):
                         plot["logline"] = value.get("logline", "")
                     state["sections"][section] = plot
                 elif section == "style":
                     ledger = [{"data": json.loads(row[0]), "chars": row[1]} for row in db.execute("SELECT data_json,chars FROM reference_section_commits WHERE document_id=? AND section='style' ORDER BY committed_at", (document_id,))]
                     ledger.append({"data": value, "chars": chunk["end"] - chunk["start"]})
-                    state["sections"][section] = aggregate_style(ledger)
+                    modern = value.get("schema_version") in (2, 3, 4)
+                    selected_ledger = [entry for entry in ledger if entry["data"].get("schema_version") == value.get("schema_version")] if modern else ledger
+                    state["sections"][section] = aggregate_style_v4(selected_ledger) if value.get("schema_version") == 4 else aggregate_style(selected_ledger)
+                    if modern:
+                        state["sections"][section]["schema_version"] = value["schema_version"]
+                        for key in (() if value.get("schema_version") == 4 else ("observations", "narrative_composition", "catchphrases")):
+                            previous = adapt_v2_section("style", old, source_versions=source_cache) if value.get("schema_version") == 3 and old.get("schema_version") != 3 else old
+                            state["sections"][section][key] = _union(previous.get(key, []), value.get(key, []))
+                        if old and old.get("schema_version") != value.get("schema_version"):
+                            state["sections"][section]["legacy"] = copy.deepcopy(old)
+                        elif old.get("legacy"):
+                            state["sections"][section]["legacy"] = copy.deepcopy(old["legacy"])
                     overrides = {row[0]: json.loads(row[1]) for row in db.execute("SELECT section,data_json FROM reference_section_overrides WHERE document_id=?", (document_id,))}
-                    state["sections"][section].update(overrides.get("style", {}))
-                    state["sections"]["rhythm"] = overrides.get("rhythm", rhythm_from_style(state["sections"][section], sum(item["chars"] for item in ledger)))
-                    state["sections"]["opening"] = overrides.get("opening", {"pattern": state["sections"][section].get("opening_pattern", "")})
+                    override = overrides.get("style", {})
+                    if not modern or override.get("schema_version") == value.get("schema_version"):
+                        state["sections"][section].update(override)
+                    if not modern:
+                        state["sections"]["rhythm"] = overrides.get("rhythm", rhythm_from_style(state["sections"][section], sum(item["chars"] for item in ledger)))
+                        state["sections"]["opening"] = overrides.get("opening", {"pattern": state["sections"][section].get("opening_pattern", "")})
+
                 else:
-                    state["sections"][section] = {**old, **value}
+                    state["sections"][section] = merge_object(old, value) if is_modern(section, value) else {**old, **value}
                 db.execute("INSERT INTO reference_section_commits (document_id,run_id,chunk_id,section,data_json,chars,committed_at,source_version_id) VALUES (?,?,?,?,?,?,?,?)", (document_id, run["id"], chunk_id, section, _dump(value), chunk["end"] - chunk["start"], now, run["version_id"]))
+            if "style" in pending and self.documents and state["sections"]["style"].get("schema_version") in (2, 3, 4):
+                source = source_cache.get(run["version_id"]) or self.documents.get_version(document_id, run["version_id"])
+                chapters = source.get("chapters", [])
+                body_ranges = [(item.get("body_start"), item.get("end")) for item in chapters if isinstance(item, dict) and not item.get("placeholder")]
+                bodies = [source["text"][start:end] for start, end in body_ranges if type(start) is int and type(end) is int and 0 <= start <= end <= len(source["text"])]
+                structured = any(isinstance(item, dict) for item in chapters)
+                measured_text = "\n".join(bodies) if structured else source["text"]
+                measured_chapters = sum(bool(body.strip()) for body in bodies) if structured else len(chapters)
+                state["sections"]["style"]["deterministic_statistics"] = compute_language_statistics(measured_text, source_version_id=run["version_id"], chapter_count=measured_chapters)
             self._write(db, document_id, state["sections"], state["structure_type"])
             return self._get(db, document_id)
 

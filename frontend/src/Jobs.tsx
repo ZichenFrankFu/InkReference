@@ -5,6 +5,7 @@ import {
   CheckCircle2,
   FileSearch,
   FileText,
+  Pause,
   Play,
   RefreshCw,
   Save,
@@ -18,12 +19,19 @@ import {
   send,
   normalizeList,
   type Run,
+  type RunSummary,
+  summarizeRun,
   type List,
   type DocumentMeta,
   type EvidenceItem,
 } from "./studio";
 import { isRemoteModel, modelEndpoint } from "./model-security";
 import ReferenceAnalysis from "./ReferenceAnalysis";
+import { ReferenceExtraction } from "./ReferenceExtraction";
+import type { ReferenceState } from "./reference-types";
+import "./reference-analysis.css";
+import "./jobs.css";
+import TaskManager, {type ManagedTask, type TaskNavigation} from "./TaskManager";
 import {
   Busy,
   Empty,
@@ -37,8 +45,10 @@ import {
 } from "./ui";
 type Props = {
   initialId?: string;
+  documentId?: string;
+  onDirtyChange?: (dirty: boolean) => void;
   navigate: (
-    id: "library" | "documents" | "jobs" | "workflows" | "models" | "backup",
+    id: "library" | "documents" | "reference" | "jobs" | "workflows" | "models" | "backup",
   ) => void;
 };
 const names: Record<string, string> = {
@@ -61,10 +71,8 @@ const stageNames: Record<string, string> = {
   review: "等待人工审核",
   complete: "已完成",
 };
-export default function Jobs({ initialId, navigate }: Props) {
-  const [mode, setMode] = useState<"reference" | "tasks">(initialId ? "tasks" : "reference");
-  const [referenceDirty, setReferenceDirty] = useState(false);
-  const [items, setItems] = useState<Run[]>([]);
+function LegacyJobReview({ initialId, documentId, navigate, onDirtyChange }: Props) {
+  const [items, setItems] = useState<RunSummary[]>([]);
   const [docs, setDocs] = useState<DocumentMeta[]>([]);
   const [selected, setSelected] = useState<Run | null>(null);
   const [draft, setDraft] = useState<Run["results"] | null>(null);
@@ -87,6 +95,7 @@ export default function Jobs({ initialId, navigate }: Props) {
     !!draft &&
     !!selected &&
     JSON.stringify(draft) !== JSON.stringify(selected.results);
+  useEffect(() => { onDirtyChange?.(dirty); return () => onDirtyChange?.(false); }, [dirty, onDirtyChange]);
   const selectedRef = useRef(selected);
   const selectionRequest = useRef(0);
   selectedRef.current = selected;
@@ -96,17 +105,18 @@ export default function Jobs({ initialId, navigate }: Props) {
     setLoading(true);
     try {
       const [r, d] = await Promise.all([
-        studio<List<Run>>("/jobs"),
+        studio<List<RunSummary>>(`/jobs?summary=true&limit=1000${documentId ? `&document_id=${encodeURIComponent(documentId)}` : ""}`),
         studio<List<DocumentMeta>>("/documents"),
       ]);
-      setItems(normalizeList(r));
+      const listed = normalizeList(r), current = selectedRef.current;
+      setItems(current && (!documentId || current.document_id === documentId) && !listed.some(item => item.id === current.id) ? [summarizeRun(current), ...listed] : listed);
       setDocs(normalizeList(d));
     } catch (e) {
       setError(messageOf(e));
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [documentId]);
   const choose = useCallback(async (id: string, discard = false) => {
     if (dirtyRef.current && selectedRef.current?.id !== id && !discard) {
       setPendingId(id);
@@ -120,6 +130,7 @@ export default function Jobs({ initialId, navigate }: Props) {
       const run = await studio<Run>(`/jobs/${id}`);
       if (ticket !== selectionRequest.current) return;
       setSelected(run);
+      setItems(items => [summarizeRun(run), ...items.filter(item => item.id !== run.id)]);
       setDraft(run.results);
       setTab("summary");
     } catch (e) {
@@ -143,7 +154,6 @@ export default function Jobs({ initialId, navigate }: Props) {
   }, []);
   useEffect(() => {
     if (initialId) {
-      setMode("tasks");
       void choose(initialId);
       void load();
     }
@@ -158,7 +168,7 @@ export default function Jobs({ initialId, navigate }: Props) {
             setSelected(next);
             if (!dirtyRef.current) setDraft(next.results);
             setItems((items) =>
-              items.map((i) => (i.id === next.id ? next : i)),
+              items.map((i) => (i.id === next.id ? summarizeRun(next) : i)),
             );
           })
           .catch((e) => setError(messageOf(e)));
@@ -166,11 +176,17 @@ export default function Jobs({ initialId, navigate }: Props) {
     }, 1800);
     return () => window.clearInterval(timer);
   }, []);
-  const action = async (kind: "resume" | "cancel") => {
+  const action = async (kind: "resume" | "pause" | "terminate") => {
     if (!selected) return;
     setBusy(kind);
     setError("");
     try {
+      if (kind === "resume") {
+        if (dirty) { setError("请先保存或取消审核修改"); return; }
+        await send(`/jobs/${selected.id}/reopen`, {});
+        window.dispatchEvent(new CustomEvent("inkreference:open-extraction", { detail: {runId:selected.id,documentId:selected.document_id,reviewPrompt:true} }));
+        return;
+      }
       const run = await send<Run>(`/jobs/${selected.id}/${kind}`, {});
       setSelected(run);
       setDraft(run.results);
@@ -274,23 +290,13 @@ export default function Jobs({ initialId, navigate }: Props) {
   const modelSnapshot = ((selected?.snapshots || {}) as { model?: { connection_mode?: "local" | "remote"; base_url?: string; model?: string } }).model;
   const destination = modelEndpoint(modelSnapshot?.base_url);
   const remote = isRemoteModel(modelSnapshot);
-  const modeControl = <div className="reference-mode-switch" role="tablist" aria-label="分析工作台"><button role="tab" aria-selected={mode === "reference"} className={mode === "reference" ? "active" : ""} onClick={() => setMode("reference")}>作品分析</button><button role="tab" aria-selected={mode === "tasks"} className={mode === "tasks" ? "active" : ""} disabled={referenceDirty} title={referenceDirty ? "请先保存或取消当前编辑" : undefined} onClick={() => setMode("tasks")}>提取任务与素材审核</button></div>;
-  if (mode === "reference") return <main className="studio-main"><PageTitle kicker="" title="参考作品分析" action={modeControl} /><ReferenceAnalysis docs={docs} runs={items} loading={loading} navigate={navigate} onRun={run => { setMode("tasks"); void choose(run.id); }} onRefresh={load} onDirtyChange={setReferenceDirty} /></main>;
   return (
-    <main className="studio-main">
-      <PageTitle
-        kicker=""
-        title="分析与审核"
-        description=""
-        action={
-          modeControl
-        }
-      />
+    <div className="legacy-job-review">
       <Notice error={!!error} success={!error && !!message}>
         {error || message}
       </Notice>
       {busy === "load" && !selected && <Busy label="正在读取任务详情" compact />}
-      {(busy === "resume" || busy === "cancel") && <Busy label={busy === "resume" ? "正在继续分析" : "正在取消运行"} compact />}
+      {(busy === "resume" || busy === "pause" || busy === "terminate") && <Busy label={busy === "resume" ? "正在恢复提取" : busy === "pause" ? "正在暂停" : "正在终止"} compact />}
       {evidenceBusy && <Busy label="正在读取原文证据" compact />}
       <div className="jobs-layout">
         <aside className="surface jobs-index">
@@ -326,7 +332,7 @@ export default function Jobs({ initialId, navigate }: Props) {
                 </div>
                 <small>
                   {run.workflow_id} ·{" "}
-                  {dateLabel(run.created_at || run.events?.[0]?.time)}
+                  {dateLabel(run.created_at)}
                 </small>
                 <Progress
                   completed={run.completed}
@@ -342,8 +348,7 @@ export default function Jobs({ initialId, navigate }: Props) {
           {!selected ? (
             <Empty
               icon={FileSearch}
-              title="开始第一次全文分析"
-              description="配置模型后，从全文库选择作品创建任务。"
+              title="暂无分析任务"
               action={
                 <div className="empty-actions"><button
                   className="button primary"
@@ -372,25 +377,28 @@ export default function Jobs({ initialId, navigate }: Props) {
                 <div className="inline-actions">
                   {running ? (
                     <button
-                      className="button secondary"
-                      onClick={() => void action("cancel")}
+                      className="icon-button task-control pause"
+                      aria-label="暂停提取" title="暂停提取"
+                      onClick={() => void action("pause")}
                       disabled={!!busy || selected.status === "cancelling"}
                     >
-                      <Square size={14} />
-                      取消运行
+                      <Pause size={14} />
+
                     </button>
-                  ) : ["cancelled", "failed", "paused"].includes(
+                  ) : ["cancelled", "failed", "paused", "terminated"].includes(
                       selected.status,
                     ) ? (
                     <button
-                      className="button primary"
+                      className="icon-button task-control resume"
+                      aria-label="恢复提取" title="恢复提取"
                       onClick={() => void action("resume")}
                       disabled={!!busy}
                     >
                       <Play size={15} />
-                      继续运行
+
                     </button>
                   ) : null}
+                  {!["approved", "needs_review", "terminated"].includes(selected.status) && <button className="icon-button task-control terminate" aria-label="终止提取" title="终止提取" disabled={!!busy || selected.stage === "terminating"} onClick={() => void action("terminate")}><Square size={15} fill="currentColor" /></button>}
                   <button
                     className={`icon-button ${activity ? "active" : ""}`}
                     aria-label="查看运行记录"
@@ -792,6 +800,88 @@ export default function Jobs({ initialId, navigate }: Props) {
           </div>
         </Modal>
       )}
-    </main>
+    </div>
   );
+}
+
+
+function mergeRunSummaries(previous: RunSummary[], incoming: RunSummary[]) {
+  return [...new Map([...previous, ...incoming].map(run => [run.id, run])).values()].sort((a, b) => (b.created_at || "").localeCompare(a.created_at || "") || a.id.localeCompare(b.id));
+}
+function useAnalysisLibrary(documentId?: string) {
+  const [docs, setDocs] = useState<DocumentMeta[]>([]), [runs, setRuns] = useState<RunSummary[]>([]), [loading, setLoading] = useState(true), [error, setError] = useState("");
+  const selectedDocument = useRef(documentId), summaries = useRef(runs);
+  selectedDocument.current = documentId; summaries.current = runs;
+  const load = useCallback(async () => { setLoading(true); try {
+    const selected = selectedDocument.current;
+    const [d, globalRuns, selectedRuns] = await Promise.all([
+      studio<List<DocumentMeta>>("/documents"),
+      studio<List<RunSummary>>("/jobs?summary=true&limit=1000"),
+      selected ? studio<List<RunSummary>>(`/jobs?summary=true&limit=1000&document_id=${encodeURIComponent(selected)}`) : Promise.resolve({ items: [] } as List<RunSummary>),
+    ]);
+    setDocs(normalizeList(d)); setRuns(previous => mergeRunSummaries(previous, [...normalizeList(globalRuns), ...normalizeList(selectedRuns)])); setError("");
+  } catch (e) { setError(messageOf(e)); } finally { setLoading(false); } }, []);
+  useEffect(() => {
+    if (!runs.some(run => ["queued", "running", "cancelling"].includes(run.status))) return;
+    const timer = window.setInterval(() => { void studio<List<RunSummary>>("/jobs?summary=true&limit=1000").then(response => setRuns(previous => mergeRunSummaries(previous, normalizeList(response)))).catch(e => setError(messageOf(e))); }, 1500);
+    return () => window.clearInterval(timer);
+  }, [runs.some(run => ["queued", "running", "cancelling"].includes(run.status))]);
+  const lookupRun = useCallback(async (id: string) => {
+    const known = summaries.current.find(run => run.id === id);
+    if (known) return known;
+    const run = await studio<RunSummary>(`/jobs/${encodeURIComponent(id)}?summary=true`);
+    setRuns(previous => mergeRunSummaries(previous, [run]));
+    return run;
+  }, []);
+  useEffect(() => { void load(); const refresh = () => { void load(); }; window.addEventListener("inkreference:jobs-refresh", refresh); window.addEventListener("inkreference:library-refresh", refresh); window.addEventListener("inkreference:reference-refresh", refresh); return () => { window.removeEventListener("inkreference:jobs-refresh", refresh); window.removeEventListener("inkreference:library-refresh", refresh); window.removeEventListener("inkreference:reference-refresh", refresh); }; }, [load]);
+  useEffect(() => { if (!documentId) return; let active = true; void studio<List<RunSummary>>(`/jobs?summary=true&limit=1000&document_id=${encodeURIComponent(documentId)}`).then(response => { if (active) setRuns(previous => mergeRunSummaries(previous, normalizeList(response))); }).catch(e => { if (active) setError(messageOf(e)); }); return () => { active = false; }; }, [documentId]);
+  return { docs, runs, loading, error, load, lookupRun };
+}
+export function ReferencePage({ navigate }: Props) {
+  const { docs, runs, loading, error, load } = useAnalysisLibrary();
+  const [, setDirty] = useState(false);
+  return <main className="studio-main reference-page"><PageTitle title="作品解析" /><Notice error>{error}</Notice><ReferenceAnalysis docs={docs} runs={runs} loading={loading} navigate={navigate} onRun={run => { window.dispatchEvent(new CustomEvent("inkreference:navigate", { detail: { section: "jobs", runId: run.id } })); }} onRefresh={load} onDirtyChange={setDirty} /></main>;
+}
+function ExtractionWorkspace({initialId,documentId:initialDocument,navigate,onDirtyChange}:Props) {
+  const [documentId,setDocumentId]=useState(()=>initialDocument||sessionStorage.getItem("inkreference.task-selection")||""),[state,setState]=useState<ReferenceState|null>(null),[dirty,setDirty]=useState(false),[localError,setLocalError]=useState(""),[legacy,setLegacy]=useState(false),[focusedRunId,setFocusedRunId]=useState(initialId||"");
+  const {docs,runs,loading,error,load,lookupRun}=useAnalysisLibrary(documentId);
+  const doc=docs.find(item=>item.id===documentId);
+  useEffect(()=>{onDirtyChange?.(dirty);return()=>onDirtyChange?.(false);},[dirty,onDirtyChange]);
+  useEffect(()=>{if(documentId){try{sessionStorage.setItem("inkreference.task-selection",documentId);}catch{/* Optional selection. */}}},[documentId]);
+  useEffect(()=>{if(!loading&&docs.length&&!docs.some(doc=>doc.id===documentId)&&!dirty)setDocumentId(docs[0].id);},[loading,docs,documentId,dirty]);
+  useEffect(()=>{if(!initialId)return;let active=true;void lookupRun(initialId).then(run=>{if(active){setDocumentId(run.document_id);setFocusedRunId(run.id);}}).catch(e=>{if(active)setLocalError(messageOf(e));});return()=>{active=false;};},[initialId,lookupRun]);
+  useEffect(()=>{setLegacy(false);},[documentId]);
+  useEffect(()=>{if(!documentId||legacy)return;let active=true;setState(null);void studio<ReferenceState>(`/documents/${documentId}/reference`).then(next=>{if(active)setState(next);}).catch(e=>{if(active)setLocalError(messageOf(e));});return()=>{active=false;};},[documentId,legacy]);
+  return <div className="task-workbench-body"><Notice error>{error||localError}</Notice><section className="task-manager-panel"><div className="task-manager-toolbar"><label className="studio-field"><span>参考作品库</span><select aria-label="选择解析作品" value={documentId} disabled={dirty} onChange={e=>{setDocumentId(e.target.value);setFocusedRunId("");setLocalError("");}}>{!docs.length&&<option value="">暂无作品</option>}{docs.map(doc=><option value={doc.id} key={doc.id}>{doc.title}</option>)}</select></label>{legacy&&<button className="button secondary" disabled={dirty} onClick={()=>setLegacy(false)}>返回分区审核</button>}</div>{loading&&!docs.length?<Busy label="正在读取作品"/>:legacy?<LegacyJobReview initialId={focusedRunId} documentId={documentId} navigate={navigate} onDirtyChange={setDirty}/>:state&&doc?<ReferenceExtraction key={doc.id} document={doc} state={state} runs={runs.filter(run=>run.document_id===doc.id)} initialRunId={focusedRunId} navigate={navigate} onRun={run=>{setFocusedRunId(run.id);setLegacy(true);}} onState={setState} onRefresh={load} onDirty={setDirty}/>:!loading&&!docs.length?<Empty icon={FileSearch} title="暂无正文" action={<button className="button primary" onClick={()=>navigate("library")}>作品库<ArrowRight size={14}/></button>}/>:<Busy label="正在读取解析任务"/>}</section></div>;
+}
+export default function Jobs({initialId,navigate}:Props) {
+  const [workspace,setWorkspace]=useState<{runId?:string;documentId?:string}|null>(null),[dirty,setDirty]=useState(false),[error,setError]=useState("");
+  const initialApplied=useRef("");
+  const openTask=useCallback((task:ManagedTask,navigation?:TaskNavigation)=>{
+    const target=navigation||task.navigation;setError("");
+    if(target.prepared_id){try{sessionStorage.setItem("inkreference.prompt-focus",JSON.stringify({operation:target.operation||task.operation,prepared_id:target.prepared_id}));}catch{/* Event delivery remains available. */}}
+    const runId=target.run_id||(task.kind==="extraction"?task.id:undefined),documentId=target.document_id||task.document_id;
+    if(target.section==="jobs"||task.kind==="extraction"){
+      if(target.action==="open_prompt"&&!target.prepared_id&&runId){try{sessionStorage.setItem("inkreference.extraction-prompt-focus",runId);}catch{/* Optional focus. */}}
+      setWorkspace({runId,documentId});return;
+    }
+    if(target.section==="repair"){window.dispatchEvent(new Event("inkreference:debug-open"));return;}
+    if(target.section==="library"){
+      const jobId=target.job_id||(task.kind==="research"?task.id:undefined);
+      if(jobId){try{sessionStorage.setItem("inkreference.research-focus",jobId);}catch{/* Optional focus. */}}
+      window.dispatchEvent(new CustomEvent("inkreference:navigate",{detail:{section:"library",intake:true,intakeMode:task.mode==="semi"?"semi":"automatic"}}));return;
+    }
+    if(target.section==="models"){
+      try{sessionStorage.setItem("inkreference.embedding-task-focus",task.id);}catch{/* Optional focus. */}
+      navigate("models");window.dispatchEvent(new Event("inkreference:embedding-task-focus"));return;
+    }
+    if(target.section==="documents"){
+      window.dispatchEvent(new CustomEvent("inkreference:navigate",{detail:{section:"documents",documentId,versionId:target.version_id||task.version_id,tab:task.kind==="volume_research"||task.operation==="volumes"?"volumes":"metadata",taskKind:task.kind,taskId:task.id,...(target.prepared_id?{prepared_id:target.prepared_id,operation:target.operation}: {})}}));return;
+    }
+    window.dispatchEvent(new CustomEvent("inkreference:navigate",{detail:{section:"reference",documentId,prepared_id:target.prepared_id,operation:target.operation}}));
+  },[navigate]);
+  useEffect(()=>{if(initialId&&initialApplied.current!==initialId){initialApplied.current=initialId;setWorkspace({runId:initialId});}},[initialId]);
+  useEffect(()=>{const focus=(event:Event)=>{const target=(event as CustomEvent<{section?:string;runId?:string;documentId?:string}>).detail;if(target?.section==="jobs"&&target.runId&&!dirty)setWorkspace({runId:target.runId,documentId:target.documentId});};window.addEventListener("inkreference:catalog-focus",focus);return()=>window.removeEventListener("inkreference:catalog-focus",focus);},[dirty]);
+  useEffect(()=>{const open=(event:Event)=>{const target=(event as CustomEvent<{runId:string;documentId:string;reviewPrompt?:boolean}>).detail;if(!target||dirty)return;if(target.reviewPrompt)sessionStorage.setItem("inkreference.extraction-prompt-focus",target.runId);setWorkspace({runId:target.runId,documentId:target.documentId});};window.addEventListener("inkreference:open-extraction",open);return()=>window.removeEventListener("inkreference:open-extraction",open);},[dirty]);
+  return <main className="studio-main tasks-page"><PageTitle title="任务管理"/><TaskManager onOpen={openTask} onCreate={()=>setWorkspace({})}/>{workspace&&<Modal wide title="作品解析任务" onClose={()=>{if(dirty){setError("请先保存或取消当前修改");return;}setWorkspace(null);setError("");window.dispatchEvent(new Event("inkreference:jobs-refresh"));}}><Notice error>{error}</Notice><ExtractionWorkspace key={`${workspace.documentId||""}:${workspace.runId||"new"}`} initialId={workspace.runId} documentId={workspace.documentId} navigate={navigate} onDirtyChange={setDirty}/></Modal>}</main>;
 }

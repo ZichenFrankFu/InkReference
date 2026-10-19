@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -15,6 +16,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 from typing import Sequence
 
@@ -29,8 +31,68 @@ PROBE = (
     "'desktop':importlib.util.find_spec('webview') is not None,"
     "'mineru':importlib.util.find_spec('mineru') is not None,"
     "'missing':[name for name in ('fastapi','uvicorn','multipart','httpx',"
-    "'langgraph','markdownify','markdown_it','keyring') if importlib.util.find_spec(name) is None]}))"
+    "'langgraph','markdownify','markdown_it','keyring','openpyxl','defusedxml','regex') if importlib.util.find_spec(name) is None]}))"
 )
+
+# Run in the selected interpreter, not in the Python executing this launcher.
+# Broken METADATA can make importlib.metadata report ``packaging None`` even
+# when importing packaging itself still works.
+PACKAGING_PROBE = r"""
+import importlib.metadata as metadata
+import importlib.util
+import json
+from pathlib import Path
+import sysconfig
+
+roots = sorted({str(Path(sysconfig.get_path(key)).resolve()) for key in ('purelib', 'platlib')})
+entries = []
+for root in roots:
+    directory = Path(root)
+    if not directory.is_dir():
+        continue
+    for path in directory.glob('packaging*.dist-info'):
+        if path.name != 'packaging.dist-info' and not path.name.startswith('packaging-'):
+            continue
+        dist = metadata.PathDistribution(path)
+        name = dist.metadata.get('Name')
+        if name and name.lower().replace('_', '-') != 'packaging':
+            continue
+        version = dist.metadata.get('Version')
+        record = path / 'RECORD'
+        issues = []
+        if not name or name.lower().replace('_', '-') != 'packaging' or not version or version == 'None':
+            issues.append('invalid METADATA')
+        if not record.is_file() or not record.stat().st_size:
+            issues.append('missing RECORD')
+        entries.append({'path': str(path.resolve()), 'version': version, 'issues': issues})
+spec = importlib.util.find_spec('packaging')
+module = str(Path(spec.origin).resolve()) if spec and spec.origin else None
+version = None
+error = None
+if spec:
+    try:
+        import packaging
+        from packaging.requirements import Requirement
+        from packaging.version import Version
+        version = packaging.__version__
+        Version(version)
+        Requirement('packaging>=1')
+    except Exception as exc:
+        error = type(exc).__name__
+try:
+    active = metadata.distribution('packaging')
+    active_path = str(Path(active._path).resolve())
+    active_version = active.version
+    active_record = Path(active_path) / 'RECORD'
+    active_valid = bool((active.metadata.get('Name') or '').lower() == 'packaging' and active_version
+                        and active_version != 'None' and active_record.is_file() and active_record.stat().st_size)
+except metadata.PackageNotFoundError:
+    active_path = active_version = None
+    active_valid = False
+print(json.dumps({'roots': roots, 'entries': entries, 'module': module,
+                  'version': version, 'error': error,
+                  'active_path': active_path, 'active_version': active_version, 'active_valid': active_valid}))
+"""
 
 
 class EnvironmentError(RuntimeError):
@@ -208,6 +270,94 @@ def run_phase(command: Sequence[str], description: str, *, cwd: Path = ROOT, run
     print(f"[===========] {description} complete", flush=True)
 
 
+def packaging_status(runtime: Runtime) -> dict:
+    output = capture(runtime.command("-c", PACKAGING_PROBE), environment=runtime.environment())
+    for line in reversed(output.splitlines()):
+        try:
+            result = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(result, dict) and "entries" in result and "roots" in result:
+            return result
+    raise EnvironmentError(f"Could not inspect packaging metadata in {runtime.label}.")
+
+
+def repair_packaging(runtime: Runtime, root: Path) -> bool:
+    """Repair only a damaged packaging installation, before normal resolution.
+
+    --force-reinstall still uninstalls first and fails when RECORD is absent.
+    A bounded --ignore-installed reinstall is needed for this one dependency;
+    applying that flag to the whole app would bypass normal dependency checks.
+    """
+    status = packaging_status(runtime)
+    entries = status["entries"]
+    if not status.get("module") and not entries and not status.get("active_path"):
+        return False  # Not installed: the regular resolver installs it normally.
+    if (not entries and status.get("active_valid") and not status.get("error")
+            and status.get("version") == status.get("active_version")):
+        return False  # Healthy inherited system/user-site package: do not overwrite it.
+    damaged = (
+        status.get("error") or any(entry["issues"] for entry in entries)
+        or len(entries) != 1 or not status.get("version")
+        or status.get("version") != status.get("active_version")
+    )
+    if not damaged:
+        return False
+    roots = {Path(path).resolve() for path in status["roots"]}
+    paths = [Path(entry["path"]).resolve() for entry in entries]
+    module = Path(status["module"]).resolve() if status.get("module") else None
+    active = Path(status["active_path"]).resolve() if status.get("active_path") else None
+    if (any(path.parent not in roots or not path.is_dir() for path in paths)
+            or (module and not any(module.is_relative_to(path) for path in roots))
+            or (active and active not in paths)):
+        raise EnvironmentError(
+            f"Damaged packaging is outside the selected environment ({runtime.label}). "
+            "Remove the conflicting PYTHONPATH/user-site override, then retry. No files were changed."
+        )
+    matches = re.findall(r"^packaging==([A-Za-z0-9.!+_-]+)\s*$", (root / "requirements-lock.txt").read_text(encoding="utf-8"), re.MULTILINE)
+    if len(matches) != 1:
+        raise EnvironmentError("requirements-lock.txt must contain one exact packaging version before its metadata can be repaired.")
+    locked = matches[0]
+    # Quarantine only this package's metadata. An old malformed dist-info can
+    # otherwise shadow the fresh version forever. Package source is never
+    # deleted, and failed repairs restore the previous metadata.
+    quarantines: list[tuple[Path, Path]] = []
+    verified_ok = False
+    try:
+        for path in paths:
+            holder = Path(tempfile.mkdtemp(prefix=".inkreference-packaging-", dir=path.parent))
+            destination = holder / path.name
+            path.rename(destination)
+            quarantines.append((path, destination))
+        run_phase(
+            runtime.command("-m", "pip", "install", "--ignore-installed", "--no-deps", f"packaging=={locked}"),
+            "Repair packaging metadata", cwd=root, runtime=runtime,
+        )
+        verified = packaging_status(runtime)
+        records = verified["entries"]
+        if (verified.get("error") or verified.get("version") != locked
+                or verified.get("active_version") != locked or len(records) != 1
+                or records[0]["issues"] or records[0]["version"] != locked
+                or verified.get("active_path") != records[0]["path"]):
+            raise EnvironmentError(f"packaging metadata repair could not be verified in {runtime.label}. Normal dependency installation was not started.")
+        verified_ok = True
+    except BaseException:
+        # Restore known metadata only; never guess/remove arbitrary site files.
+        for original, saved in reversed(quarantines):
+            if original.exists():
+                shutil.rmtree(original)
+            saved.rename(original)
+        raise
+    finally:
+        for _, saved in quarantines:
+            if verified_ok:
+                shutil.rmtree(saved.parent)
+            elif not saved.exists():
+                saved.parent.rmdir()
+    print(f"[===========] packaging {locked} metadata verified in {runtime.label}", flush=True)
+    return True
+
+
 def frontend_tools(runtime: Runtime) -> tuple[list[str], list[str], str]:
     if runtime.conda_name:
         node = runtime.tool_command("node")
@@ -227,6 +377,90 @@ def frontend_tools(runtime: Runtime) -> tuple[list[str], list[str], str]:
     if not match or int(match.group(1)) not in (22, 24):
         raise EnvironmentError(f"Found Node.js {version}; frontend builds use Node.js 22 or 24. Select that version on PATH; no global tools were changed.")
     return node, npm, version
+
+
+FRONTEND_STAMP = ".inkreference-source.json"
+
+
+def frontend_fingerprint(root: Path = ROOT) -> str | None:
+    """Hash build inputs, independent of checkout timestamps or operating system."""
+    frontend = root / "frontend"
+    source = frontend / "src"
+    if not source.is_dir() or not any(path.is_file() for path in source.rglob("*")):
+        return None  # A prebuilt distribution can run without source or Node.
+    files = {path for directory in (source, frontend / "public") if directory.is_dir() for path in directory.rglob("*") if path.is_file()}
+    files.update(path for path in frontend.iterdir() if path.is_file() and (
+        path.name in {"index.html", "package.json", "package-lock.json"}
+        or "config." in path.name
+    ))
+    digest = hashlib.sha256()
+    for path in sorted(files, key=lambda value: value.relative_to(frontend).as_posix()):
+        digest.update(path.relative_to(frontend).as_posix().encode("utf-8"))
+        digest.update(b"\0")
+        with path.open("rb") as stream:
+            for block in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(block)
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def frontend_status(root: Path = ROOT) -> dict:
+    interface = root / "frontend/dist/index.html"
+    if not interface.is_file():
+        return {"ok": False, "state": "missing", "message": "The interface build is missing. Run install with the same environment option."}
+    fingerprint = frontend_fingerprint(root)
+    if fingerprint is None:
+        return {"ok": True, "state": "prebuilt", "message": "Prebuilt interface; frontend source is not included."}
+    try:
+        stamp = json.loads((interface.parent / FRONTEND_STAMP).read_text(encoding="utf-8"))
+        current = isinstance(stamp, dict) and stamp.get("version") == 1 and stamp.get("source_sha256") == fingerprint and stamp.get("index_sha256") == hashlib.sha256(interface.read_bytes()).hexdigest()
+    except (OSError, ValueError):
+        current = False
+    if current:
+        return {"ok": True, "state": "current", "message": "Interface matches the current source."}
+    return {"ok": False, "state": "stale", "message": "The interface needs rebuilding. Open rebuilds it with installed frontend dependencies; run install if dependencies are missing."}
+
+
+def stamp_frontend(root: Path, expected_fingerprint: str | None) -> None:
+    """Write a receipt only after a successful build of unchanged source."""
+    interface = root / "frontend/dist/index.html"
+    if not interface.is_file():
+        raise EnvironmentError("The interface build did not produce frontend/dist/index.html. Run install again and check the build output.")
+    if frontend_fingerprint(root) != expected_fingerprint:
+        raise EnvironmentError("Frontend source changed during the build. Run open again to rebuild the current source.")
+    if expected_fingerprint is None:
+        return
+    stamp = {"version": 1, "source_sha256": expected_fingerprint, "index_sha256": hashlib.sha256(interface.read_bytes()).hexdigest()}
+    target = interface.parent / FRONTEND_STAMP
+    temporary = target.with_suffix(".tmp")
+    temporary.write_text(json.dumps(stamp, sort_keys=True) + "\n", encoding="utf-8")
+    temporary.replace(target)
+
+
+def build_frontend(root: Path, runtime: Runtime, npm: Sequence[str]) -> None:
+    fingerprint = frontend_fingerprint(root)
+    run_phase([*npm, "run", "build"], "Build interface", cwd=root / "frontend", runtime=runtime)
+    stamp_frontend(root, fingerprint)
+
+
+def ensure_frontend(root: Path, runtime: Runtime) -> None:
+    status = frontend_status(root)
+    if status["ok"]:
+        return
+    if status["state"] == "missing":
+        raise EnvironmentError(status["message"])
+    frontend = root / "frontend"
+    installed = all((frontend / relative).is_file() for relative in (
+        "node_modules/vite/bin/vite.js", "node_modules/typescript/bin/tsc",
+    ))
+    if not installed:
+        raise EnvironmentError("The interface source has changed, but frontend dependencies are missing. Run install with the same environment option, then open again. No dependencies were installed automatically.")
+    print("[open] Frontend source changed; rebuilding the interface", flush=True)
+    _, npm, _ = frontend_tools(runtime)
+    try:
+        build_frontend(root, runtime, npm)
+    except EnvironmentError as exc:
+        raise EnvironmentError(f"{exc}\nThe old interface was not launched. Run install with the same environment option if frontend dependencies need updating.") from exc
 
 
 def install(args: argparse.Namespace, root: Path = ROOT) -> int:
@@ -254,6 +488,7 @@ def install(args: argparse.Namespace, root: Path = ROOT) -> int:
     project = "." + ("[" + ",".join(extras) + "]" if extras else "")
     pip = runtime.command("-m", "pip", "install", "-c", str(root / "requirements-lock.txt"), "-e", project)
     print("[3/5] Python dependencies", flush=True)
+    repair_packaging(runtime, root)
     run_phase(pip, "Install Python dependencies", cwd=root, runtime=runtime)
     if args.mineru:
         run_phase(runtime.command("-m", "pip", "install", "-r", str(root / "requirements-mineru.txt")), "Install optional MinerU", cwd=root, runtime=runtime)
@@ -263,7 +498,7 @@ def install(args: argparse.Namespace, root: Path = ROOT) -> int:
         raise EnvironmentError("frontend/package-lock.json is missing. Use a complete checkout of InkReference.")
     run_phase([*npm, "ci"], "Install frontend dependencies", cwd=frontend, runtime=runtime)
     print("[5/5] Build interface", flush=True)
-    run_phase([*npm, "run", "build"], "Build interface", cwd=frontend, runtime=runtime)
+    build_frontend(root, runtime, npm)
     print("\nReady. Use scripts/open.ps1 (Windows) or ./scripts/open.sh (macOS).", flush=True)
     if args.current_environment or args.conda_environment:
         print("Use the same explicit environment option when opening the app.", flush=True)
@@ -278,8 +513,7 @@ def open_app(args: argparse.Namespace, root: Path = ROOT) -> int:
         raise EnvironmentError(f"InkReference is not installed in {runtime.label}. Run install with the same environment option.")
     if details.get("missing"):
         raise EnvironmentError(f"Application dependencies are missing: {', '.join(details['missing'])}. Run install with the same environment option.")
-    if not (root / "frontend/dist/index.html").is_file():
-        raise EnvironmentError("The interface build is missing. Run the install command first.")
+    ensure_frontend(root, runtime)
     desktop = not args.browser and not args.no_open
     if desktop and (not details.get("desktop") or sys.platform not in ("win32", "darwin")):
         print("[open] Desktop runtime unavailable; opening the browser interface.", flush=True)
@@ -318,9 +552,8 @@ def doctor(args: argparse.Namespace, root: Path = ROOT) -> int:
     except EnvironmentError as exc:
         # Node is needed for source builds, never for opening an already-built UI.
         report["checks"]["frontend_tools"] = {"ok": False, "required_for": "source builds only", "message": str(exc)}
-    report["checks"]["interface"] = {"ok": (root / "frontend/dist/index.html").is_file()}
+    report["checks"]["interface"] = frontend_status(root)
     if not report["checks"]["interface"]["ok"]:
-        report["checks"]["interface"]["message"] = "The interface build is missing. Run install."
         report["ok"] = False
     if args.json:
         print(json.dumps(report, ensure_ascii=False, indent=2))

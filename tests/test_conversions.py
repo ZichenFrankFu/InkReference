@@ -79,7 +79,9 @@ def test_real_epub_to_markdown_to_text_and_import_is_idempotent(tmp_path):
     documents = DocumentStore(tmp_path)
     imported = store.import_to_document(job["id"], documents)
     assert imported["title"] == "版本化参考书" and imported["work_id"] == "W-SYNTHETIC"
-    assert documents.get_original(imported["id"])[0] == plain.encode("utf-8")
+    assert documents.get_original(imported["id"])[0] == raw
+    assert documents.get_version(imported["id"])["text"] == plain
+    assert documents.list_sources(imported["id"])[0]["format"] == "epub"
     assert store.import_to_document(job["id"], documents)["id"] == imported["id"]
     assert len(documents.list_documents()) == 1
     reopened = ConversionStore(tmp_path)

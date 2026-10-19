@@ -130,13 +130,13 @@ def sample_result():
 def test_exact_contiguous_evidence_required_and_results_not_written(tmp_path):
     store = SkillStore(tmp_path)
     result = sample_result()
-    assert validate_result(store.get(), result, "开头。林桐找到钥匙。结尾。") == result
+    assert validate_result(store.get("unified-reference", "1.0.0"), result, "开头。林桐找到钥匙。结尾。") == result
     result["characters"][0]["evidence"] = "林桐……钥匙"
     with pytest.raises(DataError, match="连续片段"):
-        validate_result(store.get(), result, "林桐找到钥匙。")
+        validate_result(store.get("unified-reference", "1.0.0"), result, "林桐找到钥匙。")
     result["characters"][0]["evidence"] = " "
     with pytest.raises(DataError, match="不能留空"):
-        validate_result(store.get(), result, "林桐 找到钥匙。")
+        validate_result(store.get("unified-reference", "1.0.0"), result, "林桐 找到钥匙。")
     assert len(store.list()) == 1
 
 

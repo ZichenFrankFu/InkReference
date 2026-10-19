@@ -1,0 +1,20 @@
+.studio-app .library-workspace .catalog-work-filter { position: relative; display: flex; align-items: center; gap: 6px; min-width: 0; max-width: 250px; min-height: 33px; padding: 0 9px; border: 1px solid var(--library-line,var(--line)); border-radius: 7px; background: var(--field-bg); color: var(--library-muted,var(--muted)); font-size: 11px; }
+.studio-app .library-workspace .catalog-work-filter > span { flex-shrink: 0; white-space: nowrap; }
+.studio-app .library-workspace .catalog-work-trigger { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; min-height: 31px; max-width: 190px; padding: 6px 0 6px 1px; border: 0; background: transparent; color: var(--text); text-align: left; font: inherit; }
+.studio-app .library-workspace .catalog-work-trigger > span { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.studio-app .library-workspace .catalog-work-trigger > svg { flex-shrink: 0; }
+.studio-app .library-workspace .catalog-work-popover { position: absolute; z-index: 30; top: 100%; left: 0; width: min(310px,calc(100vw - 54px)); margin-top: 7px; padding: 10px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); box-shadow: 0 12px 36px #10274422; }
+.studio-app .library-workspace .catalog-work-popover > label { display: flex; align-items: center; gap: 7px; border: 1px solid var(--line); min-height: 34px; padding: 5px 9px; border-radius: 8px; background: var(--field-bg); }
+.studio-app .library-workspace .catalog-work-popover input { border: 0; background: transparent; min-width: 0; width: 100%; outline: none; color: var(--text); font: inherit; }
+.studio-app .library-workspace .catalog-work-popover [role=listbox] { max-height: 280px; overflow: auto; margin-top: 6px; }
+.studio-app .library-workspace .catalog-work-popover [role=option] { display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%; padding: 9px 10px; background: transparent; border: 0; border-radius: 7px; text-align: left; color: var(--text); font: inherit; }
+.studio-app .library-workspace .catalog-work-popover [role=option] > span { min-width: 0; overflow-wrap: anywhere; }
+.studio-app .library-workspace .catalog-work-popover [role=option] > svg { flex-shrink: 0; }
+.studio-app .library-workspace .catalog-work-popover [role=option]:hover,
+.studio-app .library-workspace .catalog-work-popover [aria-selected=true] { background: var(--accent-soft); color: var(--accent); }
+.studio-app .library-workspace .catalog-work-popover small { display: block; color: var(--muted); margin-top: 3px; font-size: 10px; }
+.studio-app .library-workspace .catalog-work-popover footer { display: flex; align-items: center; justify-content: space-between; border-top: 1px solid var(--line); padding-top: 6px; margin-top: 6px; }
+@container library (max-width: 560px) {
+  .studio-app .library-workspace .database-filterbar .catalog-work-filter { flex: 1 1 140px; max-width: none; padding-inline: 7px; }
+  .studio-app .library-workspace .catalog-work-trigger { flex: 1; max-width: none; }
+}

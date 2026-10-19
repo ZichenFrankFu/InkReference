@@ -1,0 +1,201 @@
+/* Shared semantic tokens also cover components loaded after the workspace. */
+:root[data-theme][data-scheme] {
+  color-scheme: light;
+  --paper: #fff;
+  --surface-raised: #f7f9fd;
+  --field-bg: #fff;
+  --bg: #f5f7fc;
+  --line: #dfe6f1;
+  --muted: #596982;
+  --text: #24334c;
+  --accent: #3268e8;
+  --accent-dark: #2453c3;
+  --accent-soft: #edf3ff;
+  --red: #b83f56;
+  --red-soft: #fff0f3;
+  --purple: #8050b8;
+  --purple-soft: #f0e6ff;
+  --warning: #946518;
+  --warning-soft: #fff6e5;
+  --positive: #3267b4;
+  --positive-soft: #edf4ff;
+  --focus-ring: #719cff;
+  --shadow: 0 16px 48px #213b6515;
+  --chapter-line: var(--line);
+  color: var(--text);
+  background: var(--bg);
+}
+:root[data-theme="dark"][data-scheme] {
+  color-scheme: dark;
+  --paper: #182231;
+  --surface-raised: #1f2c3e;
+  --field-bg: #121d2c;
+  --bg: #101722;
+  --line: #334358;
+  --muted: #a4b3c9;
+  --text: #e0e8f5;
+  --accent: #8badff;
+  --accent-dark: #abc4ff;
+  --accent-soft: #243b62;
+  --red: #ffb1c2;
+  --red-soft: #542a3c;
+  --purple: #d5b5ff;
+  --purple-soft: #44305f;
+  --warning: #edc17b;
+  --warning-soft: #493a24;
+  --positive: #aacbff;
+  --positive-soft: #243b59;
+  --focus-ring: #9ab9ff;
+  --shadow: 0 16px 48px #0005;
+}
+:root[data-theme][data-scheme] :focus-visible { outline-color: var(--focus-ring); }
+:root[data-theme][data-scheme] ::selection { color: var(--text); background: var(--accent-soft); }
+:root[data-theme][data-scheme] .studio-app .sidebar-bottom { padding-top: 22px; padding-bottom: 14px; }
+.appearance-control { position: relative; margin-top: 11px; padding-top: 11px; border-top: 1px solid var(--line); }
+.appearance-trigger { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 42px; border: 0; border-radius: 8px; padding: 9px 12px; background: transparent; color: var(--muted); text-align: left; font-size: 12px; }
+.appearance-trigger:hover, .appearance-trigger[aria-expanded="true"] { background: var(--accent-soft); color: var(--accent); }
+.appearance-trigger small { margin-left: auto; font-size: 10px; white-space: nowrap; }
+.appearance-dismiss { position: fixed; z-index: 60; inset: 0; border: 0; background: transparent; cursor: default; }
+.appearance-popover { position: absolute; z-index: 61; bottom: calc(100% + 8px); left: 0; width: 192px; padding: 6px; background: var(--paper); border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow); }
+.appearance-popover > button { display: flex; align-items: center; gap: 10px; width: 100%; padding: 11px 10px; border: 1px solid transparent; background: transparent; border-radius: 7px; text-align: left; font-size: 12px; color: var(--muted); }
+.appearance-popover > button:hover { background: var(--surface-raised); color: var(--text); }
+.appearance-popover > button.active { color: var(--accent); background: var(--accent-soft); }
+.scheme-preview { display: block; margin-left: auto; width: 25px; height: 18px; border-radius: 4px; border: 1px solid #7a8ca980; background: linear-gradient(90deg,#e4ebf7 32%,#fff 32%); }
+.scheme-preview.dark { background: linear-gradient(90deg,#243b62 32%,#182231 32%); }
+.scheme-preview.system { background: linear-gradient(90deg,#fff 50%,#182231 50%); }
+.sidebar-collapsed .appearance-trigger { justify-content: center; padding: 11px; }
+.sidebar-collapsed .appearance-trigger > span, .sidebar-collapsed .appearance-trigger > small { display: none; }
+.sidebar-collapsed .appearance-popover { left: calc(100% + 10px); bottom: 0; }
+:root[data-theme][data-scheme] .notice > div { min-width: 0; flex: 1; overflow-wrap: anywhere; }
+.notice-repair { display: inline-flex; align-items: center; justify-content: center; gap: 5px; align-self: flex-start; flex-shrink: 0; border: 1px solid currentColor; color: inherit; background: transparent; padding: 5px 8px; min-height: 29px; border-radius: 6px; font-size: 11px; white-space: nowrap; }
+.notice-repair:hover { background: color-mix(in srgb,currentColor 8%,transparent); }
+@media (max-width:740px) {
+  .sidebar-collapsed .appearance-trigger { justify-content: flex-start; padding: 9px 12px; }
+  .sidebar-collapsed .appearance-trigger > span, .sidebar-collapsed .appearance-trigger > small { display: inline; }
+  .sidebar-collapsed .appearance-popover { left: 0; bottom: calc(100% + 8px); }
+  :root[data-theme][data-scheme] .notice { flex-wrap: wrap; }
+  .notice-repair { margin-left: 24px; }
+}
+@media (max-height:720px) {
+  :root[data-theme][data-scheme] .studio-app .sidebar { padding-top: 18px; }
+  :root[data-theme][data-scheme] .studio-app .brand { margin-bottom: 20px; }
+  :root[data-theme][data-scheme] .studio-app .workspace-label { margin-bottom: 18px; }
+  :root[data-theme][data-scheme] .studio-app .sidebar-bottom { padding-top: 12px; }
+  :root[data-theme][data-scheme] .studio-app .sidebar nav .nav-item { padding-block: 10px; }
+}
+/* Existing screens use the same surfaces and legible foregrounds in dark mode. */
+:root[data-theme="dark"][data-scheme] body, :root[data-theme="dark"][data-scheme] .studio-app { background: var(--bg); color: var(--text); }
+:root[data-theme="dark"][data-scheme] .studio-app :is(.sidebar,.surface,.library-card,.stat-card,.metric-card,.detail-panel,.document-content,.document-index,.connection-card,.connection-fields,.connection-editor-heading,.reference-tabs,.reference-index,.reference-content,.job-index,.job-detail,.workflow-editor,.workflow-index,.chapter-workbench-v2,.chapter-recognition-settings,.volume-panel,.source-files) { background: var(--paper); border-color: var(--line); }
+:root[data-theme="dark"][data-scheme] .studio-app .topbar { background: #182231eb; border-color: var(--line); }
+:root[data-theme="dark"][data-scheme] .studio-app :is(.brand,.breadcrumb strong,.studio-heading h1,.page-heading h1,.surface-heading h2,.surface-heading h3,.detail-title h2,.list-title h2,.record-title strong,.stat-card strong,.metric-card strong,.document-detail-header h2,.connection-card-copy strong,.connection-sidebar-heading h2,.job-heading h2) { color: var(--text); }
+:root[data-theme="dark"][data-scheme] .studio-app :is(.breadcrumb,.nav-caption,.workspace-label,.inline-meta,.muted,.list-title>span,.record-title small,.date-cell,.stat-card>div>span,.stat-card small,.metric-card>span,.metric-card small,.field>label,.studio-field>span,.source-file span,.source-file code,.document-item small,.connection-card-copy>span,.connection-card-copy small,.connection-mode small,.connection-presets small,.connection-footer>span,.credential-choices small) { color: var(--muted); }
+:root[data-theme="dark"][data-scheme] .studio-app :is(.workspace-label,.document-subbar,.document-footer,.document-detail-header,.job-destination,.connection-footer,.connection-credentials,.connection-mode>button,.connection-start-options>button,.credential-choices>button,.connection-presets>button,.connection-destination,.index-search,.search-box,.chapter-navigation,.chapter-guide,.chapter-directory-filter,.chapter-cleanup-card-heading,.chapter-reader-bottom,.chapter-reader-header,.document-source-timeline article,.document-format-options,.document-upload-target,.document-file-drop,.document-finish-icon) { background: var(--surface-raised); border-color: var(--line); color: var(--muted); }
+:root[data-theme="dark"][data-scheme] .studio-app :is(.nav-item,.document-item,.workflow-list-item,.job-list-item,.connection-presets>button,.connection-mode>button,.credential-choices>button) { color: var(--muted); }
+:root[data-theme="dark"][data-scheme] .studio-app :is(.nav-item:hover,.document-entry:hover,.document-item:hover,.workflow-list-item:hover,.job-list-item:hover,.connection-card:hover,.connection-presets>button:hover,.connection-start-options>button:hover,.credential-choices>button:hover) { background: var(--surface-raised); color: var(--text); }
+:root[data-theme="dark"][data-scheme] .studio-app :is(.nav-item.active,.document-entry.active,.document-entry.active:hover,.document-item.active,.workflow-list-item.active,.job-list-item.active,.connection-card.active,.connection-mode>button.active,.connection-presets>button.active,.credential-choices>button.active,.document-upload-mode>label.selected) { background: var(--accent-soft); border-color: #486ba1; color: var(--accent); }
+:root[data-theme="dark"][data-scheme] .studio-app :is(.connection-icon,.stat-icon,.document-file-icon,.connection-welcome-icon,.document-step-number,.reference-work-icon,.studio-empty>div:first-child,.source-icon) { background: var(--accent-soft); border-color: var(--line); color: var(--accent); }
+:root[data-theme="dark"][data-scheme] .studio-app :is(.studio-empty h3,.connection-welcome h2,.document-item strong,.workflow-list-item strong,.job-list-item strong,.volume-toolbar h3,.source-file strong,.document-sources h3,.document-source-timeline article strong,.document-upload-target strong,.document-finish h3,.document-file-drop strong,.document-upload-mode strong) { color: var(--text); }
+:root[data-theme="dark"][data-scheme] .studio-app :is(.studio-empty p,.connection-welcome p,.connection-start-options span,.index-empty,.document-sources-heading span,.document-source-timeline article div>span,.document-file-drop>span:last-child,.document-upload-mode small,.document-finish p,.document-upload-target span,.document-heading-copy .helper) { color: var(--muted); }
+:root[data-theme="dark"][data-scheme] .studio-app :is(.button.secondary,.export-option,.radio-card,.volume-panel button:not(.primary),.connection-start-options>button) { background: var(--paper); border-color: var(--line); color: var(--text); }
+:root[data-theme="dark"][data-scheme] .studio-app :is(.button.secondary:hover:not(:disabled),.export-option:hover,.volume-panel button:not(.primary):hover) { background: var(--accent-soft); border-color: #5378af; color: var(--accent); }
+:root[data-theme="dark"][data-scheme] .studio-app :is(.button.primary,.volume-panel button.primary) { background: #3869d9; color: #fff; border-color: #527fe1; }
+:root[data-theme="dark"][data-scheme] .studio-app :is(.button.primary:hover:not(:disabled),.volume-panel button.primary:hover:not(:disabled)) { background: #4678e9; color: #fff; border-color: #7297e9; }
+:root[data-theme="dark"][data-scheme] .studio-app :is(.button.danger,.button.destructive,.icon-button.danger,.danger-text,.connection-clear) { background: var(--red-soft); border-color: #845064; color: var(--red); }
+:root[data-theme="dark"][data-scheme] .studio-app :is(.text-button,.connection-selected,.connection-ready) { color: var(--accent); }
+:root[data-theme="dark"][data-scheme] .studio-app .text-button:hover:not(:disabled) { color: #bfd0ff; }
+:root[data-theme="dark"][data-scheme] .studio-app .icon-button { color: var(--muted); }
+:root[data-theme="dark"][data-scheme] .studio-app .icon-button:hover:not(:disabled) { color: var(--accent); background: var(--accent-soft); }
+:root[data-theme="dark"][data-scheme] .studio-app input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not(.chapter-title-input),
+:root[data-theme="dark"][data-scheme] .studio-app select,
+:root[data-theme="dark"][data-scheme] .studio-app textarea:not(.chapter-input-text) { color: var(--text); border-color: var(--line); background: var(--field-bg); }
+:root[data-theme="dark"][data-scheme] .studio-app :is(.search-box input,.index-search input,.chapter-search input) { background: transparent; }
+:root[data-theme="dark"][data-scheme] .studio-app :is(input,textarea)::placeholder { color: #8294ae; }
+:root[data-theme="dark"][data-scheme] .studio-app :is(.studio-field>span,.connection-label,.connection-label small,.connection-details summary,.connection-details summary>small,.connection-credentials h3,.connection-mode small,.connection-hint,.volume-head,.volume-model label,.volume-toolbar span,.volume-methods>summary,.volume-feedback) { color: var(--muted); }
+:root[data-theme="dark"][data-scheme] .studio-app :is(input,select,textarea):focus { border-color: var(--focus-ring); box-shadow: 0 0 0 3px #719cff20; }
+:root[data-theme="dark"][data-scheme] .studio-app :is(.surface-heading,.list-toolbar,.connection-editor-heading,.connection-footer,.connection-details,.document-detail-header,.document-subbar,.document-footer,.document-structure>.volume-panel,.volume-methods,.volume-row,.source-file,.chapter-reader-header,.chapter-reader-bottom) { border-color: var(--line); }
+:root[data-theme="dark"][data-scheme] .studio-app :is(.page-tabs,.reference-tabs) { border-color: var(--line); }
+:root[data-theme="dark"][data-scheme] .studio-app :is(.page-tabs button,.reference-tabs button,.document-review-tabs button) { color: var(--muted); }
+:root[data-theme="dark"][data-scheme] .studio-app :is(.page-tabs button.active,.reference-tabs button.active) { color: var(--accent); border-bottom-color: var(--accent); }
+:root[data-theme="dark"][data-scheme] .studio-app :is(.segmented,.reference-mode-switch,.ref-segment-control,.chapter-directory-filter) { background: var(--field-bg); border-color: var(--line); }
+:root[data-theme="dark"][data-scheme] .studio-app :is(.segmented button,.reference-mode-switch>button,.ref-segment-control>button,.chapter-directory-filter>button) { color: var(--muted); }
+:root[data-theme="dark"][data-scheme] .studio-app :is(.segmented button.active,.reference-mode-switch>button.active,.ref-segment-control>button.active,.chapter-directory-filter>button.active,.document-review-tabs button.active) { background: var(--accent-soft); border-color: #486ba1; color: var(--accent); }
+:root[data-theme="dark"][data-scheme] .studio-app :is(.tag,.ref-tag,.ref-chapter-tag,.status-pill,.document-source-format,.document-history-list strong>span,.page-tabs button>span,.connection-sidebar-heading h2>span) { color: var(--accent); background: var(--accent-soft); border-color: #46618b; }
+:root[data-theme="dark"][data-scheme] .studio-app :is(.notice.info,.notice.success,.status-running,.status-approved,.status-completed) { color: var(--positive); background: var(--positive-soft); border-color: #435d82; }
+:root[data-theme="dark"][data-scheme] .studio-app :is(.notice.error,.status-failed,.document-duplicate-notice) { color: var(--red); background: var(--red-soft); border-color: #805163; }
+:root[data-theme="dark"][data-scheme] .studio-app :is(.notice.warning,.status-paused,.status-needs_review,.volume-unsaved) { color: var(--warning); background: var(--warning-soft); border-color: #7c6641; }
+:root[data-theme="dark"][data-scheme] .studio-app :is(.indeterminate,.determinate,.ingestion-meter,.ref-metric-track) { background: #304463; }
+:root[data-theme="dark"][data-scheme] .studio-app :is(.indeterminate>i,.determinate>i,.ingestion-meter>i,.ref-metric-track>i) { background: #7ba3ff; }
+:root[data-theme="dark"][data-scheme] .studio-app :is(.busy-state,.task-progress>div:first-child,.task-progress strong,.ingestion-steps li) { color: var(--muted); }
+:root[data-theme="dark"][data-scheme] .studio-app .busy-state.busy-floating { background: #182231f5; border-color: var(--line); box-shadow: var(--shadow); }
+:root[data-theme="dark"][data-scheme] .studio-app :is(table,thead,tbody,tr,th,td) { border-color: var(--line); }
+:root[data-theme="dark"][data-scheme] .studio-app :is(th,.record-table th,.preview-table th) { background: var(--surface-raised); color: var(--muted); }
+:root[data-theme="dark"][data-scheme] .studio-app :is(td,.record-table td,.preview-table td,.usage-scroll td) { background: transparent; color: var(--text); }
+:root[data-theme="dark"][data-scheme] .studio-app :is(.record-table tr:hover,.preview-table tr:hover,.usage-scroll tr:hover) { background: var(--surface-raised); }
+:root[data-theme="dark"][data-scheme] .studio-app :is(.detail-section,.detail-block,.field-value,.detail-value,.relation-card,.linked-item,.entity-card,.field-group,.export-choice,.radio-card,.dropzone,.upload-panel,.diagnostic-card,.evidence-card,.skill-card,.workflow-card,.run-log-item) { background: var(--paper); border-color: var(--line); color: var(--text); }
+:root[data-theme="dark"][data-scheme] .studio-app :is(.detail-section h3,.detail-block h3,.detail-panel h2,.detail-panel h3,.detail-panel strong,.field-value,.detail-value,.relation-card strong,.linked-item strong,.entity-card strong,.diagnostic-card strong,.evidence-card strong,.skill-card strong,.workflow-card strong) { color: var(--text); }
+:root[data-theme="dark"][data-scheme] .studio-app :is(.detail-panel p,.detail-panel small,.detail-panel label,.detail-panel dt,.diagnostic-card p,.evidence-card p,.skill-card p,.workflow-card p,.run-log-item small) { color: var(--muted); }
+:root[data-theme="dark"][data-scheme] .modal-backdrop { background: #050a14a6; }
+:root[data-theme="dark"][data-scheme] :is(.modal,.modal-header,.modal-body) { background: var(--paper); border-color: var(--line); color: var(--text); }
+:root[data-theme="dark"][data-scheme] :is(.modal-header h2,.modal-body h3,.modal-body strong,.export-option strong,.radio-card strong,.dropzone strong) { color: var(--text); }
+:root[data-theme="dark"][data-scheme] :is(.modal-footer,.modal-actions) { background: var(--surface-raised); border-color: var(--line); }
+:root[data-theme="dark"][data-scheme] :is(.modal-body p,.modal-body small,.export-option small,.radio-card small,.dropzone>span:last-child) { color: var(--muted); }
+/* Native inputs carry glyphs; the mirrored layer only supplies marker backgrounds. */
+:root[data-theme="dark"][data-scheme] .studio-app :is(.chapter-reader-scroll,.chapter-input-background,.chapter-title-background,.chapter-reading-pane,.chapter-cleanup-card) { background: var(--paper); color: var(--text); border-color: var(--line); }
+:root[data-theme="dark"][data-scheme] .studio-app :is(.chapter-input-text,.chapter-title-input) { background: transparent; color: var(--text); -webkit-text-fill-color: currentColor; caret-color: var(--text); }
+:root[data-theme="dark"][data-scheme] .studio-app :is(.chapter-workbench-title>strong,.chapter-navigation-copy>strong,.chapter-cleanup-card-heading>strong,.chapter-reader-header h3,.chapter-settings-heading h3) { color: var(--text); }
+:root[data-theme="dark"][data-scheme] .studio-app :is(.chapter-workbench-title>span,.chapter-guide,.chapter-guide>small,.chapter-navigation-copy>small,.chapter-navigation-top>strong,.chapter-reader-overline,.chapter-save-state,.chapter-save-state>small,.chapter-cleanup-intro>span,.chapter-cleanup-pagination,.chapter-cleanup-card-heading>span,.chapter-cleanup-snippet,.chapter-findings-summary) { color: var(--muted); }
+:root[data-theme="dark"][data-scheme] .studio-app .chapter-navigation-item:hover { background: var(--surface-raised); }
+:root[data-theme="dark"][data-scheme] .studio-app .chapter-navigation-item.active { background: var(--accent-soft); box-shadow: inset 3px 0 var(--accent); }
+:root[data-theme="dark"][data-scheme] .studio-app :is(.chapter-cleanup-snippet mark.removing,.chapter-cleanup-snippet mark:not(.diagnostic),.chapter-navigation-item.has-removal) { background: var(--red-soft); color: var(--red); }
+:root[data-theme="dark"][data-scheme] .studio-app :is(.chapter-cleanup-snippet mark.diagnostic,.chapter-navigation-item.has-diagnostic) { background: var(--purple-soft); color: var(--purple); }
+:root[data-theme="dark"][data-scheme] .studio-app .chapter-input-mark.keeping { background: var(--surface-raised); color: transparent; }
+:root[data-theme="dark"][data-scheme] .studio-app :is(.chapter-guide-swatch.removing,.chapter-issue.aside,.chapter-issue.noise) { color: var(--red); background: var(--red-soft); border-color: #996275; }
+:root[data-theme="dark"][data-scheme] .studio-app :is(.chapter-guide-swatch.diagnostic,.chapter-issue.glyph,.chapter-manual-fix) { color: var(--purple); background: var(--purple-soft); border-color: #9a76c3; }
+:root[data-theme="dark"][data-scheme] .studio-app :is(.chapter-cleanup-card.checked,.chapter-menu-items,.chapter-findings-more,.chapter-cleanup-card-heading,.chapter-current-issues) { background: var(--surface-raised); border-color: var(--line); }
+:root[data-theme="dark"][data-scheme] .studio-app :is(.chapter-cleanup-fragment,.chapter-cleanup-snippet,.chapter-reader-bottom,.chapter-reader-header,.chapter-guide,.chapter-findings-list) { border-color: var(--line); }
+:root[data-theme="dark"][data-scheme] .studio-app :is(.chapter-unsaved-label,.chapter-settings-blocked) { color: var(--warning); }
+/* Analysis cards and charts retain color-coded evidence in both schemes. */
+:root[data-theme="dark"][data-scheme] .studio-app :is(.ref-entity-card,.ref-event-body,.ref-feature-panel,.ref-logline,.ref-fact-editor,.ref-event-edit,.ref-entity-card.editing,.ref-empty,.ref-outline-tree>section>.ref-mini-heading,.ref-chapter-feature,.ref-rhythm-detail,.ref-result-card,.ref-audit-card,.ref-table,.reference-workspace) { background: var(--paper); border-color: var(--line); }
+:root[data-theme="dark"][data-scheme] .studio-app :is(.ref-section-heading h3,.ref-mini-heading h3,.ref-mini-heading strong,.reference-work-heading h2,.reference-work-item strong,.ref-entity-title strong,.ref-event-body>header>strong,.ref-collection-tools>h3,.ref-chapter-feature-title>strong,.ref-metric>strong) { color: var(--text); }
+:root[data-theme="dark"][data-scheme] .studio-app :is(.ref-entity-intro,.ref-entity-meta,.ref-fact-view p,.ref-fact-view h4,.ref-event-body>p,.ref-logline p,.ref-opening,.ref-rhythm-stats,.ref-pacing label,.ref-punctuation,.ref-metric>span,.ref-metric>strong>small,.ref-signals p,.ref-signals small,.ref-signals strong,.ref-group-title,.ref-event-anchor,.ref-chapter-feature-title,.ref-chapter-feature>p,.ref-rhythm-chart>button>small,.reference-work-item small,.reference-work-heading .inline-meta) { color: var(--muted); }
+:root[data-theme="dark"][data-scheme] .studio-app :is(.ref-pacing b,.ref-punctuation b,.ref-rhythm-stats b,.ref-signals>summary,.ref-entity-title,.reference-work-item.active strong,.ref-group-title>span) { color: var(--accent); }
+:root[data-theme="dark"][data-scheme] .studio-app :is(.reference-work-item.active,.reference-work-item:hover,.ref-fact-view blockquote,.ref-signals p.ref-signal-detail,.reference-tabs button>span,.ref-group-title>span) { background: var(--accent-soft); border-color: var(--line); color: var(--muted); }
+:root[data-theme="dark"][data-scheme] .studio-app .ref-rhythm-chart { background: repeating-linear-gradient(to top,transparent 0 39px,#334358 39px 40px); border-color: var(--line); }
+:root[data-theme="dark"][data-scheme] .studio-app .ref-rhythm-chart>button>i { background: #7197d4; }
+:root[data-theme="dark"][data-scheme] .studio-app .ref-rhythm-chart>button:hover>i { background: #a7c5ff; }
+:root[data-theme="dark"][data-scheme] .studio-app .ref-event-anchor::after { background: var(--line); }
+:root[data-theme="dark"][data-scheme] .studio-app .ref-event-anchor>i { background: var(--accent); border-color: var(--paper); }
+:root[data-theme="dark"][data-scheme] .studio-app :is(.react-flow,.react-flow__pane,.react-flow__background) { background: var(--bg); }
+:root[data-theme="dark"][data-scheme] .studio-app .react-flow__node { color: var(--text); background: var(--paper); border-color: var(--line); }
+:root[data-theme="dark"][data-scheme] .studio-app .react-flow__controls-button { color: var(--text); background: var(--surface-raised); border-color: var(--line); fill: currentColor; }
+:root[data-theme="dark"][data-scheme] .studio-app :is(.document-list,.chapter-navigation-list,.text-reader,.job-index,.run-log-list,.modal-body,.reference-index) { scrollbar-color: #536882 transparent; }
+
+:root[data-theme="dark"][data-scheme] .studio-app :is(.chapter-workbench-toolbar,.chapter-search,.chapter-counter,.list-title>span,.pagination,.table-footer,.record-table-footer) { background: var(--surface-raised); border-color: var(--line); color: var(--muted); }
+:root[data-theme="dark"][data-scheme] .studio-app :is(.pagination,.page-number,.pagination label,.empty-state p,.empty-state h3,.chapter-findings-summary label,.connection-fields .studio-field>span>small) { color: var(--muted); }
+:root[data-theme="dark"][data-scheme] .studio-app :is(.empty-icon,.empty-icon>span) { background: var(--accent-soft); color: var(--accent); border-color: var(--line); }
+:root[data-theme="dark"][data-scheme] .studio-app :is(.chapter-input-mark.removing,.chapter-input-mark.diagnostic) { color: transparent; }
+:root[data-theme="dark"][data-scheme] .studio-app .chapter-live-editor { background: var(--paper); }
+:root[data-theme="dark"][data-scheme] .studio-app :is(.backup-card h2,.backup-section h2,.backup-grid h2) { color: var(--text); }
+:root[data-theme="dark"][data-scheme] .studio-app :is(.backup-card p,.backup-section p,.backup-grid p) { color: var(--muted); }
+/* Secondary text stays readable at compact workspace sizes. */
+:root[data-theme="light"][data-scheme] .studio-app :is(.breadcrumb,.document-index>.surface-heading>span,.document-index .surface-heading>span,.document-item small,.document-heading-copy .helper,.document-review-tabs button:not(.active),.document-step-number,.chapter-workbench-title>span,.chapter-guide,.chapter-guide>small,.chapter-navigation-top>strong,.chapter-directory-filter>button:not(.active),.chapter-navigation-copy>small,.chapter-navigation-item.placeholder .chapter-navigation-copy>strong,.chapter-reader-overline,.chapter-save-state,.chapter-save-state>small,.chapter-cleanup-intro>span,.chapter-cleanup-pagination,.chapter-cleanup-card-heading>span,.chapter-findings-summary,.chapter-cleanup-snippet,.chapter-cleanup-snippet p,.chapter-cleanup-snippet>small,.chapter-cleanup-snippet em,.connection-mode small,.connection-presets>button>small,.credential-choices small,.connection-start-options span) { color: var(--muted); }
+:root[data-theme="light"][data-scheme] .studio-app .document-review-tabs button.active .document-step-number { background: var(--accent); color: #fff; }
+:root[data-theme="light"][data-scheme] .studio-app .chapter-counter { background: var(--accent-soft); color: #2954ac; }
+:root[data-theme="dark"][data-scheme] .studio-app :is(.workflow-canvas,.flow-node,.flow-extract,.skill-editor,.skill-index,.job-workspace,.jobs-index,.job-progress-section,.extraction-card,.extraction-number,.result-tabs,.review-footer,.run-log,.summary-result,.summary-sources,.reference-work-heading,.ref-fact-view blockquote) { background: var(--paper); border-color: var(--line); color: var(--text); }
+:root[data-theme="dark"][data-scheme] .studio-app :is(.workflow-toolbar,.workflow-configuration,.flow-output-tags,.run-log .surface-heading,.log-entry,.result-tabs,.review-footer,.extraction-card) { border-color: var(--line); }
+:root[data-theme="dark"][data-scheme] .studio-app :is(.workflow-toolbar h2,.flow-node strong,.configuration-title,.configuration-title h3,.log-entry strong,.review-counts strong,.extraction-number) { color: var(--text); }
+:root[data-theme="dark"][data-scheme] .studio-app :is(.workflow-toolbar>div>span,.flow-node small,.flow-node-icon,.canvas-caption,.output-toggles label,.workflow-list-item>span,.log-entry p,.log-entry code,.coverage-line,.review-footer>span,.evidence-meta,.evidence-context,.reference-layout p,.reference-layout small,.reference-layout label,.reference-layout summary,.reference-layout span) { color: var(--muted); }
+:root[data-theme="dark"][data-scheme] .studio-app :is(.flow-output-tags>span,.source-chip,.review-counts>span,.approved-banner,.evidence-quote,.feature-icon,.feature-icon.warm) { color: var(--accent); background: var(--accent-soft); border-color: var(--line); }
+:root[data-theme="dark"][data-scheme] .studio-app .output-toggles input { background: #52627b; }
+:root[data-theme="dark"][data-scheme] .studio-app .output-toggles input:checked { background: #527fe1; }
+:root[data-theme="dark"][data-scheme] .studio-app .result-tabs button { color: var(--muted); }
+:root[data-theme="dark"][data-scheme] .studio-app .result-tabs button.active { color: var(--accent); border-color: var(--accent); }
+:root[data-theme="dark"][data-scheme] .studio-app :is(.detail-heading,.detail-tabs,.detail-footer,.search-summary,.exchange-format-guide>div,.exchange-checklist li,.exchange-guidance,.exchange-export-option,.ref-pacing-segments>div,.ref-extract-runbar,.ref-model-target,.ref-chunk-index,.ref-prompt-panel,.ref-section-review>header,.ref-section-review.committed>header,.ref-chunk-style-list>details>summary,.ref-transform-preview,.ref-source-summary>pre) { background: var(--surface-raised); border-color: var(--line); color: var(--muted); }
+:root[data-theme="dark"][data-scheme] .studio-app :is(.exchange-format-guide .recommended,.exchange-export-option.selected,.exchange-format-guide strong span,.exchange-format-text .exchange-recommended,.relation-type,.ref-chunk-item.active,.ref-type-picker>button.active,.ref-model-target>span,.ref-section-review-title>span) { background: var(--accent-soft); color: var(--accent); border-color: #486ba1; }
+:root[data-theme="dark"][data-scheme] .studio-app :is(.exchange-checklist .missing,.exchange-checklist .missing em,.exchange-checklist .missing>svg) { background: var(--red-soft); color: var(--red); border-color: #805163; }
+:root[data-theme="dark"][data-scheme] .studio-app :is(.exchange-format-guide small,.exchange-format-text>span,.exchange-format-text em,.exchange-checklist small,.exchange-checklist em,.exchange-files li>small,.exchange-intro,.exchange-compatibility,.exchange-guidance p,.exchange-requirements,.exchange-requirements li>span,.exchange-requirements p,.relation-description,.detail-footer small,.ref-pacing-segments strong,.ref-chunk-item strong,.ref-chunk-detail-heading h4,.ref-preview-heading>h4,.ref-no-candidate,.ref-inline-note,.ref-history-list strong) { color: var(--muted); }
+:root[data-theme="dark"][data-scheme] .studio-app :is(.exchange-format-guide svg,.exchange-checklist li>svg,.exchange-export-option>svg,.exchange-export-option .option-icon,.exchange-requirements summary) { color: var(--accent); }
+:root[data-theme="dark"][data-scheme] .studio-app :is(.exchange-export-option:hover,.ref-chunk-item:hover,.ref-type-picker>button) { background: var(--paper); color: var(--text); border-color: var(--line); }
+:root[data-theme="dark"][data-scheme] .studio-app .ref-prompt-panel textarea { background: var(--field-bg) !important; color: var(--text) !important; }
+:root[data-theme="dark"][data-scheme] .studio-app .record-table .date-cell { color: var(--muted) !important; }
+:root[data-theme="dark"][data-scheme] .studio-app :is(.ref-extract-empty>h3,.ref-preprocess-entry h3,.ref-files-panel h3) { color: var(--text); }

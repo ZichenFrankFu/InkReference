@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .database import (
-    TABLES, WORK_RELATION_FIELD, DataError, DataStore, parse_work_relations,
+    TABLES, LEGACY_TABLES, SCHEMA4_COLUMNS, SCHEMA5_COLUMNS, SCHEMA6_COLUMNS, modern_values, WORK_RELATION_FIELD, DataError, DataStore, parse_work_relations,
     record_id, require_table, validate_values,
 )
 
@@ -67,9 +67,9 @@ def parse_files(files: list[tuple[str, bytes]]) -> ImportBatch:
                 raise DataError(422, "文件为空或缺少表头")
             if len(header) != len(set(header)):
                 raise DataError(422, "CSV 存在重复表头")
-            matches = [table for table, spec in TABLES.items() if set(header) == set(spec["columns"])]
+            matches = [table for table in TABLES if set(header) in (set(TABLES[table]["columns"]),set(SCHEMA4_COLUMNS[table]),set(SCHEMA5_COLUMNS[table]),set(SCHEMA6_COLUMNS[table]),set(LEGACY_TABLES[table]["columns"]))]
             if len(matches) != 1:
-                raise DataError(422, "表头无法识别：必须包含某张 v8 表的全部字段，且不能含未知字段")
+                raise DataError(422, "表头无法识别：必须包含作品、角色或桥段表的全部字段，且不能含未知字段")
             table = matches[0]
             rows = []
             for row in reader:
@@ -116,7 +116,11 @@ def _apply_import(store: DataStore, connection: sqlite3.Connection, batch: Impor
             if existing is not None:
                 if policy == "error":
                     raise DataError(409, f"ID 已存在：{identifier}；请选择跳过或显式更新")
-                if policy == "skip" or store._render(connection, source.table, existing)["values"] == values:
+                current_values=store._render(connection, source.table, existing)["values"]
+                if source.table=="cliches" and "cliché评分" in current_values and "cliché评分" in values:
+                    same={k:v for k,v in current_values.items() if k!="cliché评分"}=={k:v for k,v in values.items() if k!="cliché评分"}
+                else:same=current_values==values
+                if policy == "skip" or same:
                     counts["skipped"] += 1
                     continue
                 action = "updated"
@@ -125,6 +129,19 @@ def _apply_import(store: DataStore, connection: sqlite3.Connection, batch: Impor
             counts[action] += 1
             selected[source.table][identifier] = values
             actions[(source.table, identifier)] = action
+
+    if all(modern_values(table,values) for table,rows in selected.items() for values in rows.values()):
+        for table in ("works","cliches","characters"):
+            for identifier,values in selected[table].items():
+                if actions[(table,identifier)] == "imported":
+                    store._insert_raw(connection,table,values)
+                else:
+                    revision = store._row(connection,table,identifier)["revision"]
+                    store._update_raw(connection,table,identifier,values,revision)
+        # A complete batch supplies both views. Validate before materialization;
+        # don't silently union conflicting claims from different file versions.
+        store._rebuild_library_links(connection)
+        return counts
 
     # Parents and cliches exist before relation validation, independent of file order.
     for table in ("works", "cliches"):
@@ -168,6 +185,7 @@ def preview_import(store: DataStore, batch: ImportBatch) -> dict[str, Any]:
             tables.append({"table": item.table, "filename": item.filename, "rows": len(item.rows), "new": len(item.rows) - existing, "existing": existing})
         simulation = sqlite3.connect(":memory:")
         simulation.row_factory = sqlite3.Row
+        store.configure_functions(simulation)
         simulation.execute("PRAGMA foreign_keys = ON")
         source.backup(simulation)
     stats = initial_stats
@@ -209,7 +227,8 @@ def export_table(store: DataStore, table: str) -> bytes:
     with store.connect() as connection:
         connection.execute("BEGIN")
         rows = [item["values"] for item in store._all(connection, table)]
-    return _csv_bytes(TABLES[table]["columns"], rows)
+    columns = TABLES[table]["columns"] if not rows or modern_values(table,rows[0]) else LEGACY_TABLES[table]["columns"]
+    return _csv_bytes(columns, rows)
 
 
 def export_zip(store: DataStore, mode: str = "compatible") -> bytes:
@@ -221,7 +240,7 @@ def export_zip(store: DataStore, mode: str = "compatible") -> bytes:
         for table, spec in TABLES.items():
             records = store._all(connection, table)
             rows = [item["values"] for item in records]
-            columns = list(spec["columns"])
+            columns = list(spec["columns"] if not rows or modern_values(table,rows[0]) else LEGACY_TABLES[table]["columns"])
             if mode == "full":
                 columns += ["_record_id", "_revision"]
                 rows = [{**item["values"], "_record_id": item["id"], "_revision": item["revision"]} for item in records]
@@ -230,6 +249,35 @@ def export_zip(store: DataStore, mode: str = "compatible") -> bytes:
             columns = ["work_id", "cliche_id", "detail", "work_position", "cliche_position"]
             rows = [dict(row) for row in connection.execute("SELECT * FROM work_cliches ORDER BY work_id,work_position,cliche_id")]
             archive.writestr("work_cliches.csv", _csv_bytes(columns, rows))
-            manifest = {"format": "InkReference full table export", "format_version": 1, "schema_version": 2, "encoding": "UTF-8 BOM", "tables": [*TABLES, "work_cliches"], "stats": store._stats(connection), "restore": "Use compatible export for v8 CSV import; full export retains relation details and record revisions. This is a data export, not a full project backup."}
+            columns = ["id", "source_table", "source_id", "target_table", "target_id", "relation_type", "description", "metadata_json", "revision"]
+            rows = [dict(row) for row in connection.execute("SELECT * FROM material_relations ORDER BY id")]
+            archive.writestr("material_relations.csv", _csv_bytes(columns, rows))
+            manifest = {"format": "InkReference full table export", "format_version": 1, "schema_version": 3, "encoding": "UTF-8 BOM", "tables": [*TABLES, "work_cliches", "material_relations"], "stats": store._stats(connection), "restore": "Use compatible export for v8 CSV import; full export retains relation details and record revisions. This is a data export, not a full project backup."}
             archive.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8"))
+    return output.getvalue()
+
+
+def export_legacy_table(store: DataStore, table: str) -> bytes:
+    """Explicit v8 view: export archived legacy rows without inventing old fields."""
+    require_table(table)
+    with store.connect() as connection:
+        connection.execute("BEGIN")
+        rows = []
+        for record in connection.execute(f"SELECT id,values_json FROM {table} ORDER BY sort_order,id"):
+            values = json.loads(record["values_json"])
+            if modern_values(table,values):
+                archive = connection.execute("SELECT values_json FROM legacy_values WHERE table_key=? AND record_id=?",(table,record["id"])).fetchone()
+                if archive is None:
+                    raise DataError(422,f"{TABLES[table]['label']} {record['id']} 没有旧版字段归档；请使用当前三表导出，不能无损生成旧版 v8")
+                values = json.loads(archive[0])
+            rows.append(values)
+    return _csv_bytes(LEGACY_TABLES[table]["columns"],rows)
+
+
+def export_legacy_zip(store: DataStore) -> bytes:
+    output = io.BytesIO()
+    names = {"works":"works_library_v8.csv","characters":"character_database_v8.csv","cliches":"cliche_database_v8.csv"}
+    with zipfile.ZipFile(output,"w",zipfile.ZIP_DEFLATED) as archive:
+        for table in TABLES:
+            archive.writestr(names[table],export_legacy_table(store,table))
     return output.getvalue()

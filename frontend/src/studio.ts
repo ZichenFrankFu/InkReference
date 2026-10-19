@@ -34,6 +34,8 @@ export type Skill = {
   prompt: string;
   output_schema: Record<string, unknown>;
   builtin?: boolean;
+  contract_version?: number;
+  stage?: "plot" | "characters" | "settings" | "language" | "all";
 };
 export type Workflow = {
   id: string;
@@ -49,6 +51,12 @@ export type Workflow = {
   max_output_tokens: number;
   budget_tokens: number;
   builtin?: boolean;
+  fixed_pipeline?: boolean;
+  reuse_candidates?: boolean;
+  stage_prompts?: Partial<Record<"plot" | "characters" | "settings" | "language", string>>;
+  stage_skills?: Partial<Record<"plot" | "characters" | "settings" | "language", { id: string; version: string }>>;
+  stage_models?: Partial<Record<"plot" | "characters" | "settings" | "language", string>>;
+  stage_settings?: Partial<Record<"plot" | "characters" | "settings" | "language", { max_output_tokens?: number; budget_tokens?: number }>>;
 };
 export type DocumentMeta = {
   id: string;
@@ -61,6 +69,15 @@ export type DocumentMeta = {
   source_characters: number;
   current_characters?: number;
   work_id?: string;
+  work_category?: string;
+  catalog_author?: string;
+  book_title?: string;
+  author?: string;
+  earliest_update_at?: string | null;
+  book_type?: string;
+  metadata_revision?: number;
+  storage_folder?: string;
+  storage_state?: string;
   versions?: { id: string; version_number: number; created_at: string }[];
 };
 export type Segment = {
@@ -110,6 +127,8 @@ export type Run = {
   profile_id: string;
   status: string;
   stage: string;
+  current_stage?: string;
+  stages?: { stage: string; completed: number; total: number; status: string }[];
   completed: number;
   total: number;
   progress: number;
@@ -139,6 +158,15 @@ export type Run = {
   snapshots?: unknown;
   created_at?: string;
 };
+/** Metadata returned by /jobs?summary=true; deliberately excludes source/candidates/results. */
+export type RunSummary = Pick<Run, "id" | "document_id" | "version_id" | "workflow_id" | "workflow_version" | "profile_id" | "status" | "stage" | "completed" | "total" | "progress" | "revision" | "error" | "created_at" | "current_stage"> & {
+  updated_at?: string;
+  stages?: { id?: string; stage: string; order?: number; stage_order?: number; completed: number; total: number; progress?: number; status?: string }[];
+};
+export function summarizeRun(run: Run): RunSummary {
+  const { id, document_id, version_id, workflow_id, workflow_version, profile_id, status, stage, completed, total, progress, revision, error, created_at, current_stage, stages } = run;
+  return { id, document_id, version_id, workflow_id, workflow_version, profile_id, status, stage, completed, total, progress, revision, error, created_at, current_stage, stages };
+}
 export type List<T> = { items: T[] };
 export function describe(value: unknown): string {
   return typeof value === "string" ? value : JSON.stringify(value, null, 2);

@@ -2,8 +2,11 @@
 from __future__ import annotations
 
 import threading
+import sqlite3
+from contextlib import closing
+import re
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 from urllib.parse import quote
 
 from fastapi import APIRouter, File, Form, Query, UploadFile
@@ -18,7 +21,7 @@ from .models import ModelService
 from .projects import MAX_BACKUP_BYTES, ProjectStore
 from .skills import SkillStore
 from .workflow_definitions import WorkflowStore
-from .volumes import VolumeStore, detect_volumes, parse_volume_paste
+from .volumes import VolumeStore
 from .reference_analysis import ReferenceAnalysisStore
 
 
@@ -29,17 +32,54 @@ class NewVersion(BaseModel):
     manual_text: str | None = None
 
 
+class ChapterRange(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    start_chapter: StrictInt = Field(ge=1)
+    end_chapter: StrictInt = Field(ge=1)
+
+
 class NewRun(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     document_id: str = Field(min_length=1, max_length=200)
     version_id: str = Field(min_length=1, max_length=200)
     profile_id: str | None = Field(default=None, min_length=1, max_length=100)
     workflow_id: str = "default"
-    workflow_version: str = "1.1.0"
+    workflow_version: str = "4.0.0"
     start: bool = True
     manual: bool = False
+    interaction_mode: Literal["automatic", "semi", "manual"] | None = None
     remote_consent: bool = False
     expected_model_fingerprint: str | None = Field(default=None, min_length=64, max_length=64)
+    expected_stage_fingerprints: dict[str, str] | None = None
+    chapter_ranges: list[ChapterRange] | None = Field(default=None, max_length=100)
+    reuse_existing: bool = True
+
+
+class ComparisonVariant(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    label: str = Field(min_length=1, max_length=40)
+    profile_id: str = Field(min_length=1, max_length=100)
+    remote_consent: bool = False
+    expected_model_fingerprint: str | None = Field(default=None, min_length=64, max_length=64)
+    expected_stage_fingerprints: dict[str, str] | None = None
+
+
+class ComparisonCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    document_id: str = Field(min_length=1, max_length=200)
+    version_id: str | None = Field(default=None, min_length=1, max_length=200)
+    workflow_id: str = "default"
+    workflow_version: str = "4.0.0"
+    chapter_ranges: list[ChapterRange] | None = Field(default=None, max_length=100)
+    variants: list[ComparisonVariant] = Field(min_length=2, max_length=4)
+    start: bool = False
+    reuse_existing: bool = True
+
+
+class ComparisonSelection(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    run_id: str = Field(min_length=1, max_length=200)
+    expected_revision: StrictInt = Field(ge=1)
 
 
 class ConnectionConsent(BaseModel):
@@ -61,6 +101,18 @@ class ChapterEdit(BaseModel):
     base_version_id: str = Field(min_length=1, max_length=200)
     chapter_id: str = Field(min_length=1, max_length=200)
     body_text: str
+    title: str | None = Field(default=None, max_length=500)
+
+
+class ChapterSlice(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    base_version_id: str = Field(min_length=1, max_length=200)
+    chapter_id: str = Field(min_length=1, max_length=200)
+    start: StrictInt = Field(ge=0)
+    end: StrictInt = Field(ge=0)
+    text: str
+    expected_text: str
+    title: str | None = Field(default=None, max_length=500)
 
 
 class ChapterAction(BaseModel):
@@ -78,17 +130,35 @@ class ChapterAction(BaseModel):
     author_keywords: list[str] | None = None
     garble_rules: list[dict[str, Any]] | None = None
     selections: list[dict[str, Any]] = Field(default_factory=list)
+    conflict_policy: Literal["keep_old", "use_new"] | None = None
+    preview_token: str | None = Field(default=None, min_length=1, max_length=200)
+    repair_duplicates: bool = False
 
 
 class VolumePlan(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     expected_revision: StrictInt = Field(ge=0)
     volumes: list[dict[str, Any]]
+    coordinate_version: Literal[1, 2] = 1
+    prepared_id: str | None = Field(default=None, min_length=1, max_length=200)
+
+
+class VolumeResearchRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    profile_id: str = Field(min_length=1, max_length=100)
+    remote_consent: bool = False
+    expected_model_fingerprint: str | None = Field(default=None, min_length=64, max_length=64)
+    expected_search_fingerprint: str = Field(min_length=64, max_length=64)
+    base_revision: StrictInt | None = Field(default=None, ge=0)
 
 
 class PastedContent(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     content: str = Field(max_length=2_000_000)
+
+
+class VolumePaste(PastedContent):
+    contract_version: Literal[1, 2] = 1
 
 
 class ReferenceRevision(BaseModel):
@@ -98,6 +168,20 @@ class ReferenceRevision(BaseModel):
 
 class ReferenceSection(ReferenceRevision):
     data: Any
+    prepared_id: str | None = Field(default=None, min_length=1, max_length=200)
+
+
+class ReferencePreview(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    sections: dict[str, Any] = Field(max_length=20)
+    source_version_id: str | None = Field(default=None, min_length=1, max_length=200)
+
+
+class BookMetadataUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    values: dict[str, Any]
+    expected_version_id: str = Field(min_length=1, max_length=200)
+    expected_revision: StrictInt | None = Field(default=None, ge=0)
 
 
 class ReferenceConfiguration(ReferenceRevision):
@@ -111,10 +195,16 @@ class NewCollection(BaseModel):
 
 class ChunkPaste(Revision):
     content: str = Field(max_length=2_000_000)
+    prepared_id: str | None = Field(default=None, min_length=1, max_length=200)
 
 
 class ChunkCommit(ReferenceRevision):
     sections: list[str]
+    comparison_id: str | None = Field(default=None, min_length=1, max_length=100)
+
+
+class ComparisonApproval(Revision):
+    comparison_id: str | None = Field(default=None, min_length=1, max_length=100)
 
 
 class ModelAction(BaseModel):
@@ -131,6 +221,7 @@ class ReferenceTransform(BaseModel):
     payload: dict[str, Any] = Field(default_factory=dict)
     remote_consent: bool = False
     expected_model_fingerprint: str | None = Field(default=None, min_length=64, max_length=64)
+    prepared_id: str | None = Field(default=None, min_length=1, max_length=200)
 
 
 class ReferenceRestore(ReferenceRevision):
@@ -145,22 +236,91 @@ class ReferenceImport(ReferenceRevision):
 
 class Studio:
     def __init__(self, runtime):
-        from .workflows import WorkflowRunner
-        self.lock = threading.RLock()
-        self.documents = DocumentStore(runtime.data_dir)
-        self.volumes = VolumeStore(runtime.data_dir, self.documents)
-        self.reference = ReferenceAnalysisStore(runtime.data_dir, documents=self.documents)
-        self.models = ModelService(runtime.data_dir)
-        self.skills = SkillStore(runtime.data_dir)
-        self.workflows = WorkflowStore(runtime.data_dir)
-        self.projects = ProjectStore(runtime.data_dir)
+        self.lock = runtime.lock
         self.data_dir = runtime.data_dir
-        self._conversions = None
-        self.runner = WorkflowRunner(
-            runtime.data_dir, documents=self.documents, models=self.models,
-            skills=self.skills, workflows=self.workflows,
-            materializer=Materializer(runtime.store, self.documents),
-        )
+        self._runtime = runtime
+        self.documents = DocumentStore(self.data_dir)
+        self._volumes = self._reference = self._models = None
+        self._skills = self._workflows = self._projects = self._runner = None
+        self._conversions = self._ingestions = None
+        self._research = self._character_bridge = self._volume_research = self._embedding_downloads = None
+        self._index_workbench()
+
+    def _service(self, name, factory):
+        with self.lock:
+            attribute = "_" + name
+            instance = getattr(self, attribute)
+            if instance is None:
+                instance = factory()
+                self._index_workbench()
+                setattr(self, attribute, instance)
+            return instance
+
+    def _index_workbench(self):
+        from .storage_utils import ensure_growth_indexes
+        path = self.data_dir / "workbench.sqlite3"
+        if path.is_file():
+            with closing(sqlite3.connect(path, timeout=30)) as connection, connection:
+                ensure_growth_indexes(connection, "workbench")
+
+    @property
+    def volumes(self):
+        return self._service("volumes", lambda: VolumeStore(self.data_dir, self.documents))
+
+    @property
+    def reference(self):
+        def create():
+            reference = ReferenceAnalysisStore(self.data_dir, documents=self.documents)
+            reference.write_lock = self.lock
+            reference.catalog_sync = lambda connection, document_id, sections: self.character_bridge.sync_bound_from_reference_connection(connection, document_id, sections)
+            return reference
+        return self._service("reference", create)
+
+    @property
+    def character_bridge(self):
+        from .character_bridge_v11 import CharacterBridge
+        return self._service("character_bridge", lambda: CharacterBridge(self._runtime.store, self.documents, lambda: self.reference))
+
+    @property
+    def research(self):
+        from .research import ResearchService
+        return self._service("research", lambda: ResearchService(self.data_dir, self.models,
+            catalog_snapshot=self._runtime.store.catalog_snapshot, catalog_commit=self._runtime.store.apply_research))
+
+    @property
+    def volume_research(self):
+        from .volume_research import VolumeResearch
+        return self._service("volume_research", lambda: VolumeResearch(self.documents, self.volumes, self.models, self.research.sources))
+
+    @property
+    def embedding_downloads(self):
+        from .embedding_downloads import EmbeddingDownloads
+        return self._service("embedding_downloads", lambda: EmbeddingDownloads(self.data_dir, self.models))
+
+    @property
+    def models(self):
+        return self._service("models", lambda: ModelService(self.data_dir))
+
+    @property
+    def skills(self):
+        return self._service("skills", lambda: SkillStore(self.data_dir))
+
+    @property
+    def workflows(self):
+        return self._service("workflows", lambda: WorkflowStore(self.data_dir))
+
+    @property
+    def projects(self):
+        return self._service("projects", lambda: ProjectStore(self.data_dir))
+
+    @property
+    def runner(self):
+        def create():
+            from .workflows import WorkflowRunner
+            return WorkflowRunner(self.data_dir, documents=self.documents, models=self.models,
+                                  skills=self.skills, workflows=self.workflows,
+                                  materializer=Materializer(self._runtime.store, self.documents))
+        return self._service("runner", create)
 
     @property
     def conversions(self):
@@ -170,8 +330,38 @@ class Studio:
                 self._conversions = ConversionStore(self.data_dir)
             return self._conversions
 
+    @property
+    def ingestions(self):
+        with self.lock:
+            if self._ingestions is None:
+                from .ingestions import IngestionStore
+                self._ingestions = IngestionStore(self.data_dir, self.documents, self.conversions)
+            return self._ingestions
+
+    def active_threads(self) -> list[threading.Thread]:
+        workers = self._runner.active_threads() if self._runner is not None else []
+        if self._ingestions is not None:
+            workers += self._ingestions.active_threads()
+        if self._conversions is not None:
+            workers += self._conversions.active_threads()
+        if self._research is not None:
+            workers += self._research.active_threads()
+        if self._volume_research is not None:
+            workers += self._volume_research.active_threads()
+        if self._embedding_downloads is not None:
+            workers += self._embedding_downloads.active_threads()
+        return workers
+
     def require_idle(self):
-        if any(run["status"] in {"queued", "running", "cancelling", "approving"} for run in self.runner.list_runs()):
+        if self._embedding_downloads is not None and self._embedding_downloads.has_active_runs():
+            raise DataError(409, "请先完成或取消正在下载的 embedding 模型。")
+        if self._volume_research is not None and self._volume_research.has_active_runs():
+            raise DataError(409, "请先完成或取消正在运行的分卷检索。")
+        if self._research is not None and self._research.has_active_runs():
+            raise DataError(409, "请先完成或暂停正在运行的 AI 更新，再导出项目。")
+        if self._ingestions is not None and any(item["status"] in {"queued", "running"} for item in self.ingestions.list()):
+            raise DataError(409, "请先完成或取消正在处理的全文上传，再导出项目。")
+        if self.runner.has_active_runs():
             raise DataError(409, "请先暂停或完成正在运行的分析，再导出项目。")
         if any(item["status"] in {"queued", "running"} for item in self.conversions.list()):
             raise DataError(409, "请先完成或取消格式转换，再导出项目。")
@@ -195,12 +385,73 @@ def _file_response(raw: bytes, filename: str, media_type: str) -> Response:
     return Response(raw, media_type=media_type, headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename, safe='')}"})
 
 
+def _catalog_document_metadata(runtime, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Attach catalog labels in one small query without hydrating text/analysis."""
+    identifiers = list(dict.fromkeys(item["work_id"] for item in items if item.get("work_id")))
+    if not identifiers:
+        return items
+    import json
+    with runtime.store.connect() as connection:
+        rows = connection.execute(
+            "SELECT id,json_extract(values_json,'$.类别') category,json_extract(values_json,'$.作者') author "
+            "FROM works WHERE id IN (SELECT value FROM json_each(?))", (json.dumps(identifiers),))
+        labels = {row["id"]: {"work_category": row["category"] or "", "catalog_author": row["author"] or ""} for row in rows}
+    return [{**item, **labels.get(item.get("work_id"), {})} for item in items]
+
+
 def install_studio_routes(application, runtime):
     router = APIRouter(prefix="/api/studio", tags=["studio"])
 
     @router.get("/documents")
     def documents():
-        return {"items": runtime.studio.documents.list_documents()}
+        return {"items": _catalog_document_metadata(runtime, runtime.studio.documents.list_documents())}
+
+    @router.get("/ingestions")
+    def ingestions():
+        return {"items": runtime.studio.ingestions.list()}
+
+    @router.post("/ingestions", status_code=201)
+    async def ingest_document(file: Annotated[UploadFile, File()], title: Annotated[str, Form()] = "",
+                              encoding: Annotated[str, Form()] = "auto", work_id: Annotated[str | None, Form()] = None,
+                              mode: Annotated[str, Form()] = "new", target_document_id: Annotated[str | None, Form()] = None,
+                              base_version_id: Annotated[str | None, Form()] = None, options: Annotated[str, Form()] = "{}",
+                              author: Annotated[str, Form()] = "", earliest_update_at: Annotated[str, Form()] = "",
+                              book_type: Annotated[str, Form()] = ""):
+        import json
+        raw = await _upload(file, MAX_UPLOAD_BYTES)
+        try:
+            settings = json.loads(options)
+        except (ValueError, TypeError):
+            raise DataError(422, "转换设置必须是 JSON 对象。") from None
+        if not isinstance(settings, dict):
+            raise DataError(422, "转换设置必须是 JSON 对象。")
+        def create():
+            with runtime.studio.lock:
+                if work_id:
+                    runtime.store.get_record("works", work_id)
+                item = runtime.studio.ingestions.create(file.filename or "upload.txt", raw, title=title,
+                    encoding=encoding, work_id=work_id or None, mode=mode, target_document_id=target_document_id or None,
+                    base_version_id=base_version_id or None, conversion_options=settings,
+                    book_metadata={key: value for key, value in {"author": author, "earliest_update_at": earliest_update_at,
+                        "book_type": book_type}.items() if value.strip()} or None)
+                return runtime.studio.ingestions.start(item["id"])
+        return await run_in_threadpool(create)
+
+    @router.get("/ingestions/{identifier}")
+    def ingestion(identifier: str):
+        return runtime.studio.ingestions.get(identifier)
+
+    @router.post("/ingestions/{identifier}/cancel")
+    def cancel_ingestion(identifier: str):
+        return runtime.studio.ingestions.cancel(identifier)
+
+    @router.post("/ingestions/{identifier}/retry")
+    def retry_ingestion(identifier: str):
+        with runtime.studio.lock:
+            item = runtime.studio.ingestions.get(identifier)
+            if item.get("options", {}).get("work_id"):
+                runtime.store.get_record("works", item["options"]["work_id"])
+            return runtime.studio.ingestions.retry(identifier)
 
     @router.post("/documents", status_code=201)
     async def upload_document(file: Annotated[UploadFile, File()], title: Annotated[str, Form()] = "", encoding: Annotated[str, Form()] = "auto", work_id: Annotated[str | None, Form()] = None):
@@ -214,21 +465,40 @@ def install_studio_routes(application, runtime):
 
     @router.get("/documents/{document_id}")
     def document(document_id: str):
-        return runtime.studio.documents.get_document(document_id)
+        return _catalog_document_metadata(runtime, [runtime.studio.documents.get_document(document_id)])[0]
+
+    @router.get("/documents/{document_id}/book-metadata")
+    def book_metadata(document_id: str):
+        return runtime.studio.documents.get_book_metadata(document_id)
+
+    @router.put("/documents/{document_id}/book-metadata")
+    def update_book_metadata(document_id: str, body: BookMetadataUpdate):
+        with runtime.studio.lock:
+            return runtime.studio.documents.update_book_metadata(document_id, body.values,
+                expected_version_id=body.expected_version_id, expected_revision=body.expected_revision)
+
+    @router.get("/documents/{document_id}/chapter-files")
+    def chapter_files(document_id: str, verify: bool = False):
+        return runtime.studio.documents.storage_status(document_id, verify=verify)
+
+    @router.post("/documents/{document_id}/chapter-files")
+    def synchronize_chapter_files(document_id: str):
+        with runtime.studio.lock:
+            return runtime.studio.documents.materialize_chapters(document_id)
+
+    @router.get("/documents/{document_id}/export/chapters")
+    def export_chapter_files(document_id: str, version_id: str | None = None):
+        metadata = runtime.studio.documents.get_book_metadata(document_id)
+        raw = runtime.studio.documents.chapter_archive(document_id, version_id)
+        return _file_response(raw, f"{metadata['book_title']}-chapters.zip", "application/zip")
 
     @router.get("/documents/{document_id}/versions/{version_id}")
-    def version(document_id: str, version_id: str, include_text: bool = True):
-        result = runtime.studio.documents.get_version(document_id, version_id)
+    def version(document_id: str, version_id: str, include_text: bool = True, summary: bool = False):
+        if summary:
+            return runtime.studio.documents.get_version_summary(document_id, version_id)
         if not include_text:
-            result = dict(result)
-            result["characters"] = len(result["text"])
-            result.pop("text", None)
-            result.pop("source_text", None)
-            result.pop("diff", None)
-            # Span metadata suffices for navigation; original text is paged.
-            for key in ("chapters", "chunks"):
-                result[key] = [{k: v for k, v in item.items() if k not in {"text", "content"}} for item in result.get(key, [])]
-        return result
+            return runtime.studio.documents.get_version_navigation(document_id, version_id)
+        return runtime.studio.documents.get_version(document_id, version_id)
 
     @router.get("/documents/{document_id}/versions/{version_id}/text")
     def text(document_id: str, version_id: str, start: Annotated[int, Query(ge=0)] = 0, limit: Annotated[int, Query(ge=1, le=100000)] = 20000, kind: str = "cleaned"):
@@ -275,75 +545,132 @@ def install_studio_routes(application, runtime):
     def chapter_index(document_id: str, version_id: str):
         return runtime.studio.documents.chapter_index(document_id, version_id)
 
+    @router.get("/documents/{document_id}/versions/{version_id}/findings")
+    def findings(document_id: str, version_id: str, chapter_id: str | None = None,
+                 offset: Annotated[int, Query(ge=0)] = 0, limit: Annotated[int | None, Query(ge=1, le=10000)] = None):
+        return runtime.studio.documents.findings(document_id, version_id, chapter_id=chapter_id, start=offset, limit=limit)
+
     @router.get("/documents/{document_id}/versions/{version_id}/chapters/{chapter_id}")
     def chapter(document_id: str, version_id: str, chapter_id: str,
-                start: Annotated[int, Query(ge=0)] = 0, limit: Annotated[int, Query(ge=1, le=100000)] = 20000):
-        return runtime.studio.documents.get_chapter(document_id, version_id, chapter_id, start=start, limit=limit)
+                start: Annotated[int, Query(ge=0)] = 0, limit: Annotated[int, Query(ge=1, le=100000)] = 20000,
+                body_only: bool = False):
+        return runtime.studio.documents.get_chapter(document_id, version_id, chapter_id, start=start, limit=limit, body_only=body_only)
 
     @router.post("/documents/{document_id}/chapters/edit", status_code=201)
-    def edit_chapter(document_id: str, body: ChapterEdit):
+    def edit_chapter(document_id: str, body: ChapterEdit, summary: bool = False):
         with runtime.studio.lock:
-            return runtime.studio.documents.edit_chapter(document_id, body.base_version_id, body.chapter_id, body.body_text)
+            result = runtime.studio.documents.edit_chapter(document_id, body.base_version_id, body.chapter_id, body.body_text, title=body.title)
+            return runtime.studio.documents.version_summary(result) if summary else result
+
+    @router.post("/documents/{document_id}/chapters/edit-slice", status_code=201)
+    def edit_chapter_slice(document_id: str, body: ChapterSlice, summary: bool = False):
+        with runtime.studio.lock:
+            result = runtime.studio.documents.edit_chapter_slice(document_id, body.base_version_id, body.chapter_id,
+                body.start, body.end, body.text, body.expected_text, title=body.title)
+            return runtime.studio.documents.version_summary(result) if summary else result
+
+    @router.post("/documents/{document_id}/chapters/resegment/preview")
+    def preview_resegment(document_id: str, body: ChapterAction):
+        with runtime.studio.lock:
+            return runtime.studio.documents.preview_resegment(
+                document_id, body.base_version_id, body.heading_formats, body.custom_formats,
+                repair_duplicates=body.repair_duplicates)
 
     @router.post("/documents/{document_id}/chapters/resegment", status_code=201)
-    def resegment(document_id: str, body: ChapterAction):
+    def resegment(document_id: str, body: ChapterAction, summary: bool = False):
         with runtime.studio.lock:
-            return runtime.studio.documents.resegment(document_id, body.base_version_id, body.heading_formats, body.custom_formats)
+            result = runtime.studio.documents.resegment(
+                document_id, body.base_version_id, body.heading_formats, body.custom_formats,
+                conflict_policy=body.conflict_policy, preview_token=body.preview_token,
+                repair_duplicates=body.repair_duplicates, require_confirmation=True)
+            return runtime.studio.documents.version_summary(result) if summary else result
 
     @router.post("/documents/{document_id}/chapters/clean", status_code=201)
-    def clean_chapters(document_id: str, body: ChapterAction):
+    def clean_chapters(document_id: str, body: ChapterAction, summary: bool = False):
         with runtime.studio.lock:
-            return runtime.studio.documents.apply_chapter_cleaning(document_id, body.base_version_id, body.selections)
+            result = runtime.studio.documents.apply_chapter_cleaning(document_id, body.base_version_id, body.selections)
+            return runtime.studio.documents.version_summary(result) if summary else result
 
     @router.post("/documents/{document_id}/chapters/rename", status_code=201)
-    def rename_chapter(document_id: str, body: ChapterAction):
+    def rename_chapter(document_id: str, body: ChapterAction, summary: bool = False):
         with runtime.studio.lock:
-            return runtime.studio.documents.rename_chapter(document_id, body.base_version_id, body.chapter_id, body.title)
+            result = runtime.studio.documents.rename_chapter(document_id, body.base_version_id, body.chapter_id, body.title)
+            return runtime.studio.documents.version_summary(result) if summary else result
 
     @router.post("/documents/{document_id}/chapters/insert", status_code=201)
-    def insert_chapter(document_id: str, body: ChapterAction):
+    def insert_chapter(document_id: str, body: ChapterAction, summary: bool = False):
         with runtime.studio.lock:
-            return runtime.studio.documents.insert_chapter(document_id, body.base_version_id, body.after_chapter_id, body.heading, body.body_text)
+            result = runtime.studio.documents.insert_chapter(document_id, body.base_version_id, body.after_chapter_id, body.heading or body.title, body.body_text)
+            return runtime.studio.documents.version_summary(result) if summary else result
 
     @router.post("/documents/{document_id}/chapters/delete", status_code=201)
-    def delete_chapters(document_id: str, body: ChapterAction):
+    def delete_chapters(document_id: str, body: ChapterAction, summary: bool = False):
         with runtime.studio.lock:
-            return runtime.studio.documents.delete_chapters(document_id, body.base_version_id, body.chapter_ids)
+            result = runtime.studio.documents.delete_chapters(document_id, body.base_version_id, body.chapter_ids)
+            return runtime.studio.documents.version_summary(result) if summary else result
 
     @router.post("/documents/{document_id}/chapters/restore", status_code=201)
-    def restore_version(document_id: str, body: ChapterAction):
+    def restore_version(document_id: str, body: ChapterAction, summary: bool = False):
         if not body.target_version_id:
             raise DataError(422, "请选择要恢复的全文版本。")
         with runtime.studio.lock:
-            return runtime.studio.documents.restore_version(document_id, body.base_version_id, body.target_version_id)
+            result = runtime.studio.documents.restore_version(document_id, body.base_version_id, body.target_version_id)
+            return runtime.studio.documents.version_summary(result) if summary else result
 
     @router.post("/documents/{document_id}/chapters/settings", status_code=201)
-    def chapter_settings(document_id: str, body: ChapterAction):
+    def chapter_settings(document_id: str, body: ChapterAction, summary: bool = False):
         with runtime.studio.lock:
-            return runtime.studio.documents.update_preprocess_settings(document_id, body.base_version_id, author_keywords=body.author_keywords, garble_rules=body.garble_rules)
+            result = runtime.studio.documents.update_preprocess_settings(document_id, body.base_version_id, author_keywords=body.author_keywords, garble_rules=body.garble_rules)
+            return runtime.studio.documents.version_summary(result) if summary else result
 
     @router.get("/documents/{document_id}/versions/{version_id}/volumes")
-    def volumes(document_id: str, version_id: str):
-        return runtime.studio.volumes.get(document_id, version_id)
+    def volumes(document_id: str, version_id: str, coordinate_version: Annotated[int, Query(ge=1, le=2)] = 1):
+        return runtime.studio.volumes.get(document_id, version_id, coordinate_version=coordinate_version)
 
     @router.put("/documents/{document_id}/versions/{version_id}/volumes")
     def save_volumes(document_id: str, version_id: str, body: VolumePlan):
         with runtime.studio.lock:
-            return runtime.studio.volumes.save(document_id, version_id, body.volumes, body.expected_revision)
+            workbench = None
+            if body.prepared_id:
+                from .prompt_workbench import get_prompt_workbench
+                workbench = get_prompt_workbench(runtime.studio)
+                context = workbench.validate_for_confirmation("volumes", body.prepared_id, document_id=document_id, volumes=body.volumes)
+                if context.get("version_id") != version_id or context.get("base_revision") != body.expected_revision:
+                    raise DataError(409, "分卷提示词绑定已变化，请重新准备")
+            result = runtime.studio.volumes.save(document_id, version_id, body.volumes, body.expected_revision, coordinate_version=body.coordinate_version)
+            if workbench:
+                workbench.control_preparation(body.prepared_id, "complete")
+            return result
 
     @router.get("/documents/{document_id}/versions/{version_id}/volumes/prompt")
     def volume_prompt(document_id: str, version_id: str):
-        return runtime.studio.volumes.prompt(document_id, version_id)
+        return runtime.studio.volumes.web_prompt(document_id, version_id)
 
     @router.post("/documents/{document_id}/versions/{version_id}/volumes/detect")
-    def detect_volume_plan(document_id: str, version_id: str):
-        version = runtime.studio.documents.get_version(document_id, version_id)
-        return {"volumes": detect_volumes(version["chapters"]), "method": "chapter_markers"}
+    def detect_volume_plan(document_id: str, version_id: str, coordinate_version: Annotated[int, Query(ge=1, le=2)] = 1):
+        return runtime.studio.volumes.detect(document_id, version_id, coordinate_version=coordinate_version)
 
     @router.post("/documents/{document_id}/versions/{version_id}/volumes/paste")
-    def paste_volume_plan(document_id: str, version_id: str, body: PastedContent):
-        count = len(runtime.studio.documents.get_version(document_id, version_id)["chapters"])
-        return {"volumes": parse_volume_paste(body.content, count)}
+    def paste_volume_plan(document_id: str, version_id: str, body: VolumePaste):
+        count = runtime.studio.documents.get_version_summary(document_id, version_id)["chapter_count"]
+        from .volume_research import parse_web_volume_reply
+        if body.contract_version == 2:
+            current = runtime.studio.volumes.web_prompt(document_id, version_id)
+            return parse_web_volume_reply(body.content, current["chapter_count"], expected_request_id=current["request_id"], title=current["title"], author=current["author"])
+        return parse_web_volume_reply(body.content, count)
+
+    @router.post("/documents/{document_id}/versions/{version_id}/volumes/research", status_code=202)
+    def research_volumes(document_id: str, version_id: str, body: VolumeResearchRequest):
+        with runtime.studio.lock:
+            return runtime.studio.volume_research.create(document_id, version_id, **body.model_dump())
+
+    @router.get("/documents/{document_id}/versions/{version_id}/volumes/research/{job_id}")
+    def volume_research_job(document_id: str, version_id: str, job_id: str):
+        return runtime.studio.volume_research.get(job_id, document_id, version_id)
+
+    @router.post("/documents/{document_id}/versions/{version_id}/volumes/research/{job_id}/cancel")
+    def cancel_volume_research(document_id: str, version_id: str, job_id: str):
+        return runtime.studio.volume_research.cancel(job_id, document_id, version_id)
 
     @router.post("/documents/{document_id}/versions/{version_id}/volumes/model")
     def model_volume_plan(document_id: str, version_id: str, body: ModelAction):
@@ -351,17 +678,75 @@ def install_studio_routes(application, runtime):
         return runtime.studio.volumes.model_detect(document_id, version_id, runtime.studio.models, **body.model_dump())
 
     @router.get("/documents/{document_id}/versions/{version_id}/download")
-    def cleaned(document_id: str, version_id: str):
+    def cleaned(document_id: str, version_id: str, format: str = "raw"):
+        if format not in {"raw", "clean"}:
+            raise DataError(422, "导出格式请选择 raw 或 clean。")
+        if format == "clean":
+            text = runtime.studio.documents.formatted_export(document_id, version_id)
+            document = runtime.studio.documents.get_document(document_id)
+            title = document.get("title") or Path(document["filename"]).stem
+            title = re.sub(r'[\x00-\x1f<>:"/\\|?*]', "_", title).strip(" .")[:160] or "正文"
+            if title.lower().endswith(".txt"):
+                title = title[:-4] or "正文"
+            return _file_response(text.encode("utf-8-sig"), f"{title}.txt", "text/plain; charset=utf-8")
         result = runtime.studio.documents.get_version(document_id, version_id)
         return _file_response(result["text"].encode("utf-8-sig"), f"cleaned-{version_id[:8]}.txt", "text/plain; charset=utf-8")
 
     @router.get("/jobs")
-    def jobs():
-        return {"items": runtime.studio.runner.list_runs()}
+    def jobs(summary: bool = False, document_id: str | None = None, version_id: str | None = None,
+             limit: Annotated[int | None, Query(ge=1, le=1000)] = None):
+        if summary:
+            return {"items": runtime.studio.runner.list_run_summaries(document_id=document_id, version_id=version_id, limit=limit or 100)}
+        items = runtime.studio.runner.list_runs()
+        if document_id is not None:
+            items = [item for item in items if item["document_id"] == document_id]
+        if version_id is not None:
+            items = [item for item in items if item["version_id"] == version_id]
+        return {"items": items[:limit] if limit is not None else items}
 
     @router.get("/documents/{document_id}/reference")
     def reference(document_id: str):
         return runtime.studio.reference.get(document_id)
+
+    @router.get("/documents/{document_id}/reference/projection")
+    def project_reference(document_id: str, chapter: Annotated[int | None, Query(ge=1)] = None,
+                          progress: Annotated[float | None, Query(ge=0, le=100)] = None,
+                          schema_version: Annotated[int | None, Query(ge=2, le=4)] = None):
+        state = runtime.studio.reference.get(document_id)
+        events = state["sections"].get("plot", {}).get("events", [])
+        sources = {item.get("source_version_id") for item in events if isinstance(item, dict) and item.get("source_version_id")}
+        # A saved volume plan belongs to its exact text version. Mixed-version
+        # analysis keeps each event's recorded volume rather than applying a
+        # new plan to older chapter numbers.
+        volumes = None
+        if len(sources) == 1:
+            version_id = next(iter(sources))
+            volumes = runtime.studio.volumes.get(document_id, version_id)["volumes"]
+        return runtime.studio.reference.project(document_id, chapter, volumes=volumes,
+                                               target_version=schema_version, progress=progress)
+
+    @router.post("/documents/{document_id}/reference/preview")
+    def preview_reference(document_id: str, body: ReferencePreview):
+        from .analysis_projection import project_sections
+        from .reference_analysis import _bounded, _dump
+        runtime.studio.documents.get_document(document_id)
+        _bounded(body.sections)
+        _dump(body.sections)
+        sources = {}
+        identifiers = set()
+        def source_ids(value):
+            if isinstance(value, dict):
+                if isinstance(value.get("source_version_id"), str) and value["source_version_id"]:
+                    identifiers.add(value["source_version_id"])
+                for item in value.values(): source_ids(item)
+            elif isinstance(value, list):
+                for item in value: source_ids(item)
+        source_ids(body.sections)
+        if body.source_version_id:
+            identifiers.add(body.source_version_id)
+        for identifier in identifiers:
+            sources[identifier] = runtime.studio.documents.get_version(document_id, identifier)
+        return {"sections": project_sections(body.sections, target_version=4, source_versions=sources)}
 
     @router.post("/reference-collections", status_code=201)
     def new_collection(body: NewCollection):
@@ -410,31 +795,79 @@ def install_studio_routes(application, runtime):
 
     @router.post("/documents/{document_id}/reference/transform")
     def transform_reference(document_id: str, body: ReferenceTransform):
-        return runtime.studio.runner.reference_transform(document_id, **body.model_dump())
+        if body.prepared_id:
+            from .prompt_workbench import get_prompt_workbench
+            return get_prompt_workbench(runtime.studio).validate_transform_data(body.kind, body.prepared_id, document_id, body.payload.get("manual_data"))
+        return runtime.studio.runner.reference_transform(document_id, **body.model_dump(exclude={"prepared_id"}))
 
     @router.put("/documents/{document_id}/reference/{section}")
     def save_reference_section(document_id: str, section: str, body: ReferenceSection):
         with runtime.studio.lock:
-            return runtime.studio.reference.save_section(document_id, section, body.data, body.expected_revision)
+            workbench = None
+            if body.prepared_id:
+                from .prompt_workbench import get_prompt_workbench
+                workbench = get_prompt_workbench(runtime.studio)
+                workbench.validate_reference_save(body.prepared_id, document_id, section, body.data)
+            result = runtime.studio.reference.save_section(document_id, section, body.data, body.expected_revision)
+            if workbench:
+                workbench.control_preparation(body.prepared_id, "complete")
+            return result
 
     @router.post("/jobs", status_code=201)
     def create_job(body: NewRun):
         with runtime.studio.lock:
-            result = runtime.studio.runner.create_run(body.document_id, body.version_id, workflow_id=body.workflow_id, workflow_version=body.workflow_version, profile_id=body.profile_id, remote_consent=body.remote_consent, expected_model_fingerprint=body.expected_model_fingerprint, manual=body.manual)
-            return runtime.studio.runner.start(result["id"], remote_consent=body.remote_consent) if body.start and not body.manual else result
+            result = runtime.studio.runner.create_run(body.document_id, body.version_id, workflow_id=body.workflow_id, workflow_version=body.workflow_version, profile_id=body.profile_id, remote_consent=body.remote_consent, expected_model_fingerprint=body.expected_model_fingerprint, expected_stage_fingerprints=body.expected_stage_fingerprints, manual=body.manual, chapter_ranges=[item.model_dump() for item in body.chapter_ranges] if body.chapter_ranges is not None else None, reuse_existing=body.reuse_existing, interaction_mode=body.interaction_mode)
+            return runtime.studio.runner.start(result["id"], remote_consent=body.remote_consent) if body.start and not body.manual and result["status"] == "queued" else result
+
+    @router.post("/jobs/comparisons", status_code=201)
+    def create_comparison(body: ComparisonCreate):
+        with runtime.studio.lock:
+            return runtime.studio.runner.create_comparison(**body.model_dump())
+
+    @router.get("/jobs/comparisons")
+    def list_comparisons(document_id: str | None = None, limit: Annotated[int, Query(ge=1, le=200)] = 100):
+        return {"items": runtime.studio.runner.list_comparisons(document_id=document_id, limit=limit)}
+
+    @router.get("/jobs/comparisons/{comparison_id}")
+    def get_comparison(comparison_id: str):
+        return runtime.studio.runner.get_comparison(comparison_id)
+
+    @router.post("/jobs/comparisons/{comparison_id}/select")
+    def select_comparison(comparison_id: str, body: ComparisonSelection):
+        with runtime.studio.lock:
+            return runtime.studio.runner.select_comparison(comparison_id, **body.model_dump())
 
     @router.get("/jobs/{run_id}")
-    def job(run_id: str):
+    def job(run_id: str, summary: bool = False):
+        if summary:
+            items = runtime.studio.runner.list_run_summaries(run_id=run_id, limit=1)
+            if not items:
+                raise DataError(404, "提取任务不存在")
+            return items[0]
         return runtime.studio.runner.get_run(run_id)
 
     @router.get("/jobs/{run_id}/chunks/{chunk_id}/prompt")
     def chunk_prompt(run_id: str, chunk_id: str):
         return runtime.studio.runner.chunk_prompt(run_id, chunk_id)
 
+    @router.get("/jobs/{run_id}/chunks/{chunk_id}/template")
+    def manual_chunk_template(run_id: str, chunk_id: str):
+        from .manual_templates import extraction_template
+        return extraction_template(runtime.studio.runner, run_id, chunk_id)
+
     @router.post("/jobs/{run_id}/chunks/{chunk_id}/paste")
     def paste_chunk(run_id: str, chunk_id: str, body: ChunkPaste):
         with runtime.studio.lock:
-            return runtime.studio.runner.paste_chunk(run_id, chunk_id, body.content, body.expected_revision)
+            workbench = None
+            if body.prepared_id:
+                from .prompt_workbench import get_prompt_workbench
+                workbench = get_prompt_workbench(runtime.studio)
+                workbench.validate_for_confirmation("extraction", body.prepared_id, run_id=run_id, chunk_id=chunk_id, content=body.content)
+            provenance = workbench.confirmation_provenance("extraction", body.prepared_id) if workbench else None
+            result = runtime.studio.runner.paste_chunk(run_id, chunk_id, body.content, body.expected_revision, prompt_review=provenance)
+            if workbench:
+                workbench.control_preparation(body.prepared_id, "complete")
+            return result
 
     @router.post("/jobs/{run_id}/chunks/{chunk_id}/start")
     def start_chunk(run_id: str, chunk_id: str, body: ConnectionConsent = ConnectionConsent()):
@@ -444,12 +877,18 @@ def install_studio_routes(application, runtime):
     @router.post("/jobs/{run_id}/chunks/{chunk_id}/commit")
     def commit_chunk(run_id: str, chunk_id: str, body: ChunkCommit):
         with runtime.studio.lock:
+            runtime.studio.runner.assert_comparison_selection(run_id, body.comparison_id)
             return runtime.studio.reference.commit_candidate(runtime.studio.runner.get_run(run_id), chunk_id, body.sections, body.expected_revision)
 
     @router.post("/jobs/{run_id}/resume")
     def resume_job(run_id: str, body: ConnectionConsent = ConnectionConsent()):
         with runtime.studio.lock:
             return runtime.studio.runner.resume(run_id, remote_consent=body.remote_consent)
+
+    @router.post("/jobs/{run_id}/reopen")
+    def reopen_job(run_id: str):
+        with runtime.studio.lock:
+            return runtime.studio.runner.reopen(run_id)
 
     @router.post("/jobs/{run_id}/start")
     def start_job(run_id: str, body: ConnectionConsent = ConnectionConsent()):
@@ -460,15 +899,23 @@ def install_studio_routes(application, runtime):
     def cancel_job(run_id: str):
         return runtime.studio.runner.cancel(run_id)
 
+    @router.post("/jobs/{run_id}/pause")
+    def pause_job(run_id: str):
+        return runtime.studio.runner.pause(run_id)
+
+    @router.post("/jobs/{run_id}/terminate")
+    def terminate_job(run_id: str):
+        return runtime.studio.runner.terminate(run_id)
+
     @router.put("/jobs/{run_id}/results")
     def review_job(run_id: str, body: Review):
         with runtime.studio.lock:
             return runtime.studio.runner.edit_result(run_id, body.results, body.expected_revision)
 
     @router.post("/jobs/{run_id}/approve")
-    def approve_job(run_id: str, body: Revision):
+    def approve_job(run_id: str, body: ComparisonApproval):
         with runtime.studio.lock:
-            return runtime.studio.runner.approve(run_id, body.expected_revision)
+            return runtime.studio.runner.approve(run_id, body.expected_revision, body.comparison_id)
 
     @router.get("/models")
     def models():
@@ -514,8 +961,9 @@ def install_studio_routes(application, runtime):
             return runtime.studio.models.test_profile(profile_id, allow_remote=body.remote_consent)
 
     @router.get("/usage")
-    def usage(run_id: str | None = None):
-        return {"items": runtime.studio.models.list_usage(run_id), "summary": runtime.studio.models.usage_summary(run_id)}
+    def usage(run_id: str | None = None, limit: Annotated[int | None, Query(ge=1, le=200)] = None, cursor: str | None = None):
+        page = runtime.studio.models.list_usage_page(run_id, limit=limit or 50, cursor=cursor) if limit is not None or cursor is not None else {"items": runtime.studio.models.list_usage(run_id)}
+        return {**page, "summary": runtime.studio.models.usage_summary(run_id)}
 
     @router.get("/skills")
     def skills():
@@ -527,11 +975,11 @@ def install_studio_routes(application, runtime):
             return runtime.studio.skills.save(body)
 
     @router.post("/skills/upload", status_code=201)
-    async def upload_skill(file: Annotated[UploadFile, File()]):
+    async def upload_skill(file: Annotated[UploadFile, File()], contract_version: Annotated[int | None, Query(ge=2, le=4)] = None):
         raw = await _upload(file, 2 * 1024 * 1024)
         def save():
             with runtime.studio.lock:
-                return runtime.studio.skills.upload(file.filename or "skill.json", raw)
+                return runtime.studio.skills.upload(file.filename or "skill.json", raw, require_contract_version=contract_version)
         return await run_in_threadpool(save)
 
     @router.get("/skills/{identifier}/versions/{version}")

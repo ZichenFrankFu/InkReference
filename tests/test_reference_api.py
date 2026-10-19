@@ -66,7 +66,7 @@ def test_work_analysis_zero_revision_and_section_ledger(client):
     state = checked(client.put(base+'/reference/raw_entries',json={'data':entries,'expected_revision':state['revision']}))
     assert state['sections']['raw_entries'] == entries
     assert client.put(base+'/reference/raw_entries',json={'data':[],'expected_revision':0}).status_code == 409
-    job = checked(client.post('/api/studio/jobs',json={'document_id':doc['id'],'version_id':doc['latest_version_id'],'manual':True,'start':False}))
+    job = checked(client.post('/api/studio/jobs',json={'document_id':doc['id'],'version_id':doc['latest_version_id'],'manual':True,'start':False,'workflow_version':'1.1.0'}))
     chunk = job['candidates'][0]['chunk_id']
     prompt = checked(client.get(f"/api/studio/jobs/{job['id']}/chunks/{chunk}/prompt"))
     assert '江屿' in prompt['prompt']
@@ -143,7 +143,7 @@ def test_reference_workspace_backup_restores_sources_reviews_and_plans(client, t
     checked(client.put(f"{base}/versions/{version['id']}/volumes",json={'expected_revision':0,'volumes':plan}))
     state = checked(client.get(base+'/reference'))
     state = checked(client.put(base+'/reference/metadata',json={'expected_revision':state['revision'],'data':{'rating':5,'notes':'保留的笔记\n第二行'}}))
-    job = checked(client.post('/api/studio/jobs',json={'document_id':document['id'],'version_id':version['id'],'manual':True,'start':False}))
+    job = checked(client.post('/api/studio/jobs',json={'document_id':document['id'],'version_id':version['id'],'manual':True,'start':False,'workflow_version':'1.1.0'}))
     chunk = job['candidates'][0]['chunk_id']
     job = checked(client.post(f"/api/studio/jobs/{job['id']}/chunks/{chunk}/paste",json={'expected_revision':job['revision'],'content':json.dumps({'settings':[{'title':'石桥','category':'geography','content':'桥头相会。'}],'style':{'narrative_perspective':'第三人称'}},ensure_ascii=False)}))
     state = checked(client.post(f"/api/studio/jobs/{job['id']}/chunks/{chunk}/commit",json={'expected_revision':state['revision'],'sections':['settings','style']}))

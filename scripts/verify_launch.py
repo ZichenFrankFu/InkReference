@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import os
 import signal
@@ -10,8 +11,10 @@ import sys
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
+import zipfile
 from pathlib import Path
 
 
@@ -57,6 +60,64 @@ def main() -> int:
                         raise RuntimeError("The application did not serve its frontend.")
                 if len(request("/api/meta")["tables"]) != 3:
                     raise RuntimeError("The application did not initialize its library.")
+                work = request("/api/records/works", "POST", {"values": {
+                    "作品ID": "SMOKE-W", "作品": "合成启动作品", "类别": "合成类别", "用户是否完整体验过": "否",
+                }})
+                filtered = request("/api/records/works?category=" + urllib.parse.quote("合成类别") + "&seen=" + urllib.parse.quote("否"))
+                assert filtered["total"] == 1 and filtered["items"][0]["id"] == work["id"]
+                # Exercise lazily imported interchange packages in the frozen
+                # application, not just the Python build environment.
+                for format in ("db", "csv", "xlsx"):
+                    with opener.open(base + f"/api/library/export?format={format}", timeout=15) as response:
+                        raw = response.read()
+                    if format == "db":
+                        assert raw.startswith(b"SQLite format 3\x00")
+                    else:
+                        with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+                            expected = "works.csv" if format == "csv" else "xl/workbook.xml"
+                            assert expected in archive.namelist()
+                boundary = uuid.uuid4().hex
+                source = "第一章 合成测试\n正文尾标。\n作者说：求月票！".encode("utf-8")
+                multipart = (f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="smoke.txt"\r\n'
+                             'Content-Type: text/plain\r\n\r\n').encode() + source + f"\r\n--{boundary}--\r\n".encode()
+                with opener.open(urllib.request.Request(base + "/api/studio/ingestions", data=multipart,
+                        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"}, method="POST"), timeout=15) as response:
+                    upload = json.load(response)
+                deadline = time.monotonic() + 20
+                while upload["status"] in {"queued", "running"} and time.monotonic() < deadline:
+                    time.sleep(.1)
+                    upload = request(f'/api/studio/ingestions/{upload["id"]}')
+                assert upload["status"] == "completed", upload
+                version = request(f'/api/studio/documents/{upload["document_id"]}/versions/{upload["version_id"]}')
+                assert version["text"] == source.decode("utf-8")
+                findings = request(f'/api/studio/documents/{upload["document_id"]}/versions/{upload["version_id"]}/findings')
+                assert any(item["kind"] == "author_note" for item in findings["items"])
+                link = request(f'/api/studio/documents/{upload["document_id"]}/catalog', "PUT", {
+                    "expected_work_id": None, "expected_version_id": upload["version_id"],
+                    "work_id": work["id"], "complete": True,
+                })
+                assert link["work_id"] == work["id"] and link["completion"]["version_id"] == upload["version_id"]
+                catalog = request(f'/api/studio/catalog/works/{work["id"]}')
+                assert catalog["documents"][0]["id"] == upload["document_id"]
+                preview = request(f'/api/studio/documents/{upload["document_id"]}/chapters/resegment/preview', "POST", {
+                    "base_version_id": upload["version_id"], "heading_formats": ["第N章"], "repair_duplicates": True,
+                })
+                assert preview["preview_token"] and preview["old"]["chapter_count"] == 1
+                repair = request("/api/studio/repair/capabilities")
+                assert repair["protocol"] == "inkreference.repair.v1" and repair["can_rebuild_cache"]
+                operation = request("/api/studio/repair/cache-rebuild", "POST", {
+                    "document_id": upload["document_id"], "version_id": upload["version_id"],
+                })
+                deadline = time.monotonic() + 20
+                while operation["status"] == "running" and time.monotonic() < deadline:
+                    time.sleep(.1)
+                    operation = request(f'/api/studio/repair/operations/{operation["operation_id"]}')
+                assert operation["status"] == "succeeded", operation
+                unchanged = request(f'/api/studio/documents/{upload["document_id"]}/versions/{upload["version_id"]}')
+                assert unchanged["text"] == version["text"] and unchanged["id"] == version["id"]
+                prompt = request("/api/studio/repair/prompt", "POST", {"description": "合成启动检查", "topic": "chapters"})
+                assert prompt["session_id"] and "inkreference.repair.v1" in prompt["prompt"]
+                assert "正文尾标" not in prompt["prompt"]
                 security = request("/api/studio/models/security")
                 if args.require_vault:
                     if not security["vault_available"]:
@@ -75,7 +136,9 @@ def main() -> int:
                             raise RuntimeError("The native credential was not cleared.")
                     finally:
                         request(f"/api/studio/models/{profile_id}", "DELETE")
-                print(json.dumps({"health": "ok", "frontend": "ok", "database": "ok", "native_vault": security["vault_backend"], "credential_roundtrip": args.require_vault}))
+                print(json.dumps({"health": "ok", "frontend": "ok", "database": "ok", "library_formats": ["db", "csv", "xlsx"],
+                                  "upload_pipeline": "ok", "catalog_link": "ok", "chapter_preview": "ok", "quick_repair": "ok",
+                                  "native_vault": security["vault_backend"], "credential_roundtrip": args.require_vault}))
             except Exception:
                 log.flush()
                 print(log_path.read_text(encoding="utf-8", errors="replace")[-12000:], file=sys.stderr)

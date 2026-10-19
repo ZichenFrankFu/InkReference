@@ -225,6 +225,10 @@ def split_chapters(text: str, *, fallback_chars: int = 3000,
     selection never silently falls back to a different heading format.
     """
     chunk_text("", fallback_chars)
+    # Older Mac/source text can use a lone CR. Scan an equal-length line view
+    # so MULTILINE sees those boundaries while all returned source spans and
+    # preserved heading/body bytes still refer to the original string.
+    scan_text = re.sub(r"\r(?!\n)", "\n", text) if "\r" in text else text
     patterns = heading_patterns(custom_formats)
     selected = set(heading_formats or [])
     scanned = []
@@ -232,12 +236,14 @@ def split_chapters(text: str, *, fallback_chars: int = 3000,
     best_name, best_score = None, 0.0
     for name, pattern in patterns:
         try:
-            matches = list(pattern.finditer(text, timeout=2.0)) if isinstance(pattern, regex.Pattern) else list(pattern.finditer(text))
+            matches = list(pattern.finditer(scan_text, timeout=2.0)) if isinstance(pattern, regex.Pattern) else list(pattern.finditer(scan_text))
         except TimeoutError:
             raise DataError(422, f"章节格式「{name}」运行超时，请简化正则表达式") from None
         if name in {n for n, _ in _PATTERNS}:
             matches = [match for match in matches
                        if not match.group(0).rstrip().endswith(tuple("。！？；，,.!?…：:"))
+                       and not re.match(r"^[ \t　]*第[ \t　]*" + _CN_NUMBER +
+                           r"[ \t　]*章[ \t　]*(?:首次)?(?:发布|更新)时间[ \t　]*[:：]", match.group(0))
                        and (name not in {"N、", "N."} or (match.group(2) or "").strip())]
         score = _score_pattern(matches, len(text))
         eligible = bool(matches) and (name not in {"N、", "N.", "缩进对比"} or len(matches) >= 3)
@@ -275,7 +281,7 @@ def split_chapters(text: str, *, fallback_chars: int = 3000,
             number = None if name in _UNNUMBERED else cn2int(match.group(1))
             title = (match.group(1) or "").strip() if name in _UNNUMBERED else (match.group(2) or "").strip()
             chapters.append({"number": number, "title": title,
-                             "raw_marker": match.group(0), "kind": "chapter", "pattern": name,
+                             "raw_marker": text[start:match.end()], "kind": "chapter", "pattern": name,
                              "start": start, "end": end, "body_start": match.end(),
                              "text": text[start:end], "content": text[match.end():end]})
     else:

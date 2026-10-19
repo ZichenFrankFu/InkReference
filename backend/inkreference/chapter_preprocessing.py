@@ -11,24 +11,28 @@ import hashlib
 import re
 import statistics
 from collections import Counter, defaultdict
-from typing import Any
+from typing import Any, Callable
 
 import regex
 
 from .database import DataError
+from .chapter_layout import chapter_label, chapter_sequence
 from .text_processing import diagnose_text
 
-AUTHOR_KEYWORDS = [
+LEGACY_AUTHOR_KEYWORDS = [
     "求收藏", "求订阅", "求推荐", "求月票", "求票", "推荐票", "月票", "打赏",
     "感谢书友", "感谢读者", "感谢支持", "请假", "断更", "章节缺失", "卡文", "码字",
     "作者菌", "作者大大", "本作者", "本章说", "晚点更新", "明天更新", "今日两更",
     "今日三更", "亲爱的读者", "书友们", "对不起大家", "盟主", "白银盟", "感谢打赏",
     "万赏", "万订", "月票榜", "上架感言", "完本感言", "作者说", "作者的话",
 ]
+AUTHOR_KEYWORDS = [*LEGACY_AUTHOR_KEYWORDS, "PS："]
+_POSTSCRIPT = re.compile(r"^ps\s*[:：]", re.IGNORECASE)
 _TITLE_MARKERS = ["感言", "请假", "通知", "公告", "致歉", "本章说", "闲聊", "杂谈", "作者的话", "作者说"]
 _DIALOGUE = re.compile(r"说道|[“”「」『』]")
 _RULE = re.compile(r"^[ \t　]*[-=*＝—─]{3,}[ \t　]*$", re.MULTILINE)
 _NOISE = [
+    ("control_character", "异常控制字符", re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]+")),
     ("html_comment", "采集注释", re.compile(r"<!--.*?-->", re.DOTALL)),
     ("html_tag", "HTML 标记", re.compile(r"</?[a-zA-Z][a-zA-Z0-9]*(?:\s[^>]*)?>")),
     ("watermark", "网站水印", re.compile(r"@?追书神器|#追书神器")),
@@ -37,6 +41,38 @@ _NOISE = [
 ]
 _LABELS = {"author_note": "非正文", "missing_glyph": "字符缺失", "mojibake": "疑似乱码",
            "noise": "采集杂字", "length": "篇幅异常", "gap": "章节缺号", "duplicate": "章节重号"}
+_TITLE_PROMOTION = re.compile(r"求(?:订阅|收藏|月票|推荐票?|票|打赏|支持)(?:[！!，,、 \t\u3000]*(?:求(?:订阅|收藏|月票|推荐票?|票|打赏|支持)))*[！!]*(?=$|[\s！!，,、。.）)】\]”」』])")
+_TITLE_BRACKET = re.compile(r"[（(【\[][^(（)）【】\[\]\r\n]{1,80}[）)】\]]")
+
+
+def chapter_title_span(chapter: dict[str, Any]) -> tuple[int, int]:
+    """Locate the exact pure-title span within the pinned chapter text."""
+    marker = str(chapter.get("raw_marker") or "")
+    title = str(chapter.get("title") or "")
+    end = len(marker.rstrip())
+    if title and marker[:end].endswith(title):
+        return end - len(title), end
+    return end, end
+
+
+def _heading_noise_spans(chapter: dict[str, Any]) -> list[tuple[int, int]]:
+    """Propose promotional title fragments without touching number/real title."""
+    start, end = chapter_title_span(chapter)
+    title = chapter["text"][start:end]
+    spans = []
+    for bracket in _TITLE_BRACKET.finditer(title):
+        interior = bracket.group()[1:-1]
+        # Only a bracket composed of explicit solicitation phrases qualifies.
+        residue = _TITLE_PROMOTION.sub("", interior).strip(" \t\u3000，,、！!。.")
+        if not residue and _TITLE_PROMOTION.search(interior):
+            spans.append((bracket.start(), bracket.end()))
+    for match in _TITLE_PROMOTION.finditer(title):
+        if not any(left <= match.start() and match.end() <= right for left, right in spans):
+            left = match.start()
+            while left > 0 and title[left - 1] in " \t\u3000":
+                left -= 1
+            spans.append((left, match.end()))
+    return [(start + left, start + right) for left, right in spans]
 
 
 def validate_settings(options: dict[str, Any]) -> dict[str, Any]:
@@ -113,7 +149,12 @@ def chapter_proposals(chapter: dict[str, Any], options: dict[str, Any]) -> list[
 
     def make_proposal(start: int, end: int, kind: str, label: str, reason: str,
                       enabled: bool = True, removable: bool = True) -> dict[str, Any]:
-        return _proposal(text, start, end, kind, label, reason, enabled, removable, source_hash)
+        proposal = _proposal(text, start, end, kind, label, reason, enabled, removable, source_hash)
+        proposal["scope"] = "heading" if end <= body_offset else "body"
+        return proposal
+
+    for start, end in _heading_noise_spans(chapter):
+        proposals.append(make_proposal(start, end, "author_note", "标题求票内容", "章节标题中的订阅或求票提示"))
 
     title = chapter.get("raw_marker") or chapter.get("title") or ""
     # Strong author chapters are review candidates as a whole, never silently removed.
@@ -142,7 +183,9 @@ def chapter_proposals(chapter: dict[str, Any], options: dict[str, Any]) -> list[
         for index, (start, end, paragraph) in enumerate(paragraphs):
             if len(paragraph) > 160 or _DIALOGUE.search(paragraph):
                 continue
-            hits = [keyword for keyword in keywords if keyword in paragraph]
+            hits = [keyword for keyword in keywords
+                    if (_POSTSCRIPT.match(paragraph) if re.fullmatch(r"ps\s*[:：]", keyword, re.IGNORECASE)
+                        else keyword in paragraph)]
             tail = index >= len(paragraphs) - 2
             after_fence = fence is not None and index > fence
             if len(hits) >= 2 or (hits and (tail or after_fence)) or (after_fence and tail and len(paragraph) < 80):
@@ -187,38 +230,61 @@ def chapter_proposals(chapter: dict[str, Any], options: dict[str, Any]) -> list[
     return sorted(merged + [p for p in proposals if not p["removable"]], key=lambda p: (p["start"], p["end"]))
 
 
-def annotate_chapters(chapters: list[dict[str, Any]], options: dict[str, Any]) -> list[dict[str, Any]]:
-    lengths = [len(chapter["content"].strip()) for chapter in chapters if chapter["kind"] == "chapter"]
-    median = statistics.median(lengths) if lengths else 0
-    seen = Counter((chapter.get("pattern"), chapter.get("number")) for chapter in chapters
-                   if chapter.get("number") is not None and chapter["kind"] == "chapter")
-    last_number: dict[str, int] = {}
-    gaps = []
+def annotate_chapters(chapters: list[dict[str, Any]], options: dict[str, Any],
+                      progress: Callable[[int, int], None] | None = None,
+                      proposals_by_id: dict[str, list[dict[str, Any]]] | None = None) -> list[dict[str, Any]]:
+    """Annotate structure, reusing exact-version proposal scans when supplied.
+
+    Callers must invalidate changed chapter IDs and all entries after settings
+    changes. The mapping is populated for uncached chapters, making an edit cost
+    one chapter scan rather than repeatedly rescanning a whole novel.
+    """
+    cached_ids = set(proposals_by_id or {})
     for index, chapter in enumerate(chapters):
-        proposals = chapter_proposals(chapter, options)
+        identifier = chapter.get("id", f"chapter-{index + 1}")
+        cached_scan = identifier in cached_ids
+        # Editing copies metadata before invalidating that chapter's scan. The
+        # cache membership, rather than a metadata key alone, proves validity.
+        if not cached_scan or not isinstance(chapter.get("body_length"), int):
+            chapter["body_length"] = len(chapter["content"].strip())
+        if not cached_scan or not isinstance(chapter.get("char_count"), int):
+            chapter["char_count"] = sum(not c.isspace() for c in chapter["content"])
+    lengths = [chapter["body_length"] for chapter in chapters if chapter["kind"] == "chapter"]
+    median = statistics.median(lengths) if lengths else 0
+    structure = chapter_sequence(chapters)
+    gaps = structure["gaps"]
+    gaps_by_id = {gap["before_chapter_id"]: gap for gap in gaps}
+    for index, chapter in enumerate(chapters):
+        identifier = chapter.get("id", f"chapter-{index + 1}")
+        if proposals_by_id is not None and identifier in proposals_by_id:
+            proposals = proposals_by_id[identifier]
+        else:
+            proposals = chapter_proposals(chapter, options)
+            if proposals_by_id is not None:
+                proposals_by_id[identifier] = proposals
         counts = Counter(proposal["kind"] for proposal in proposals)
-        chapter.update(index=index, char_count=sum(not c.isspace() for c in chapter["content"]),
+        chapter.update(index=index,
+                       display_label=chapter_label(chapter),
                        proposal_count=sum(p["removable"] for p in proposals),
                        proposal_ids=[p["id"] for p in proposals if p["removable"]],
                        enabled_proposal_ids=[p["id"] for p in proposals if p["removable"] and p["enabled"]])
+        body_proposals = [proposal for proposal in proposals if proposal.get("scope", "body") == "body"]
+        chapter["heading_proposal_count"] = len(proposals) - len(body_proposals)
+        chapter["body_proposal_count"] = len(body_proposals)
+        chapter["first_body_issue_start"] = min((proposal["start"] for proposal in body_proposals), default=None)
         issues = [{"kind": kind, "label": _LABELS[kind], "count": count,
                    "severity": "warning" if kind in {"author_note", "noise"} else "error"}
                   for kind, count in counts.items()]
-        size = len(chapter["content"].strip())
+        size = chapter["body_length"]
         if chapter["kind"] == "chapter" and median > 0 and (size < median * 0.3 or size > median * 3):
             issues.append({"kind": "length", "label": "篇幅过短" if size < median else "篇幅过长", "count": 1, "severity": "warning"})
-        pattern, number = chapter.get("pattern"), chapter.get("number")
-        if number is not None and pattern and chapter["kind"] == "chapter":
-            if seen[(pattern, number)] > 1:
-                issues.append({"kind": "duplicate", "label": "章节重号", "count": 1, "severity": "warning"})
-            previous = last_number.get(pattern)
-            if previous is not None and number - previous > 1:
-                gap = {"before_chapter_id": chapter["id"], "after_number": previous,
-                       "before_number": number, "expected_next": previous + 1,
-                       "missing_numbers": list(range(previous + 1, min(number, previous + 9))),
-                       "missing_count": number - previous - 1, "pattern": pattern}
-                gaps.append(gap)
-                issues.append({"kind": "gap", "label": f"缺 {number - previous - 1} 章", "count": number - previous - 1, "severity": "warning"})
-            last_number[pattern] = number
+        if identifier in structure["duplicates"]:
+            issues.append({"kind": "duplicate", "label": "章节重号", "count": 1, "severity": "warning"})
+        gap = gaps_by_id.get(identifier)
+        if gap:
+            issues.append({"kind": "gap", "label": f"缺 {gap['missing_count']} 章", "count": gap["missing_count"], "severity": "warning"})
         chapter["issues"] = issues
+        chapter["issue_count"] = int(bool(issues))
+        if progress:
+            progress(index + 1, len(chapters))
     return gaps

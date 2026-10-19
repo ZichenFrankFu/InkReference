@@ -14,14 +14,14 @@ from fastapi.testclient import TestClient
 
 import inkreference.api as api
 from inkreference.api import create_app
-from inkreference.database import TABLES
+from inkreference.database import TABLES, LEGACY_TABLES
 
 
 def csv_bytes(table, rows):
     target = io.StringIO(newline="")
-    writer = csv.DictWriter(target, fieldnames=TABLES[table]["columns"])
+    writer = csv.DictWriter(target, fieldnames=LEGACY_TABLES[table]["columns"])
     writer.writeheader()
-    writer.writerows({column: row.get(column, "") for column in TABLES[table]["columns"]} for row in rows)
+    writer.writerows({column: row.get(column, "") for column in LEGACY_TABLES[table]["columns"]} for row in rows)
     return target.getvalue().encode("utf-8-sig")
 
 

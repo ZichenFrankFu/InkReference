@@ -111,11 +111,15 @@ def test_multiformat_detection_duplicate_gaps_and_length_outliers_preserve_every
     source = "第一章 开头\n" + "故事。" * 100 + "\n第三章 跳号\n短\n第三章 同号作品\n" + "正文。" * 120 + "\nChapter 4 End\n末尾。"
     document_id, first = upload(store, source)
     index = store.chapter_index(document_id)
-    assert len(index["chapters"]) == 4
-    assert len({c["id"] for c in index["chapters"]}) == 4
+    assert len(index["chapters"]) == 5
+    assert len({c["id"] for c in index["chapters"]}) == 5
+    actual = [chapter for chapter in index["chapters"] if not chapter.get("placeholder")]
+    assert len(actual) == 4
+    assert index["chapters"][1]["number"] == 2
+    assert index["chapters"][1]["placeholder"] is True
     assert index["gaps"][0]["missing_numbers"] == [2]
-    assert "duplicate" in {i["kind"] for i in index["chapters"][1]["issues"]}
-    assert "length" in {i["kind"] for i in index["chapters"][1]["issues"]}
+    assert "duplicate" in {i["kind"] for i in actual[1]["issues"]}
+    assert "length" in {i["kind"] for i in actual[1]["issues"]}
     assert first["text"] == source
     assert_lossless(first)
 
