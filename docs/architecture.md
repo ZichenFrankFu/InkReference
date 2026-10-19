@@ -4,6 +4,37 @@ React/TypeScript 工作台通过同源 `/api` 与 FastAPI 通信。Windows Power
 
 外观支持浅色、深色和跟随系统。`theme.ts` 在 React 挂载前应用配色，`theme.css` 统一覆盖工作区、表单、编辑器与弹窗；选择保存在浏览器 `localStorage` 的 `inkreference.appearance`，默认跟随系统，并响应系统主题变化及跨窗口 `storage` 事件。外观偏好不写入业务数据库。顶部不再重复显示工作区面包屑，保留侧栏展开／收起按钮。模型配置集中在侧栏工作区，取消全局右上角重复入口；侧栏底部保留备份与恢复，并提供快捷修复与外观选择。
 
+## 模块边界与动态功能
+
+“动态功能”指内容不能由固定规则决定、需要用户或语言模型判断的操作。它与上传转换、正则分章、规则扫描、数据库 CRUD、向量计算、模型下载和连接检查区分；后者继续使用确定性服务，不为统一外观引入额外模型调用。
+
+| 层 | 模块 | 职责 |
+|---|---|---|
+| 运行与桌面 | `__main__.py`、`desktop.py`、`workspace_lock.py`、`scripts/manage.py` | 环境、监听、单实例、窗口、关闭和源码启动。 |
+| HTTP 与工作区装配 | `api.py`、`studio.py`、各领域 `*_routes.py`／`*_api.py` | 请求合同、惰性服务装配、本机来源边界、任务生命周期。 |
+| 动态交互合同 | `dynamic_functions.py`、`dynamic_routes.py`、`manual_templates.py`、`DynamicFunction.tsx`、`ManualStageForm.tsx` | 操作目录、模式、按阶段 Schema 生成的手动表单模板、共享 JSON 解析与受控交互；不直接写业务事实。 |
+| 素材与关系 | `database.py`、`library_exchange.py`、`catalog_links.py`、`character_bridge_v11.py` | CRUD、可移植三表、关系权威、目录到正文分析的显式绑定。 |
+| 文本与派生视图 | `documents.py`、`ingestions.py`、`conversions.py`、`chapter_*` | 不可变原件／正文、转换、章节清洗、按章读取、磁盘投影。 |
+| 资料与分卷决策 | `research.py`、`research_comparison.py`、`research_sources.py`、`volume_research.py`、`volumes.py` | 身份核对、独立来源读取、草稿、语义去重、A/B、分卷预览与保存。 |
+| 提取与事实 | `workflows.py`、`fixed_pipeline.py`、`skills.py`、`reference_analysis.py`、`analysis_projection.py`、`reference_transforms.py` | 固定阶段、来源证据、候选修订、独立审核、历史、时间投影及版本绑定的大纲／翻译预览。 |
+| 外部模型基础设施 | `models.py`、`credentials.py`、`semantic_search.py`、`embedding_downloads.py` | 模型／凭据、逐请求用量、真实向量、可取消下载；不替代领域判断。 |
+| 故障与修复 | `diagnostics.py`、`bootstrap_logging.py`、`quick_repair.py`、`repair_generation.py`、`repair_routes.py` | 有界日志、诊断、修复草稿、文件差异、固定检查与回滚。 |
+| 存储维护 | `storage_utils.py`、`storage_health.py` | 版本化索引计划、只读容量检查与显式优化；不代替业务迁移或备份。 |
+
+六类动态操作为 `catalog`、`volumes`、`extraction`、`repair`、`summarize`、`translate`。统一流程是“固定输入版本／会话 → 自动调用、半自动提示词或手动模板 → 领域解析 → 可编辑预览 → 用户确认 → 原业务事务”。共享模块复用模式、模板和回复的安全边界，作品 identity、向量匹配、章节连续覆盖、原文证据、源码哈希和入库 revision 仍由原领域校验；不存在绕开这些规则的通用 JSON 写库接口。
+
+`GET /api/studio/dynamic-functions` 提供能力目录。新增动态操作必须声明三种模式、输入绑定、模板、预览与确认入口，并接入原有调用记账。半自动和手动不要求配置模型；外部网页模型用量是未知。自动返回结果也不能自动确认或执行模型提供的 shell 命令。完整操作路径见 [API](api-contract.md)，用户操作见 [手册](gui_manual.md)。
+
+页面通过惰性 import 加载；正文继续按摘要／目录／当前章分开读取。已退场的独立格式转换与旧文件／预处理面板不保留第二套 GUI 实现，后端兼容 API 与迁移测试仍保留。大文件模块的后续拆分按领域边界和测试约束进行，不宣称已重写全仓库所有函数。未完成的规模与分发能力列在 [审查报告](review-v13.md)。
+
+## 图标与原生身份
+
+`packaging/icon.svg` 是蓝底白色 R 的权威矢量图，不依赖系统字体。`python scripts/generate_icons.py` 生成网页 SVG／PNG、Windows 多尺寸 ICO 与 macOS 多尺寸 ICNS；`--check` 核对确定性产物。Pillow 仅用于开发时生成资源，普通桌面运行不因此下载依赖。
+
+前端 favicon、侧栏品牌和桌面加载画面使用同一图源。原生 `webview.start(icon=...)` 在 Windows 传入 ICO、在 macOS 传入 PNG；Windows 创建首个窗口前设置稳定 `com.inkreference.desktop` AppUserModelID，安装快捷方式使用相同 ID。打包收集资源并为 EXE／APP 设置对应 ICO／ICNS，macOS 的 `CFBundleIconFile` 与资源复制发生在签名前。资源缺失时构建明确失败。
+
+浏览器入口能设置 favicon 和页面品牌，系统任务栏仍属于浏览器。原生代码和打包结构测试不替代 Windows 任务栏／macOS Dock 的实际系统验收。
+
 ## 本地安全边界
 
 HTTP 中间件检查所有请求的回环 Host，API 的读写请求都拒绝外站／`null` Origin 及浏览器 cross-site 请求。默认仅允许同源前端；开发时可通过 `INKREFERENCE_DEV_ORIGIN` 显式增加一个回环来源。Vite 代理仍携带浏览器 Origin，因此开发时也需配置该例外。API 与 HTML 使用 no-store，生产页面 CSP 限制脚本、连接和资源来源，并附带 MIME、referrer 和 frame 限制。CDN 文档页停用，接口结构保留为本地 `/openapi.json`。该服务面向单用户本机使用，不提供局域网监听或多用户认证入口。
@@ -54,6 +85,37 @@ HTTP 中间件检查所有请求的回环 Host，API 的读写请求都拒绝外
 `character_bridge_v11.py` 将文档中的稳定角色 ID 显式导入／绑定到全局人物 ID，随后按作品隔离快照。绑定后，参考分析保存钩子与人物 context 更新通过附加数据库的同一事务同步；身份字段变化也传播到明确绑定对象。首次绑定不按姓名猜测，重复 ID 必须明确选择复用；作品关联、目录 revision、context revision 与参考分析 revision 均受校验。人物库和作品分析不再维护相互漂移的两套字段。人物与桥段权威关联在更新时反向同步，不以共同出现推断额外关系。 可移植素材库保留原 source/extracted ID；目标工作区缺少文档时 context 明确标记缺失，只离线编辑目录快照，不创建幽灵分析。源存在但绑定不符则停止并要求重新绑定。完整源文与分析迁移使用项目备份。
 
 桥段评分由唯一命中作品的热度权重占全库热度的比例计算，范围 0–100。讨论热度和商业规模的 1–10 区间取中点再平均；缺失分项按 1，并报告缺失数量，旧有效单热度兼容。它是本库加权普及程度，不是全网商业或讨论的自动实测值。旧常见程度／命中统计字段归档而非继续作为 GUI 指标。
+
+原始入库与规范读取分别验证：`values_json` 保留导入的 `cliché评分` 原字符串，读取／导出的投影提供实时计算评分。规范导出除这一已声明派生字段外仍保留用户值与顺序，再导入后的规范结果必须稳定；不能用“派生”解释任意未声明字段变化。
+
+## 数据增长与查询成本
+
+`storage_utils.py` 维护独立的索引计划版本 1，包含目录与工作台各 11 个索引。索引只在对应表存在时建立，属于可重建的查询结构，不改变素材 schema 6、内容 schema 4、外部 ID、revision 或可移植文件格式。旧工作区首次升级可能需要建立索引；后续打开只检查固定索引清单。
+
+| 查询路径 | 索引与读取方式 |
+|---|---|
+| 素材列表 | `sort_order,id`；作品类别／看过、人物定位／性格基调、桥段两类标签的 JSON 表达式与排序复合索引。查询使用与索引一致的固定表达式；字段仍由 allowlist 限定，值保持参数化。 |
+| 关联查询 | `library_links` 出向和入向的表／ID 复合索引；原手工关系索引与权威事务不变。 |
+| 正文与任务摘要 | 正文创建时间、作品／创建时间，任务创建时间、文档／创建时间、状态与块状态索引；正文列表和队列不加载全文候选。 |
+| 审核与事件历史 | 按文档／分区／提交时间、文档／源版本、任务／事件序号索引。 |
+| 用量 | 全局及 run 范围的时间／ID 复合索引；GUI 每页 50 条，双键游标最多 200 条，不在打开页面时加载完整历史。 |
+
+用量汇总改为 SQLite 聚合，不在 Python 逐行解析全部历史 JSON。聚合仍需扫描符合范围的记录，不宣称时间复杂度为常数。旧无分页用量 API 保留给兼容集成，新 GUI 使用分页结果。桥段热度分母仅缓存一份总热度／作品数小元组，目录写入的 SQLite epoch 触发器使其失效；回滚中的未提交值不发布到共享缓存。缓存不保存全部作品或全关系映射。
+
+`storage_health.py` 只读取数据库文件大小、WAL 大小、页数、可复用页、索引是否存在和已有优化器行数估计，不为打开健康页扫描业务行或创建不存在的库。显式维护只补缺失索引、执行有限 `PRAGMA optimize` 和被动 WAL checkpoint；每库约两秒的 SQLite 执行预算、500 ms busy timeout，SQLite BUSY／LOCKED／INTERRUPT 返回 deferred，可以后重试；真实故障返回 error 与诊断 ID。不执行 VACUUM，不自动删除正文、候选、用量或历史。后台运行期间由应用的 idle 检查阻止维护。
+
+| 数据类别 | 保留／处理策略 |
+|---|---|
+| 原始上传、稳定事实、有效审核贡献、任务候选、逐请求用量 | 业务记录，不作为缓存自动删除；保留 ID、来源和审计。 |
+| 正文版本 | 最近 10 个普通版本，另保护初始／当前和真实引用；保护版本可能超过 10。 |
+| 章节读模型 | 最近 3 个版本，旧保留正文打开时重建。 |
+| 分析恢复快照 | 最近 10 次；原合同归档和当前有效事实另保留。 |
+| 模型候选缓存 | 最多 1000 条／32 MiB，不删除原任务审计。 |
+| 向量缓存 | 最多 50000 条，以内容哈希和模型目标指纹隔离；不是 ANN 索引。 |
+| embedding 下载／修复生成任务 | 最近 50／24 份；权重由 Ollama 保存，源码恢复备份独立保留。 |
+| 结构化事件日志 | 单文件 1,000,000 字节、四份轮转；写入时清理最后修改超过 14 天的文件。 |
+
+普通打开流程受益于这些索引、摘要和惰性读取；显式全库导出／备份仍按完整业务集工作。当前没有 FTS、ANN、事实级无限容量或自动备份承诺，分析 8 MB 和备份恢复上限仍存在，具体缺口见 [review-v13.md](review-v13.md)。
 
 ## 全文工作流与界面
 

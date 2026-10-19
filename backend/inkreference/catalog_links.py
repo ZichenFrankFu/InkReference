@@ -51,7 +51,7 @@ class CatalogLinks:
         return {"id": record["id"], "title": record["values"].get("作品", ""), "revision": record["revision"]}
 
     def works(self, q: str = "", offset: int = 0, limit: int = 100) -> dict:
-        result = self.store.list_records("works", q=q, offset=offset, limit=limit)
+        result = self.store.list_records("works", q=q, offset=offset, limit=limit, include_work_facets=False)
         return {**result, "items": [self._work(item) for item in result["items"]]}
 
     def filter_work_ids(self, *, has_text: bool | None = None, has_analysis: bool | None = None) -> list[str]:

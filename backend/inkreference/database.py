@@ -20,6 +20,8 @@ from . import __version__
 from . import catalog_schema_v11 as catalog_schema
 import hashlib
 
+from .storage_utils import ensure_growth_indexes, json_field_expression
+
 VERSION = __version__
 WORK_COLUMNS = ["作品ID", "作品", "类别", "作者", "发布日期", "版本与原作关系", "用户是否完整体验过", "两句话概括", "剧情补充说明", "热度", "典型桥段（剧透）"]
 CHARACTER_COLUMNS = ["人物ID", "作品ID", "作品", "版本", "角色", "角色定位", "开场身份", "开场能力／专长", "后续能力", "性格", "人物补充说明"]
@@ -214,6 +216,8 @@ class DataStore:
     def __init__(self, db_path: str | Path):
         self.db_path = str(db_path)
         self.write_lock = threading.RLock()
+        self._read_cache_lock = threading.RLock()
+        self._score_totals_cache: tuple[int, tuple[float, int, int]] | None = None
         self.character_sync = None
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         self._migrate()
@@ -223,7 +227,14 @@ class DataStore:
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute("PRAGMA busy_timeout = 30000")
+        self.configure_functions(connection)
         return connection
+
+    @staticmethod
+    def configure_functions(connection: sqlite3.Connection) -> None:
+        """Share deterministic SQL functions with transactional import previews."""
+        connection.create_function("catalog_work_heat", 1, lambda value: catalog_schema.work_heat(json.loads(value))[0], deterministic=True)
+        connection.create_function("catalog_work_missing_heat", 1, lambda value: int(catalog_schema.work_heat(json.loads(value))[1]), deterministic=True)
 
     @contextlib.contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
@@ -346,6 +357,14 @@ class DataStore:
                 connection.execute(f"CREATE TRIGGER IF NOT EXISTS {table}_delete_catalog_archives AFTER DELETE ON {table} BEGIN DELETE FROM catalog_field_archive WHERE table_key='{table}' AND record_id=OLD.id; END")
             connection.execute("CREATE TRIGGER IF NOT EXISTS characters_delete_contexts AFTER DELETE ON characters BEGIN DELETE FROM character_contexts WHERE character_id=OLD.id; END")
             connection.execute("CREATE TRIGGER IF NOT EXISTS works_delete_contexts AFTER DELETE ON works BEGIN DELETE FROM character_contexts WHERE work_id=OLD.id; END")
+            ensure_growth_indexes(connection, "catalog")
+            # A durable epoch invalidates bounded in-process read caches even
+            # for writes through attached databases or another SQLite client.
+            connection.execute("CREATE TABLE IF NOT EXISTS catalog_runtime_state (key TEXT PRIMARY KEY,value INTEGER NOT NULL)")
+            connection.execute("INSERT OR IGNORE INTO catalog_runtime_state VALUES ('epoch',0)")
+            for table in (*TABLES, "work_cliches"):
+                for operation in ("INSERT", "UPDATE", "DELETE"):
+                    connection.execute(f"CREATE TRIGGER IF NOT EXISTS growth_{table}_{operation.lower()} AFTER {operation} ON {table} BEGIN UPDATE catalog_runtime_state SET value=value+1 WHERE key='epoch'; END")
 
     def _upgrade_catalog_rows(self, connection: sqlite3.Connection) -> None:
         for table in TABLES:
@@ -432,17 +451,24 @@ class DataStore:
             marker=connection.total_changes
             cached=getattr(connection,"_catalog_score_context",None)
             if cached is None or cached[0]!=marker:
-                works={r["id"]:catalog_schema.work_heat(json.loads(r["values_json"])) for r in connection.execute("SELECT id,values_json FROM works")}
-                by_cliche={}
-                for edge in connection.execute("SELECT work_id,cliche_id FROM work_cliches"):by_cliche.setdefault(edge["cliche_id"],set()).add(edge["work_id"])
-                cached=(marker,works,by_cliche,sum(item[0] for item in works.values()),sum(item[1] for item in works.values()))
+                epoch = connection.execute("SELECT value FROM catalog_runtime_state WHERE key='epoch'").fetchone()[0]
+                with self._read_cache_lock:
+                    totals = self._score_totals_cache[1] if self._score_totals_cache and self._score_totals_cache[0] == epoch else None
+                if totals is None:
+                    totals = tuple(connection.execute("SELECT COALESCE(SUM(catalog_work_heat(values_json)),0),COUNT(*),COALESCE(SUM(catalog_work_missing_heat(values_json)),0) FROM works").fetchone())
+                    # Never publish an uncommitted epoch: a rollback followed
+                    # by another write can reuse its integer with other data.
+                    if not connection.total_changes:
+                        with self._read_cache_lock:
+                            self._score_totals_cache = (epoch, totals)
+                cached=(marker, *totals)
                 if isinstance(connection,_ClosingConnection):connection._catalog_score_context=cached
-            _,works,by_cliche,denominator,missing_count=cached
-            matched=by_cliche.get(row["id"],set())
-            score=round(100*sum(works[i][0] for i in matched if i in works)/denominator,4) if denominator else 0.0
+            _,denominator,total_work_count,missing_count=cached
+            matched_count, matched_heat = connection.execute("SELECT COUNT(*),COALESCE(SUM(catalog_work_heat(w.values_json)),0) FROM work_cliches wc JOIN works w ON w.id=wc.work_id WHERE wc.cliche_id=?", (row["id"],)).fetchone()
+            score=round(100*matched_heat/denominator,4) if denominator else 0.0
             display["cliché评分"]=str(score)
             if catalog_schema.is_current(table,values): result["values"]={**values,"cliché评分":str(score)}
-            result["computed"]={"cliche_score":score,"matched_work_count":len(matched),"total_work_count":len(works),"missing_heat_count":missing_count,"formula":catalog_schema.SCORE_FORMULA}
+            result["computed"]={"cliche_score":score,"matched_work_count":matched_count,"total_work_count":total_work_count,"missing_heat_count":missing_count,"formula":catalog_schema.SCORE_FORMULA}
         return result
 
     def get_record(self, table: str, identifier: str) -> dict[str, Any]:
@@ -459,7 +485,7 @@ class DataStore:
             connection.execute("BEGIN")
             return self._all(connection, table)
 
-    def list_records(self, table: str, q: str = "", offset: int = 0, limit: int = 50, work_id: str | None = None, cliche_id: str | None = None, filters: dict[str,Any] | None = None, sort_by: str | None = None, sort_direction: str = "asc") -> dict[str, Any]:
+    def list_records(self, table: str, q: str = "", offset: int = 0, limit: int = 50, work_id: str | None = None, cliche_id: str | None = None, filters: dict[str,Any] | None = None, sort_by: str | None = None, sort_direction: str = "asc", include_work_facets: bool = True) -> dict[str, Any]:
         require_table(table)
         if offset < 0 or limit < 1 or limit > 500:
             raise DataError(422,"分页范围无效（limit 为 1–500）")
@@ -499,9 +525,9 @@ class DataStore:
             if field in CLICHE_TAGS and value not in ("", *CLICHE_TAGS[field]):
                 raise DataError(422,f"{field} 筛选值无效")
             if field == "用户是否完整体验过" and value == "unknown":
-                clauses.append("COALESCE(json_extract(r.values_json,?), '') NOT IN ('是','否')");parameters.append('$."'+field+'"')
+                clauses.append(f"COALESCE({json_field_expression(field, prefix='r.')}, '') NOT IN ('是','否')")
             elif value != "":
-                clauses.append("json_extract(r.values_json,?)=?");parameters.extend(('$."'+field+'"',value))
+                clauses.append(f"{json_field_expression(field, prefix='r.')}=?");parameters.append(value)
         order = "r.sort_order,r.id"
         if sort_by:
             if sort_by not in {"id",*TABLES[table]["columns"]}:
@@ -511,8 +537,9 @@ class DataStore:
             elif table=="cliches" and sort_by=="cliché评分":
                 order=f"COALESCE((SELECT SUM(catalog_work_heat(w.values_json)) FROM works w JOIN work_cliches wc ON wc.work_id=w.id WHERE wc.cliche_id=r.id)/(SELECT SUM(catalog_work_heat(values_json)) FROM works),0) {direction},r.id"
             else:
-                # Field is selected from a fixed schema allowlist; bind its JSON path.
-                order = f"json_extract(r.values_json,?) COLLATE NOCASE {direction},r.id"
+                # Only schema-owned paths become SQL. Literal paths let SQLite
+                # use expression indexes; user values remain bound parameters.
+                order = f"{json_field_expression(sort_by, prefix='r.')} COLLATE NOCASE {direction},r.id"
         where = " WHERE " + " AND ".join(clauses) if clauses else ""
         with self.connect() as connection:
             connection.create_function("casefold",1,lambda value:str(value).casefold(),deterministic=True)
@@ -520,13 +547,15 @@ class DataStore:
             connection.execute("BEGIN")
             total = connection.execute(f"SELECT COUNT(*) FROM {table} r{where}",parameters).fetchone()[0]
             rows_parameters = list(parameters)
-            if sort_by and sort_by != "id" and not (table=="cliches" and sort_by=="cliché评分"): rows_parameters.append('$."'+sort_by+'"')
             rows = connection.execute(f"SELECT r.* FROM {table} r{where} ORDER BY {order} LIMIT ? OFFSET ?",(*rows_parameters,limit,offset))
             items = [self._render(connection,table,row) for row in rows]
-            categories = [row[0] for row in connection.execute("SELECT DISTINCT json_extract(values_json,'$.类别') category FROM works WHERE COALESCE(json_extract(values_json,'$.类别'),'') != '' ORDER BY category")]
-            roles = [row[0] for row in connection.execute("SELECT DISTINCT json_extract(values_json,'$.角色定位') role FROM characters WHERE COALESCE(json_extract(values_json,'$.角色定位'),'') != '' ORDER BY role")]
-            works = [{"id":row["id"], "title":row["title"]} for row in connection.execute("SELECT id,json_extract(values_json,'$.作品') title FROM works ORDER BY sort_order,id")]
+            category = json_field_expression("类别")
+            role = json_field_expression("角色定位")
+            categories = [row[0] for row in connection.execute(f"SELECT DISTINCT {category} category FROM works WHERE COALESCE({category},'') != '' ORDER BY category")]
+            roles = [row[0] for row in connection.execute(f"SELECT DISTINCT {role} role FROM characters WHERE COALESCE({role},'') != '' ORDER BY role")]
+            works = [{"id":row["id"], "title":row["title"]} for row in connection.execute("SELECT id,json_extract(values_json,'$.作品') title FROM works ORDER BY sort_order,id")] if include_work_facets else []
             facets = {"categories":categories,"roles":roles,"works":works,"character_traits":list(CLICHE_CHARACTER_TRAITS),"plot_mechanisms":list(CLICHE_PLOT_MECHANISMS)}
+            if not include_work_facets: facets["works_paged"] = True
             return {"items":items,"total":total,"offset":offset,"limit":limit,"facets":facets,"summary":{"matches":total,**self._stats(connection)}}
 
     def relations(self, table: str, identifier: str) -> dict[str, list[dict[str, Any]]]:

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import {
   Activity, Check, CheckCircle2, ChevronDown, Cloud, Cpu, Eye, EyeOff,
-  Globe, LockKeyhole, Plus, RefreshCw, Save, Server, Download,
+  Globe, LockKeyhole, Plus, RefreshCw, Save, Server, Download, ChevronLeft, ChevronRight,
   ShieldCheck, SlidersHorizontal, Trash2, Wallet, Zap,
 } from "lucide-react";
 import { studio, send, normalizeList, type ModelProfile, type List } from "./studio";
@@ -115,6 +115,11 @@ export default function Models() {
   const [usage, setUsage] = useState<Usage[]>([]);
   const [summary, setSummary] = useState<UsageSummary | null>(null);
   const [runId, setRunId] = useState("");
+  const [usageCursor, setUsageCursor] = useState<string | null>(null);
+  const [usageNextCursor, setUsageNextCursor] = useState<string | null>(null);
+  const [usagePrevious, setUsagePrevious] = useState<(string | null)[]>([]);
+  const [usageFilter, setUsageFilter] = useState("");
+  const usageRequest = useRef(0);
   const [busy, setBusy] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -145,13 +150,19 @@ export default function Models() {
     } catch (e) { setError(messageOf(e)); }
     finally { setLoading(false); }
   }, []);
-  const loadUsage = useCallback(async () => {
+  const loadUsage = useCallback(async (cursor: string | null = null, filter = runId, history: (string | null)[] = []) => {
+    const request = ++usageRequest.current;
     setBusy("usage"); setError("");
     try {
-      const result = await studio<{ items: Usage[]; summary: UsageSummary }>(`/usage${runId ? `?run_id=${encodeURIComponent(runId)}` : ""}`);
-      setUsage(result.items); setSummary(result.summary);
-    } catch (e) { setError(messageOf(e)); }
-    finally { setBusy(""); }
+      const query = new URLSearchParams({ limit: "50" });
+      if (filter) query.set("run_id", filter);
+      if (cursor) query.set("cursor", cursor);
+      const result = await studio<{ items: Usage[]; summary: UsageSummary; next_cursor: string | null }>(`/usage?${query}`);
+      if (request !== usageRequest.current) return;
+      setUsage(result.items); setSummary(result.summary); setUsageNextCursor(result.next_cursor);
+      setUsageCursor(cursor); setUsageFilter(filter); setUsagePrevious(history);
+    } catch (e) { if (request === usageRequest.current) setError(messageOf(e)); }
+    finally { if (request === usageRequest.current) setBusy(""); }
   }, [runId]);
   useEffect(() => { void load(); }, [load]);
   useEffect(() => {
@@ -497,6 +508,13 @@ export default function Models() {
                 </table>
               </div>
             )}
+            <div className="usage-pagination">
+              <span>{summary?.calls ? `${usagePrevious.length * 50 + (usage.length ? 1 : 0)}–${usagePrevious.length * 50 + usage.length} / ${number(summary.calls)}` : "0"}</span>
+              <div className="inline-actions">
+                <button className="button secondary" disabled={!!busy || !usagePrevious.length} onClick={() => { const previous = usagePrevious.at(-1) ?? null; void loadUsage(previous, usageFilter, usagePrevious.slice(0, -1)); }}><ChevronLeft size={15} />上一页</button>
+                <button className="button secondary" disabled={!!busy || !usageNextCursor} onClick={() => { if (!usageNextCursor) return; void loadUsage(usageNextCursor, usageFilter, [...usagePrevious, usageCursor]); }}>下一页<ChevronRight size={15} /></button>
+              </div>
+            </div>
           </div>
         </section>
       )}

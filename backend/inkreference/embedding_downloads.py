@@ -22,6 +22,7 @@ from uuid import uuid4
 import httpx
 
 from .database import DataError
+from .diagnostics import background_target, logged_operation, record_exception
 from .models import _validate_profile, _endpoint_binding, _usage, _cost
 
 
@@ -119,7 +120,7 @@ class EmbeddingDownloads:
             self.workers = {key: worker for key, worker in self.workers.items() if worker.is_alive()}
             self.stops = {key: stop for key, stop in self.stops.items() if key in self.workers}
             stop = threading.Event(); self.stops[identity] = stop
-            thread = threading.Thread(target=self.execute, args=(identity,), name='embedding-download-' + identity[:8], daemon=True)
+            thread = threading.Thread(target=background_target(self.execute), args=(identity,), name='embedding-download-' + identity[:8], daemon=True)
             self.workers[identity] = thread
             thread.start()
 
@@ -135,6 +136,7 @@ class EmbeddingDownloads:
     def _check(self, identity):
         if self.stops.setdefault(identity, threading.Event()).is_set(): raise InterruptedError
 
+    @logged_operation("embedding", "download_task", task_arg="identity")
     def execute(self, identity):
         job = self.get(identity)
         config = key = None
@@ -176,12 +178,16 @@ class EmbeddingDownloads:
         except InterruptedError:
             job.update(status='cancelled', stage='已取消', error=None)
         except DataError as exc:
+            record_exception("embedding", "download_task", exc, task_id=identity)
             job.update(status='failed', stage='下载失败', error=exc.detail if isinstance(exc.detail, str) else '模型下载失败')
-        except httpx.TimeoutException:
+        except httpx.TimeoutException as error:
+            record_exception("embedding", "download_task", error, task_id=identity, stage="timeout")
             job.update(status='failed', stage='连接超时', error='Ollama 下载响应超时，请检查本机服务后重试')
-        except httpx.HTTPError:
+        except httpx.HTTPError as error:
+            record_exception("embedding", "download_task", error, task_id=identity, stage="transport")
             job.update(status='failed', stage='连接失败', error='无法连接本机 Ollama，请检查服务后重试')
-        except Exception:
+        except Exception as error:
+            record_exception("embedding", "download_task", error, task_id=identity)
             job.update(status='failed', stage='下载失败', error='Ollama 返回了无效的下载进度')
         finally:
             with self.lock:

@@ -2,7 +2,6 @@ import { useEffect, useId, useRef, type ReactNode } from "react";
 import {
   AlertCircle,
   CheckCircle2,
-  ChevronRight,
   LoaderCircle,
   Menu,
   Wrench,
@@ -317,35 +316,6 @@ export function Metric({
         <small>{unit}</small>
       </strong>
     </div>
-  );
-}
-export function Rows({ children }: { children: ReactNode }) {
-  return <div className="resource-rows">{children}</div>;
-}
-export function ResourceRow({
-  title,
-  subtitle,
-  active,
-  onClick,
-  extra,
-}: {
-  title: string;
-  subtitle?: string;
-  active?: boolean;
-  onClick: () => void;
-  extra?: ReactNode;
-}) {
-  return (
-    <button
-      className={`resource-row ${active ? "active" : ""}`}
-      onClick={onClick}
-    >
-      <span>
-        <strong>{title}</strong>
-        {subtitle && <small>{subtitle}</small>}
-      </span>
-      {extra || <ChevronRight size={16} />}
-    </button>
   );
 }
 export const dateLabel = (date?: string) =>

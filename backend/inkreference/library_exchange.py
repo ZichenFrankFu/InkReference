@@ -631,6 +631,7 @@ def preview_library_import(store: DataStore, batch: ExchangeBatch) -> dict[str, 
     tables = []
     with closing(sqlite3.connect(":memory:")) as simulation:
         simulation.row_factory = sqlite3.Row
+        store.configure_functions(simulation)
         simulation.execute("PRAGMA foreign_keys=ON")
         with store.connect() as source:
             source.execute("BEGIN")

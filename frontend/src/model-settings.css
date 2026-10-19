@@ -145,3 +145,6 @@
 .connection-start-options > button:hover { background: #f3f7ff; border-color: #a7c0f0; transform: none; }
 .connection-start-options span { color: #8b9fbb; }
 .model-settings-page button:focus-visible, .model-settings-page summary:focus-visible { outline-color: #7da5ff; }
+.usage-pagination { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; padding: 14px 18px; border-top: 1px solid var(--line); }
+.usage-pagination > span { color: var(--muted); font-variant-numeric: tabular-nums; }
+@media (max-width: 560px) { .usage-pagination { padding: 12px; } .usage-pagination .inline-actions { flex-wrap: nowrap; } .usage-pagination .button { padding-inline: 10px; } }

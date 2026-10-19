@@ -16,6 +16,7 @@ from bisect import bisect_right
 from typing import Any
 
 from .database import DataError
+from .diagnostics import record_exception
 from .skills import build_stage_prompt
 from .workflow_definitions import FIXED_STAGES
 
@@ -293,6 +294,7 @@ class FixedPipeline:
                 if contract(snapshots) >= 3:
                     self._fixed_progress(result, snapshots, chunk)
             except Exception as exc:
+                record_exception("extraction", "validate_fixed_output", exc, data_dir=self.data_dir, task_id=run_id, stage=stage)
                 error = str(exc)
         with self._db(write=True) as db:
             if not error:

@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 
 from .database import DataError
+from .diagnostics import background_target, logged_operation, record_exception
 from .documents import MAX_UPLOAD_BYTES, _BookHTML, epub_spine_sections
 
 TERMINAL = {"completed", "failed", "cancelled", "interrupted"}
@@ -267,7 +268,7 @@ class ConversionStore:
                     raise DataError(409, "此任务不能直接启动；失败、中断或取消后请重试")
                 connection.execute("UPDATE conv_jobs SET status='running',stage='preparing',progress=NULL,attempt=attempt+1,updated_at=? WHERE id=?", (_now(), identifier))
             self._cancellations[identifier] = threading.Event()
-            thread = threading.Thread(target=self._run, args=(identifier,), daemon=True, name=f"conversion-{identifier[:8]}")
+            thread = threading.Thread(target=background_target(self._run), args=(identifier,), daemon=True, name=f"conversion-{identifier[:8]}")
             self._threads[identifier] = thread
             thread.start()
         return self.get(identifier)
@@ -288,6 +289,7 @@ class ConversionStore:
             connection.execute("UPDATE conv_jobs SET " + ",".join(f"{key}=?" for key in fields)
                                + " WHERE id=? AND status='running'", (*fields.values(), identifier))
 
+    @logged_operation("conversion", "convert_task", task_arg="identifier")
     def _run(self, identifier: str) -> None:
         try:
             with self._connection() as connection:
@@ -328,6 +330,7 @@ class ConversionStore:
         except Exception as error:
             if self._closed:
                 return
+            record_exception("conversion", "convert_task", error, task_id=identifier)
             detail = str(error.detail) if isinstance(error, DataError) else f"{type(error).__name__}：{error}"
             detail = detail[:6000]
             with self._connection() as connection:

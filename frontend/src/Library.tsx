@@ -1,3 +1,5 @@
+import { DynamicModeSwitch } from "./DynamicFunction";
+import CatalogWorkFilter from "./CatalogWorkFilter";
 import {
   lazy,
   Suspense,
@@ -738,7 +740,7 @@ function WorkIntake({ initialMode = "automatic", initialTable = "works", targetW
   const navigate = (section: string) => guard(() => { onClose(); window.dispatchEvent(new CustomEvent("inkreference:navigate", { detail: { section } })); });
   return <Modal title={targetWork ? "作品资料" : "新增作品"} wide onClose={close}>
     <div className="work-intake">
-      <div className="intake-mode-switch" role="tablist" aria-label="新增方式">{([["automatic", "自动"], ["semi", "半自动"], ["manual", "手动"]] as const).map(([value, label]) => <button role="tab" type="button" key={value} className={mode === value ? "active" : ""} aria-selected={mode === value} onClick={() => chooseMode(value)}>{label}</button>)}</div>
+      <DynamicModeSwitch value={mode} onChange={chooseMode} label="新增方式" />
       {pending && <div className="intake-discard" role="alert"><span>有未保存的修改</span><button className="button secondary" onClick={() => setPending(null)}>继续编辑</button><button className="button danger" onClick={() => { const action = pending; setPending(null); setDirty(false); dirtyRef.current = false; action(); }}>放弃修改</button></div>}
       {mode === "manual" ? <section className="intake-manual">
         <div className="intake-manual-toolbar"><div className="intake-record-types" role="tablist" aria-label="素材类型">{TABLES.map(table => <button role="tab" type="button" key={table.key} aria-selected={manualSelection.table === table.key} className={manualSelection.table === table.key ? "active" : ""} onClick={() => chooseManual(table.key)}><table.icon size={15} />{table.singular}</button>)}</div><button className="icon-button" aria-label={`新增${TABLES.find(table => table.key === manualSelection.table)?.singular}`} onClick={() => chooseManual(manualSelection.table)}><Plus size={17} /></button></div>
@@ -849,6 +851,7 @@ export default function Library() {
       q: debouncedQuery,
       offset: String(offset),
       limit: String(limit),
+      include_work_facets: "false",
     });
     if (table === "works") {
       if (category) params.set("category", category);
@@ -1070,7 +1073,7 @@ export default function Library() {
                 <label><FileText size={13} /><select aria-label="筛选文本" value={hasText} onChange={e => { setHasText(e.target.value); setOffset(0); }}><option value="">文本</option><option value="true">有文本</option><option value="false">无文本</option></select></label>
                 <label><Sparkles size={13} /><select aria-label="筛选分析" value={hasAnalysis} onChange={e => { setHasAnalysis(e.target.value); setOffset(0); }}><option value="">分析</option><option value="true">有分析</option><option value="false">无分析</option></select></label>
               </>}
-              {table !== "works" && <label className="database-work-filter"><span>作品</span><select aria-label="筛选关联作品" value={workId} onChange={e => { setWorkId(e.target.value); setOffset(0); }}><option value="">全部作品</option>{facets.works?.map(work => <option key={work.id} value={work.id}>{work.title} · {work.id}</option>)}</select></label>}
+              {table !== "works" && <CatalogWorkFilter value={workId} onChange={id => { setWorkId(id); setOffset(0); }} />}
               {table === "characters" && <><label><span>基调</span><select aria-label="筛选性格基调" value={characterTrait} onChange={event => { setCharacterTrait(event.target.value); setOffset(0); }}><option value="">全部基调</option>{characterTemperaments.map(value => <option key={value}>{value}</option>)}</select></label><label><span>定位</span><select aria-label="筛选角色定位" value={role} onChange={e => { setRole(e.target.value); setOffset(0); }}><option value="">全部定位</option>{facets.roles?.map(value => <option key={value}>{value}</option>)}</select></label></>}
               {table === "cliches" && <>
                 <label><span>人设塑造</span><select aria-label="筛选人设塑造" value={characterTrait} onChange={e => { setCharacterTrait(e.target.value); setOffset(0); }}><option value="">全部</option>{clicheTypes[0].options.map(value => <option key={value}>{value}</option>)}</select></label>

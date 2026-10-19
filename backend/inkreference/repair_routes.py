@@ -4,7 +4,7 @@ from __future__ import annotations
 import threading
 from typing import Any
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Query
 from fastapi.responses import Response
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -23,6 +23,12 @@ class PreviewRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     reply: str = Field(max_length=MAX_REPLY)
     session_id: str | None = Field(default=None, min_length=1, max_length=100)
+
+
+class AutomaticRequest(PromptRequest):
+    profile_id: str = Field(min_length=1, max_length=100)
+    remote_consent: bool = False
+    expected_model_fingerprint: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
 
 class ApplyRequest(BaseModel):
@@ -56,7 +62,7 @@ def install_repair_routes(application, runtime):
             if service is None:
                 def rebuild(document_id, version_id):
                     return runtime.studio.documents.rebuild_read_views(document_id, version_id)
-                service = QuickRepair(runtime.data_dir, cache_rebuilder=rebuild)
+                service = QuickRepair(runtime.data_dir, cache_rebuilder=rebuild, models=lambda: runtime.studio.models)
             return service
 
     application.state.quick_repair = get_service
@@ -74,6 +80,26 @@ def install_repair_routes(application, runtime):
     @router.post("/prompt")
     def prompt(body: PromptRequest):
         return get_service().prompt(body.description, body.topic, body.frontend_events, body.context)
+
+    @router.get("/sessions/{session_id}/source")
+    def session_source(session_id: str, path: str = Query(min_length=1, max_length=500)):
+        return get_service().session_source(session_id, path)
+
+    @router.post("/automatic", status_code=202)
+    def automatic(body: AutomaticRequest):
+        return get_service().automatic(**body.model_dump())
+
+    @router.get("/generations")
+    def generations(summary: bool = True):
+        return get_service().recent_generations(summary=summary)
+
+    @router.get("/generations/{identifier}")
+    def generation(identifier: str):
+        return get_service().generation(identifier)
+
+    @router.post("/generations/{identifier}/cancel")
+    def cancel_generation(identifier: str):
+        return get_service().cancel_generation(identifier)
 
     @router.post("/preview")
     def preview(body: PreviewRequest):

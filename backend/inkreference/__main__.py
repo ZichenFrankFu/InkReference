@@ -86,6 +86,7 @@ def main(argv: list[str] | None = None) -> int:
         config = uvicorn.Config(
             "inkreference.api:app", host=args.host, port=args.port,
             log_level="info",
+            access_log=False,
             proxy_headers=False, server_header=False,
             loop="asyncio:SelectorEventLoop" if sys.platform == "win32" else "auto",
         )

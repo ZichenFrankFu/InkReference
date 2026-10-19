@@ -18,6 +18,7 @@ import ipaddress
 from langgraph.graph import END, START, StateGraph
 
 from .database import DataError
+from .diagnostics import background_target, logged_operation, record_exception
 from .local_security import target_fingerprint
 from .models import ModelService, _now
 from .research_sources import ResearchSources, _fingerprint
@@ -530,6 +531,7 @@ class ResearchService(ResearchComparisonMixin):
         p["progress"]={"completed":total,"total":total,"label":"等待审核"};p["error"]=None
         self._update(job_id,payload=p,status="needs_review",stage="review");return state
 
+    @logged_operation("research", "catalog_task", task_arg="job_id")
     def _execute(self,job_id):
         try:
             self.graph.invoke({"job_id":job_id})
@@ -538,6 +540,7 @@ class ResearchService(ResearchComparisonMixin):
             row=self._row(job_id);p=json.loads(row["payload_json"]);p["error"]=None
             self._update(job_id,payload=p,status=row["stop_kind"],stage=row["stop_kind"])
         except Exception as exc:
+            record_exception("research","catalog_task",exc,task_id=job_id)
             p=self._payload(job_id);p["error"]=str(exc.detail) if isinstance(exc,DataError) else "联网更新失败，请检查连接并重试"
             self._update(job_id,payload=p,status="failed")
         finally:
@@ -553,7 +556,7 @@ class ResearchService(ResearchComparisonMixin):
             with self.models._connect() as db:db.execute("UPDATE research_jobs SET status='running',cancel_requested=0,stop_kind='cancelled',revision=revision+1,updated_at=? WHERE id=?",(_now(),job_id))
             self._owners.add(self._key(job_id))
             if background:
-                worker=threading.Thread(target=self._execute,args=(job_id,),daemon=True,name="inkreference-research-"+job_id[:8]);self._workers[self._key(job_id)]=worker;worker.start()
+                worker=threading.Thread(target=background_target(self._execute),args=(job_id,),daemon=True,name="inkreference-research-"+job_id[:8]);self._workers[self._key(job_id)]=worker;worker.start()
         if not background:self._execute(job_id)
         return self.get(job_id)
 

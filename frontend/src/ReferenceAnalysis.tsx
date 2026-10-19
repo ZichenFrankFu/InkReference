@@ -1,10 +1,10 @@
+import TransformDialog from "./ReferenceTransformDialog";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ArrowRight, BookOpen, CheckCircle2, Download, FileSearch, History, Layers3, MessageSquare, RefreshCw, Search, SlidersHorizontal, Sparkles, Upload, X, Play } from "lucide-react";
 import { Busy, Empty, Modal, Notice, dateLabel, messageOf } from "./ui";
-import { normalizeList, send, studio, type DocumentMeta, type List, type ModelProfile, type Run, type RunSummary } from "./studio";
+import { send, studio, type DocumentMeta, type Run, type RunSummary } from "./studio";
 import { download, request, type Item, type Page } from "./api";
-import { isRemoteModel, modelEndpoint } from "./model-security";
-import { CollectionEditor, FactsEditor, PlotEditor, PromptPanel, ReferenceField } from "./ReferenceEditors";
+import { CollectionEditor, FactsEditor, ReferenceField } from "./ReferenceEditors";
 import { ChronicleEntities, ChroniclePlot, EraBackgroundEditor, LanguageAnalysisEditor } from "./ChronicleEditors";
 import { record, records, sectionCount, stringValue, type ReferenceRecord, type ReferenceSection, type ReferenceState } from "./reference-types";
 import "./reference-analysis.css";
@@ -185,7 +185,7 @@ export default function ReferenceAnalysis({ docs, runs, loading, navigate, onRef
         <div className="reference-notices"><Notice error={!!error} success={!error && !!message}>{error || message}</Notice></div>
         <div className="reference-tab-body" key={`${documentId}:${tab}`}>
           {!projection ? <Busy label={readOnly ? "正在读取叙事进度视图" : "正在读取作品分析"} /> : shown && <>
-          {tab === "plot" && <ChroniclePlot sourceVersionId={selected.latest_version_id || ""} value={shown.plot} rawValue={shown.plot} onSave={readOnly ? undefined : data => save("plot", data)} busy={!!busy} onDirty={sectionDirty} characters={records(shown.characters)} settings={records(shown.settings)} readOnly={readOnly} />}
+          {tab === "plot" && <><div className="ref-raw-tools"><button className="button secondary" disabled={!!busy || dirty || readOnly} onClick={() => setTransform({kind:"summarize"})}><Sparkles size={14}/>整理大纲</button></div><ChroniclePlot sourceVersionId={selected.latest_version_id || ""} value={shown.plot} rawValue={shown.plot} onSave={readOnly ? undefined : data => save("plot", data)} busy={!!busy} onDirty={sectionDirty} characters={records(shown.characters)} settings={records(shown.settings)} readOnly={readOnly} /></>}
           {(["characters", "settings"] as string[]).includes(tab) && <ChronicleEntities sourceVersionId={selected.latest_version_id || ""} kind={tab as "characters" | "settings"} value={shown[tab as ReferenceSection]} rawValue={shown[tab as ReferenceSection]} onSave={readOnly ? undefined : data => save(tab as ReferenceSection, data)} busy={!!busy} onDirty={sectionDirty} plot={shown.plot} characters={records(shown.characters)} settings={records(shown.settings)} readOnly={readOnly} onCatalog={readOnly ? undefined : item => void openCatalogCharacter(item)} />}
           {tab === "setting_features" && <CollectionEditor kind="setting_features" value={shown.setting_features} onSave={items => save("setting_features", items)} busy={!!busy || readOnly} onDirty={sectionDirty} />}
           {tab === "era_background" && <EraBackgroundEditor sourceVersionId={selected.latest_version_id || ""} value={shown.era_background} plot={shown.plot} characters={records(shown.characters)} onSave={readOnly ? undefined : data => save("era_background", data)} busy={!!busy} onDirty={sectionDirty} />}
@@ -209,29 +209,4 @@ function MetadataDialog({ value, busy, onClose, onSave }: { value: unknown; busy
   const [draft, setDraft] = useState<ReferenceRecord>(() => structuredClone(record(value)));
   const [error, setError] = useState("");
   return <Modal title="作品笔记" onClose={onClose} busy={busy} wide><div className="modal-body"><ReferenceField field={{ key: "user_rating", label: "个人评分", options: [["", "尚未评分"], ["1", "★"], ["2", "★★"], ["3", "★★★"], ["4", "★★★★"], ["5", "★★★★★"]] }} value={draft.user_rating} onChange={user_rating => setDraft(d => ({ ...d, user_rating }))} /><ReferenceField field={{ key: "user_why_i_like", label: "喜欢这部作品的原因", area: true }} value={draft.user_why_i_like} onChange={user_why_i_like => setDraft(d => ({ ...d, user_why_i_like }))} /><FactsEditor label="章节笔记" value={draft.chapter_comments} onChange={chapter_comments => setDraft(d => ({ ...d, chapter_comments }))} /><Notice error>{error}</Notice>{busy && <Busy label="正在保存作品笔记" compact />}</div><div className="modal-footer"><button className="button secondary" onClick={onClose} disabled={busy}>取消</button><button className="button primary" disabled={busy} onClick={async () => { try { await onSave(draft); } catch (e) { setError(messageOf(e)); } }}>保存笔记</button></div></Modal>;
-}
-
-function TransformDialog({ transform, state, navigate, onClose, onApply }: { transform: Transform; state: ReferenceState; navigate: Navigation; onClose: () => void; onApply: (data: ReferenceRecord) => Promise<void> }) {
-  const [mode, setMode] = useState("web");
-  const [profiles, setProfiles] = useState<ModelProfile[]>([]);
-  const [profileId, setProfileId] = useState("");
-  const [granularity, setGranularity] = useState("major_event");
-  const [language, setLanguage] = useState("简体中文");
-  const [prompt, setPrompt] = useState("");
-  const [paste, setPaste] = useState("");
-  const [preview, setPreview] = useState<ReferenceRecord | null>(null);
-  const [busy, setBusy] = useState("");
-  const [error, setError] = useState("");
-  const profile = profiles.find(p => p.id === profileId);
-  const remote = isRemoteModel(profile);
-  const title = transform.kind === "summarize" ? "调整大纲粒度" : "翻译原始文本";
-  useEffect(() => { void studio<List<ModelProfile>>("/models").then(r => { const list = normalizeList(r); setProfiles(list); setProfileId(list[0]?.id || ""); }).catch(e => setError(messageOf(e))); }, []);
-  const payload = { granularity, target_language: language, entry_index: transform.entryIndex };
-  const prepare = async (api = false) => { setBusy(api ? "run" : "prompt"); setError(""); setPreview(null); try { const response = await send<{ prompt: string; data?: ReferenceRecord; text?: string }>(`/documents/${state.document_id}/reference/transform`, { kind: transform.kind, profile_id: api ? profileId : undefined, payload: { ...payload, prompt_only: !api }, remote_consent: remote && api, expected_model_fingerprint: api ? profile?.target_fingerprint : undefined }); setPrompt(response.prompt); if (api) setPreview(transform.kind === "summarize" ? response.data || {} : { text: response.text || "" }); } catch (e) { setError(messageOf(e)); } finally { setBusy(""); } };
-  const parse = () => { setError(""); try { if (!paste.trim()) throw new Error("请先粘贴结果"); if (transform.kind === "translate") { setPreview({ text: paste }); return; } const content = paste.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, ""); const parsed = JSON.parse(content); if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.epochs)) throw new Error("结果需包含 epochs 剧情大纲数组"); setPreview(parsed); } catch (e) { setError(messageOf(e)); } };
-  return <Modal title={title} onClose={onClose} busy={!!busy} wide><div className="modal-body ref-transform"><div className="ref-segment-control"><button className={mode === "web" ? "active" : ""} onClick={() => setMode("web")} disabled={!!busy}>复制提示词与粘贴</button><button className={mode === "api" ? "active" : ""} onClick={() => setMode("api")} disabled={!!busy}>调用本地模型或 API</button></div>{transform.kind === "summarize" ? <label className="studio-field"><span>大纲粒度</span><select value={granularity} onChange={e => { setGranularity(e.target.value); setPreview(null); setPrompt(""); }}><option value="chapter">按章节</option><option value="major_event">按重要事件</option><option value="volume">按卷</option><option value="book">全书概括</option></select></label> : <label className="studio-field"><span>翻译为</span><input value={language} onChange={e => { setLanguage(e.target.value); setPrompt(""); setPreview(null); }} /></label>}
-    {mode === "web" ? <><button className="button secondary" onClick={() => void prepare()} disabled={!!busy}>生成提示词</button>{(prompt || busy === "prompt") && <PromptPanel prompt={prompt} busy={busy === "prompt"} />}<label className="studio-field"><span>{transform.kind === "summarize" ? "粘贴返回的 JSON" : "粘贴译文"}</span><textarea aria-label={transform.kind === "summarize" ? "粘贴大纲 JSON" : "粘贴译文"} value={paste} rows={7} onChange={e => setPaste(e.target.value)} /></label><button className="button primary" onClick={parse} disabled={!!busy || !paste.trim()}>解析并预览</button></> : <><label className="studio-field"><span>模型配置</span><select value={profileId} onChange={e => setProfileId(e.target.value)}>{!profiles.length && <option value="">尚未配置模型</option>}{profiles.map(p => <option key={p.id} value={p.id}>{p.name} · {p.model}</option>)}</select></label><button className="text-button" onClick={() => { onClose(); navigate("models"); }}>管理模型配置<ArrowRight size={13} /></button>{profile && <div className="ref-model-target"><span>{remote ? "远程 API" : "本机模型"}</span><strong>{modelEndpoint(profile.base_url)}</strong><small>{profile.model}</small></div>}<button className="button primary" onClick={() => void prepare(true)} disabled={!!busy || !profileId || (remote && !profile?.target_fingerprint)}><Sparkles size={15} />{remote ? "发送并生成预览" : "生成预览"}</button></>}
-    <Notice error>{error}</Notice>{busy && <Busy label={busy === "apply" ? "正在保存预览结果" : busy === "prompt" ? "正在准备提示词" : "正在等待模型返回"} compact />}
-    {preview && <section className="ref-transform-preview"><div className="ref-mini-heading"><h3>结果预览</h3><span className="ref-tag">尚未应用</span></div>{transform.kind === "summarize" ? <PlotEditor value={preview} onSave={async data => setPreview(data)} busy={!!busy} /> : <textarea aria-label="译文预览" rows={12} value={stringValue(preview.text)} onChange={e => setPreview({ text: e.target.value })} />}</section>}
-  </div><div className="modal-footer"><button className="button secondary" onClick={onClose} disabled={!!busy}>取消</button><button className="button primary" disabled={!preview || !!busy} onClick={async () => { if (!preview) return; setBusy("apply"); try { await onApply(preview); } catch (e) { setError(messageOf(e)); } finally { setBusy(""); } }}>应用结果</button></div></Modal>;
 }

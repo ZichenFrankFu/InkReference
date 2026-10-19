@@ -20,6 +20,23 @@ def table_values(batch) -> dict:
     return {table.table: table.rows for table in batch.tables}
 
 
+def raw_values(store: DataStore) -> dict:
+    # Read persisted input rather than the GUI projection, which intentionally
+    # recomputes the one derived score. Fixed table names are schema-owned.
+    with store.connect() as connection:
+        connection.execute("BEGIN")
+        return {table: [json.loads(row[0]) for row in connection.execute(
+            f"SELECT values_json FROM {table} ORDER BY sort_order,id")]
+            for table in ("works", "characters", "cliches")}
+
+
+def canonical_values(store: DataStore, original: dict) -> dict:
+    expected = {table: [dict(row) for row in rows] for table, rows in original.items()}
+    for row in expected.get("cliches", []):
+        row["cliché评分"] = str(store.get_record("cliches", row["clichéID"])["computed"]["cliche_score"])
+    return expected
+
+
 def verify(paths: list[Path]) -> dict:
     originals = [(path.name, path.read_bytes()) for path in paths]
     checksums = [hashlib.sha256(content).digest() for _, content in originals]
@@ -32,6 +49,9 @@ def verify(paths: list[Path]) -> dict:
             raise ValueError("; ".join(preview["errors"]))
         expected = table_values(batch)
         commit_library_import(store, batch, "error")
+        if raw_values(store) != expected:
+            raise AssertionError("Raw import changed fields or record order")
+        canonical_expected = canonical_values(store, expected)
         formats = {}
         for format, extension in (("db", "db"), ("csv", "zip"), ("xlsx", "xlsx")):
             target = DataStore(root / f"target-{format}.db")
@@ -40,24 +60,28 @@ def verify(paths: list[Path]) -> dict:
             result = preview_library_import(target, imported)
             if result["errors"]:
                 raise AssertionError(f"{format} reimport validation failed")
-            if table_values(imported) != expected:
-                raise AssertionError(f"{format} changed fields or record order")
+            if table_values(imported) != canonical_expected:
+                raise AssertionError(f"{format} changed canonical fields or record order")
             commit_library_import(target, imported, "error")
             again = parse_library_files([(f"catalog.{extension}", export_library(target, format))])
-            if table_values(again) != expected:
-                raise AssertionError(f"{format} changed values after a second export")
+            if table_values(again) != canonical_expected:
+                raise AssertionError(f"{format} changed canonical values after a second export")
             with target.connect() as connection:
                 if connection.execute("PRAGMA foreign_key_check").fetchall():
                     raise AssertionError(f"{format} foreign key integrity failed")
-            formats[format] = {"all_fields_and_order_preserved": True, "second_export_preserved": True}
+            formats[format] = {"canonical_export_fields_and_order_preserved": True, "second_canonical_export_preserved": True}
         repeated = parse_library_files(originals)
         preview_library_import(store, repeated)
         outcome = commit_library_import(store, repeated, "skip")
         if outcome["imported"] or outcome["updated"] or outcome["skipped"] != sum(len(rows) for rows in expected.values()):
             raise AssertionError("Repeated import changed the catalog")
+        if raw_values(store) != expected:
+            raise AssertionError("Repeated import changed raw fields or record order")
     if [hashlib.sha256(path.read_bytes()).digest() for path in paths] != checksums:
         raise AssertionError("Input bytes changed")
-    return {"status": "passed", "formats": formats, "repeated_import_idempotent": True,
+    return {"status": "passed", "raw_import_fields_preserved": True, "raw_import_order_preserved": True,
+            "canonical_export_fields_and_order_preserved": True, "derived_fields_recomputed": ["cliché评分"],
+            "formats": formats, "repeated_import_idempotent": True,
             "input_bytes_unchanged": True, "model_calls": 0}
 
 

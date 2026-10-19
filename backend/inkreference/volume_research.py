@@ -9,6 +9,7 @@ from typing import TypedDict
 from uuid import uuid4
 
 from .database import DataError
+from .diagnostics import background_target, logged_operation, record_event, record_exception
 from .local_security import require_remote_consent, remote_model, target_fingerprint
 from .volumes import parse_volume_paste
 
@@ -113,7 +114,7 @@ class VolumeResearch:
             db.execute("INSERT INTO volume_research_jobs VALUES (?,?,?,?,0,?,?)", (job_id, document_id, version_id, "queued", json.dumps(value, ensure_ascii=False), _now()))
         if background:
             with self._lock:
-                worker = threading.Thread(target=self._execute, args=(job_id,), daemon=True, name=job_id)
+                worker = threading.Thread(target=background_target(self._execute), args=(job_id,), daemon=True, name=job_id)
                 self._workers[job_id] = worker
                 worker.start()
         else:
@@ -122,6 +123,7 @@ class VolumeResearch:
 
     def _stage(self, job_id, name, completed, label):
         self._check(job_id)
+        record_event("volume_research", "stage", data_dir=self.models.data_dir, task_id=job_id, stage=name)
         value = self._payload(job_id)
         value.update(stage=name, progress={"completed": completed, "total": 3, "label": label})
         self._write(job_id, value, "running")
@@ -171,6 +173,7 @@ class VolumeResearch:
         self._write(job_id, value, "completed")
         return state
 
+    @logged_operation("volume_research", "lookup_task", task_arg="job_id")
     def _execute(self, job_id):
         try:
             self.graph.invoke({"job_id": job_id})
@@ -178,6 +181,7 @@ class VolumeResearch:
             value = self._payload(job_id); value.update(stage="cancelled", error=None)
             self._write(job_id, value, "cancelled")
         except Exception as error:
+            record_exception("volume_research", "lookup_task", error, task_id=job_id)
             value = self._payload(job_id)
             value["error"] = str(error.detail) if isinstance(error, DataError) else "分卷检索失败，请检查连接后重试。"
             self._write(job_id, value, "failed")

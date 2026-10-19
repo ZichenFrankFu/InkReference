@@ -9,7 +9,6 @@ import {
   PanelLeftOpen,
   ListTodo,
   FileSearch,
-  PenLine,
   Monitor,
   Moon,
   Sun,
@@ -22,6 +21,7 @@ import { studio } from "./studio";
 import { readScheme, setScheme, type Scheme } from "./theme";
 import "./theme.css";
 import "./loading.css";
+import "./app-icon.css";
 const Library = memo(lazy(() => import("./Library")));
 const Documents = memo(lazy(() => import("./Documents")));
 const Jobs = memo(lazy(() => import("./Jobs")));
@@ -29,6 +29,7 @@ const ReferencePage = memo(lazy(() => import("./Jobs").then(module => ({ default
 const Workflows = memo(lazy(() => import("./Workflows")));
 const Models = memo(lazy(() => import("./Models")));
 const QuickRepair = lazy(() => import("./QuickRepair"));
+const StoragePanel = lazy(() => import("./StoragePanel"));
 type Section =
   | "library"
   | "documents"
@@ -179,7 +180,7 @@ export default function App() {
         <div className="sidebar-brand-row">
         <button className="brand" onClick={() => nav("library")} title={collapsed ? "InkReference" : undefined}>
           <span className="brand-mark">
-            <PenLine size={21} />
+            <img src="/app-icon.svg" width="32" height="32" alt="" />
           </span>
           <span>InkReference</span>
         </button>
@@ -389,6 +390,7 @@ function Backup() {
       <Notice error={!!error} success={!error && !!message}>
         {error || message}
       </Notice>
+      <Suspense fallback={<Busy label="读取存储管理" compact />}><StoragePanel /></Suspense>
       {confirm && (
         <Modal title="恢复备份" onClose={() => setConfirm(false)} busy={!!busy}>
           <div className="modal-body">

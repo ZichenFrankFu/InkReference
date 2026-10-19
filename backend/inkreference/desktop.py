@@ -8,6 +8,7 @@ from __future__ import annotations
 import html
 import importlib
 import json
+import logging
 import os
 import shlex
 import sys
@@ -17,6 +18,10 @@ import urllib.error
 import urllib.request
 from urllib.parse import urlsplit
 from pathlib import Path
+
+from .app_icon import icon_data_url, native_icon, set_windows_app_id
+from .application_paths import default_data_dir
+from .diagnostics import record_exception, redact
 
 STARTUP_TIMEOUT = 30.0
 SHUTDOWN_TIMEOUT = 4.0
@@ -29,19 +34,18 @@ LOADING_HTML = """<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
 <style>html,body{height:100%;margin:0}body{display:grid;place-items:center;background:#f5f7fd;
 color:#202b43;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Microsoft YaHei UI',sans-serif}.card{width:min(440px,74vw);
 padding:48px;border-radius:24px;background:#fff;box-shadow:0 16px 64px #18357210}
-.mark{display:grid;place-items:center;width:48px;height:48px;border-radius:14px;background:#3268e8;
-color:white;font:700 28px Georgia,serif}.name{font-size:13px;letter-spacing:2px;color:#66738d;margin:24px 0 10px}
+.mark{display:block;width:48px;height:48px}.name{font-size:13px;letter-spacing:2px;color:#66738d;margin:24px 0 10px}
 h1{font-size:25px;font-weight:600;line-height:1.5;margin:0 0 12px}p{font-size:14px;line-height:1.8;color:#73809a}
 .track{overflow:hidden;height:5px;border-radius:4px;background:#e5ecfc;margin-top:30px}
 .bar{width:35%;height:100%;background:#3268e8;border-radius:4px;animation:move 1.5s ease-in-out infinite,breathe 1.5s ease-in-out infinite}
 @keyframes move{0%{transform:translateX(-110%)}100%{transform:translateX(390%)}}
 @keyframes breathe{0%,100%{opacity:.5}50%{opacity:1}}
-@media(prefers-color-scheme:dark){body{background:#111827;color:#e6edff}.card{background:#192237;box-shadow:0 16px 64px #07101f50}.name,p{color:#98a8c6}.track{background:#273552}.bar,.mark{background:#6892ff}}
+@media(prefers-color-scheme:dark){body{background:#111827;color:#e6edff}.card{background:#192237;box-shadow:0 16px 64px #07101f50}.name,p{color:#98a8c6}.track{background:#273552}.bar{background:#6892ff}}
 @media(prefers-reduced-motion:reduce){.bar{animation:none;margin-left:32%}}</style></head>
-<body><main class="card"><div class="mark">I</div><div class="name">INKREFERENCE</div>
+<body><main class="card"><img class="mark" src="%APP_ICON%" alt=""><div class="name">INKREFERENCE</div>
 <h1>正在打开素材库</h1><p>正在启动本地服务</p>
 <div class="track" role="progressbar" aria-label="正在启动" aria-valuetext="启动中">
-<div class="bar"></div></div></main></body></html>"""
+<div class="bar"></div></div></main></body></html>""".replace("%APP_ICON%", icon_data_url())
 
 
 def _browser_hint(url: str | None = None) -> str:
@@ -60,13 +64,7 @@ def default_log_dir(configured_data_dir: str | None = None) -> Path:
     configured = configured_data_dir or os.environ.get("INKREFERENCE_DATA_DIR")
     if configured:
         return Path(configured).expanduser() / "logs"
-    if sys.platform == "darwin":
-        return Path.home() / "Library" / "Logs" / "InkReference"
-    if sys.platform == "win32":
-        base = Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local")))
-        return base / "InkReference" / "logs"
-    base = Path(os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local" / "state")))
-    return base / "InkReference" / "logs"
+    return default_data_dir() / "logs"
 
 
 def _renderer_hint() -> str:
@@ -90,7 +88,14 @@ def _error_html(message: str, url: str | None = None) -> str:
 def _write_error(message: str, url: str | None = None) -> None:
     stream = sys.stderr or sys.__stderr__
     if stream is not None:
-        print(f"InkReference 桌面启动失败：{message}\n浏览器入口：{_browser_hint(url)}", file=stream, flush=True)
+        print(f"InkReference 桌面启动失败：{redact(message, 600)}\n浏览器入口：{_browser_hint(url)}", file=stream, flush=True)
+
+
+def _failure_detail(error: BaseException, operation: str) -> str:
+    identity = record_exception("desktop", operation, error, data_dir=default_log_dir().parent)
+    # Renderer/OS errors have useful short reasons; omit arbitrary multiline data.
+    reason = redact(str(error).splitlines()[0] if str(error) else type(error).__name__, 240)
+    return f"{reason}（诊断 {identity}）"
 
 
 def run_desktop(server, listener, url: str) -> int:
@@ -143,7 +148,8 @@ def run_desktop(server, listener, url: str) -> int:
             server.run(sockets=[listener])
         except BaseException as exc:
             if not stop.is_set():
-                record_failure(f"本地服务无法启动：{exc}")
+                server_finished.set()
+                record_failure(f"本地服务无法启动：{_failure_detail(exc, 'server_start')}")
         finally:
             server_finished.set()
             if not stop.is_set():
@@ -162,14 +168,14 @@ def run_desktop(server, listener, url: str) -> int:
             try:
                 with opener.open(url.rstrip("/") + "/api/health", timeout=HTTP_TIMEOUT) as response:
                     healthy = response.status == 200 and json.loads(response.read()).get("status") == "ok"
-                if healthy and not stop.is_set():
+                if healthy and not stop.is_set() and not server_finished.is_set() and not failures:
                     window.load_url(url)
                     ready.set()
                     return
             except (urllib.error.URLError, OSError, ValueError):
                 pass
             except Exception as exc:
-                record_failure(f"桌面界面无法载入：{exc}")
+                record_failure(f"桌面界面无法载入：{_failure_detail(exc, 'load_window')}")
                 display_failure()
                 return
             stop.wait(POLL_INTERVAL)
@@ -178,6 +184,11 @@ def run_desktop(server, listener, url: str) -> int:
             display_failure()
 
     try:
+        if sys.platform == "win32":
+            try:
+                set_windows_app_id()
+            except (AttributeError, OSError):
+                logging.getLogger(__name__).warning("无法设置 Windows 应用标识", exc_info=True)
         window = webview.create_window(
             "InkReference", html=LOADING_HTML, width=1440, height=920,
             min_size=(520, 560), background_color="#f5f7fd", text_select=True,
@@ -186,11 +197,11 @@ def run_desktop(server, listener, url: str) -> int:
         worker = threading.Thread(target=serve, name="inkreference-http", daemon=True)
         worker.start()
         kwargs = {"gui": "edgechromium"} if sys.platform == "win32" else {"gui": "cocoa"} if sys.platform == "darwin" else {}
-        webview.start(load_when_ready, **kwargs)
+        webview.start(load_when_ready, icon=str(native_icon()), **kwargs)
         if not ready.is_set() and not window_closed.is_set() and not failures:
             record_failure("桌面界面在就绪前停止。" + _renderer_hint())
     except Exception as exc:
-        record_failure(f"原生窗口不可用：{exc}。" + _renderer_hint())
+        record_failure(f"原生窗口不可用：{_failure_detail(exc, 'native_window')}。" + _renderer_hint())
     finally:
         stop.set()
         server.should_exit = True

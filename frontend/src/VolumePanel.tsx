@@ -1,5 +1,6 @@
+import { DynamicModeSwitch } from "./DynamicFunction";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { CheckCircle2, ChevronDown, Copy, Download, FileText, Globe, Hand, Plus, Save, Search, Settings2, Sparkles, Square, Trash2 } from "lucide-react";
+import { CheckCircle2, ChevronDown, Copy, Download, FileText, Plus, Save, Search, Settings2, Sparkles, Square, Trash2 } from "lucide-react";
 import { studio, send, normalizeList, type ModelProfile } from "./studio";
 import { Busy, Empty, Modal, Notice, Progress, messageOf } from "./ui";
 import { isRemoteModel, modelEndpoint } from "./model-security";
@@ -67,7 +68,7 @@ export function VolumePanel({ documentId, versionId, onDirty, onActivity }: { do
   const jobProgress = job?.progress;
   return <section className="volume-panel" aria-label="分卷规划" aria-busy={blocked}>
     <div className="volume-toolbar"><div><h3>作品分卷</h3><span>{plan?.chapter_count ?? "—"} 个目录项 · {rows.length} 卷</span>{dirty && <strong className="volume-unsaved">未保存</strong>}</div>{dirty && <button className="button primary compact-button" disabled={blocked} onClick={save}><Save size={14} />保存分卷</button>}</div>
-    <div className="volume-mode-picker" role="tablist" aria-label="分卷模式">{([["auto", "自动", Globe], ["assisted", "半自动", Copy], ["manual", "手动", Hand]] as const).map(([value, label, Icon]) => <button key={value} role="tab" aria-selected={mode === value} disabled={blocked} className={mode === value ? "active" : ""} onClick={() => { setMode(value); }}><Icon size={15} />{label}</button>)}</div>
+    <DynamicModeSwitch value={mode} onChange={setMode} disabled={blocked} label="分卷模式" items={[{value:"auto",label:"自动"},{value:"assisted",label:"半自动"},{value:"manual",label:"手动"}]} />
     <div className="volume-mode-controls">
       {mode === "auto" && <><label className="studio-field"><span>模型</span><select aria-label="分卷识别模型" value={profile} disabled={blocked} onChange={event => setProfile(event.target.value)}><option value="">选择模型</option>{models.map(model => <option key={model.id} value={model.id}>{model.name} · {model.model}</option>)}</select></label><button className="icon-button volume-search-config" aria-label="搜索服务设置" title="搜索服务设置" disabled={blocked} onClick={() => setConfigOpen(true)}><Settings2 size={16} /></button><button className="button primary compact-button" disabled={blocked || !selected || !plan || !settings?.key_available} onClick={() => setConfirm(true)}><Search size={14} />联网查找分卷</button></>}
       {mode === "assisted" && <><button className="button secondary compact-button" disabled={blocked || !plan} onClick={copy}><Copy size={14} />复制提示词</button><button className="button primary compact-button" disabled={blocked || !plan} onClick={() => setShowPaste(true)}><FileText size={14} />粘贴回复</button></>}

@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import threading
+import sqlite3
+from contextlib import closing
 import re
 from pathlib import Path
 from typing import Annotated, Any, Literal
@@ -45,6 +47,7 @@ class NewRun(BaseModel):
     workflow_version: str = "4.0.0"
     start: bool = True
     manual: bool = False
+    interaction_mode: Literal["automatic", "semi", "manual"] | None = None
     remote_consent: bool = False
     expected_model_fingerprint: str | None = Field(default=None, min_length=64, max_length=64)
     expected_stage_fingerprints: dict[str, str] | None = None
@@ -237,6 +240,7 @@ class Studio:
         self._skills = self._workflows = self._projects = self._runner = None
         self._conversions = self._ingestions = None
         self._research = self._character_bridge = self._volume_research = self._embedding_downloads = None
+        self._index_workbench()
 
     def _service(self, name, factory):
         with self.lock:
@@ -244,8 +248,16 @@ class Studio:
             instance = getattr(self, attribute)
             if instance is None:
                 instance = factory()
+                self._index_workbench()
                 setattr(self, attribute, instance)
             return instance
+
+    def _index_workbench(self):
+        from .storage_utils import ensure_growth_indexes
+        path = self.data_dir / "workbench.sqlite3"
+        if path.is_file():
+            with closing(sqlite3.connect(path, timeout=30)) as connection, connection:
+                ensure_growth_indexes(connection, "workbench")
 
     @property
     def volumes(self):
@@ -779,7 +791,7 @@ def install_studio_routes(application, runtime):
     @router.post("/jobs", status_code=201)
     def create_job(body: NewRun):
         with runtime.studio.lock:
-            result = runtime.studio.runner.create_run(body.document_id, body.version_id, workflow_id=body.workflow_id, workflow_version=body.workflow_version, profile_id=body.profile_id, remote_consent=body.remote_consent, expected_model_fingerprint=body.expected_model_fingerprint, expected_stage_fingerprints=body.expected_stage_fingerprints, manual=body.manual, chapter_ranges=[item.model_dump() for item in body.chapter_ranges] if body.chapter_ranges is not None else None, reuse_existing=body.reuse_existing)
+            result = runtime.studio.runner.create_run(body.document_id, body.version_id, workflow_id=body.workflow_id, workflow_version=body.workflow_version, profile_id=body.profile_id, remote_consent=body.remote_consent, expected_model_fingerprint=body.expected_model_fingerprint, expected_stage_fingerprints=body.expected_stage_fingerprints, manual=body.manual, chapter_ranges=[item.model_dump() for item in body.chapter_ranges] if body.chapter_ranges is not None else None, reuse_existing=body.reuse_existing, interaction_mode=body.interaction_mode)
             return runtime.studio.runner.start(result["id"], remote_consent=body.remote_consent) if body.start and not body.manual and result["status"] == "queued" else result
 
     @router.post("/jobs/comparisons", status_code=201)
@@ -812,6 +824,11 @@ def install_studio_routes(application, runtime):
     @router.get("/jobs/{run_id}/chunks/{chunk_id}/prompt")
     def chunk_prompt(run_id: str, chunk_id: str):
         return runtime.studio.runner.chunk_prompt(run_id, chunk_id)
+
+    @router.get("/jobs/{run_id}/chunks/{chunk_id}/template")
+    def manual_chunk_template(run_id: str, chunk_id: str):
+        from .manual_templates import extraction_template
+        return extraction_template(runtime.studio.runner, run_id, chunk_id)
 
     @router.post("/jobs/{run_id}/chunks/{chunk_id}/paste")
     def paste_chunk(run_id: str, chunk_id: str, body: ChunkPaste):
@@ -905,8 +922,9 @@ def install_studio_routes(application, runtime):
             return runtime.studio.models.test_profile(profile_id, allow_remote=body.remote_consent)
 
     @router.get("/usage")
-    def usage(run_id: str | None = None):
-        return {"items": runtime.studio.models.list_usage(run_id), "summary": runtime.studio.models.usage_summary(run_id)}
+    def usage(run_id: str | None = None, limit: Annotated[int | None, Query(ge=1, le=200)] = None, cursor: str | None = None):
+        page = runtime.studio.models.list_usage_page(run_id, limit=limit or 50, cursor=cursor) if limit is not None or cursor is not None else {"items": runtime.studio.models.list_usage(run_id)}
+        return {**page, "summary": runtime.studio.models.usage_summary(run_id)}
 
     @router.get("/skills")
     def skills():

@@ -1,4 +1,4 @@
-"""Local, reviewable source repairs. No provider calls or LLM supplied commands."""
+"""Local, reviewable source repairs with explicit human confirmation."""
 from __future__ import annotations
 
 import copy
@@ -22,6 +22,8 @@ from typing import Any, Callable
 
 from . import __version__
 from .database import DataError
+from .dynamic_functions import mode_contract, parse_json_reply
+from .repair_generation import RepairGenerationMixin
 
 PROTOCOL = "inkreference.repair.v1"
 MAX_REPLY = 2_000_000
@@ -33,16 +35,19 @@ TOPICS = {
     "upload": ("文件上传", ("frontend/src/DocumentUpload.tsx", "frontend/src/Documents.tsx", "backend/inkreference/ingestions.py")),
     "models": ("模型连接", ("frontend/src/Models.tsx", "backend/inkreference/models.py")),
     "library": ("素材库", ("frontend/src/Library.tsx", "backend/inkreference/library_exchange.py")),
-    "workflow": ("分析与审核", ("frontend/src/ReferenceAnalysis.tsx", "backend/inkreference/workflows.py")),
+    "workflow": ("分析与审核", ("frontend/src/ReferenceAnalysis.tsx", "backend/inkreference/reference_transforms.py", "backend/inkreference/workflows.py")),
     "app": ("界面与启动", ("frontend/src/App.tsx", "frontend/src/styles.css", "backend/inkreference/api.py")),
 }
-_SELF = {"backend/inkreference/quick_repair.py", "backend/inkreference/repair_routes.py"}
+_SELF = {"backend/inkreference/quick_repair.py", "backend/inkreference/repair_routes.py",
+         "backend/inkreference/repair_generation.py", "backend/inkreference/dynamic_functions.py",
+         "backend/inkreference/dynamic_routes.py"}
 _WINDOWS = {
     "backend/inkreference/documents.py": ("def get_chapter(", "def edit_chapter_slice(", "def edit_chapter(", "def apply_chapter_cleaning(", "def _incremental_chapter_edit(", "def rename_chapter("),
     "frontend/src/ChapterWorkbench.tsx": ("const changePage", "const mutate", "const save", "ChapterTextEditor", "ChapterCleanupDialog", "chapter-navigation", "return ("),
     "frontend/src/ChapterTextEditor.tsx": ("export function", "highlight", "textarea", "return ("),
-    "backend/inkreference/models.py": ("def save(", "def test(", "def discover(", "def invoke("),
+    "backend/inkreference/models.py": ("def save(", "def test(", "def discover(", "def invoke(", "except httpx.TimeoutException"),
     "frontend/src/Models.tsx": ("async function", "return ("),
+    "backend/inkreference/reference_transforms.py": ("def reference_transform(", "def _modern(", "def _data(", "def _preserve_plot_facts("),
 }
 
 
@@ -54,9 +59,9 @@ def _fail(message: str, status: int = 422):
     raise DataError(status, message)
 
 
-class QuickRepair:
+class QuickRepair(RepairGenerationMixin):
     def __init__(self, data_dir: Path, source_root: Path | None = None, *, frozen: bool | None = None,
-                 cache_rebuilder: Callable[[str, str | None], dict] | None = None):
+                 cache_rebuilder: Callable[[str, str | None], dict] | None = None, models=None):
         self.root = (source_root or Path(__file__).resolve().parents[2]).resolve()
         self.frozen = bool(getattr(sys, "frozen", False)) if frozen is None else frozen
         self.source = not self.frozen and (self.root / "pyproject.toml").is_file() and (self.root / "backend" / "inkreference").is_dir()
@@ -70,6 +75,7 @@ class QuickRepair:
         self.threads: list[threading.Thread] = []
         self.processes: set[subprocess.Popen] = set()
         self.closed = threading.Event()
+        self._init_generations(models)
         self._load_events()
         self._load_operations()
 
@@ -169,7 +175,7 @@ class QuickRepair:
     def capabilities(self):
         return {"mode": "source" if self.source else "packaged", "can_apply_source": self.source,
                 "can_rebuild_cache": self.cache_rebuilder is not None, "source_root_label": "InkReference",
-                "protocol": PROTOCOL, "topics": [{"id": key, "label": value[0]} for key, value in TOPICS.items()],
+                "protocol": PROTOCOL, "modes": mode_contract(), "topics": [{"id": key, "label": value[0]} for key, value in TOPICS.items()],
                 "limits": {"files": MAX_FILES, "reply_characters": MAX_REPLY, "session_seconds": TTL}}
 
     def _expire(self):
@@ -214,7 +220,8 @@ class QuickRepair:
             if not isinstance(event, dict):
                 continue
             # These are frontend error metadata, never fetch payloads/headers.
-            front.append({key: self.redact(event[key], 400) for key in ("kind", "message", "path", "at") if key in event})
+            front.append({key: self.redact(event[key], 2000 if key == "stack" else 400) for key in
+                          ("kind", "message", "path", "at", "request_id", "diagnostic_id", "stack", "route", "component", "operation", "task_id") if key in event})
         dependencies = {}
         for package in ("fastapi", "uvicorn", "pydantic", "langgraph", "defusedxml"):
             try:
@@ -225,6 +232,11 @@ class QuickRepair:
                        "platform": {"system": platform.system(), "release": platform.release(), "machine": platform.machine()},
                        "python": platform.python_version(), "dependencies": dependencies, "git": self._git_info(),
                        "requests_and_errors": events, "frontend_events": front}
+        try:
+            from .diagnostics import recent_error_events
+            diagnostics["recent_errors"] = recent_error_events(self.backups.parent, limit=20)
+        except ImportError:
+            pass
         source_files = []
         remaining = 44_000
         truncated = False
@@ -246,7 +258,7 @@ class QuickRepair:
                 matches = [i for i, line in enumerate(lines) if anchor in line]
                 for index in matches[:2]:
                     selected.update(range(max(0, index - 4), min(len(lines), index + 27)))
-            for event in events:
+            for event in [*events, *diagnostics.get("recent_errors", [])]:
                 for frame in event.get("frames", []):
                     if frame["file"] == name:
                         selected.update(range(max(0, frame["line"] - 22), min(len(lines), frame["line"] + 22)))
@@ -296,10 +308,34 @@ class QuickRepair:
             "\"edits\":[{\"before\":\"唯一的原代码\",\"after\":\"替换代码\"}]}]}\n\n"
         )
         with self.lock:
-            self.sessions[session_id] = {"expires_at": time.time() + TTL, "topic": topic}
+            self.sessions[session_id] = {"expires_at": time.time() + TTL, "topic": topic,
+                                         "source_hashes": {item["path"]: item["sha256"] for item in source_files}}
+        template = {"protocol": PROTOCOL, "session_id": session_id, "summary": "", "files": [
+            {"path": source_files[0]["path"], "sha256": source_files[0]["sha256"], "edits": [{"before": "", "after": ""}]}] if source_files else []}
         return {"session_id": session_id, "prompt": instructions + json.dumps(payload, ensure_ascii=False, indent=2),
                 "diagnostics": diagnostics, "source_files": [{"path": f["path"], "sha256": f["sha256"]} for f in source_files],
-                "truncated": truncated, "capabilities": self.capabilities()}
+                "truncated": truncated, "capabilities": self.capabilities(), "template": template}
+
+    def session_source(self, session_id: str, path: str):
+        with self.lock:
+            self._expire()
+            session = self.sessions.get(session_id)
+            if session is None:
+                _fail("诊断会话已过期，请重新生成诊断", 409)
+            if not self.source:
+                _fail("打包版不包含可编辑源码", 409)
+            target = self._path(path, must_exist=True)
+            raw = target.read_bytes()
+            digest = _sha(raw)
+            previous = session.setdefault("source_hashes", {}).get(path)
+            if previous is not None and previous != digest:
+                _fail("源码已修改，请重新生成诊断", 409)
+            try:
+                content = raw.decode("utf-8", "strict")
+            except UnicodeDecodeError:
+                _fail("只支持 UTF-8 源码文件")
+            session["source_hashes"][path] = digest
+            return {"path": path, "sha256": digest, "content": content, "truncated": False}
 
     def _path(self, name: Any, *, must_exist: bool):
         if not isinstance(name, str) or "\\" in name or ":" in name or any(ord(character) < 32 or 0xD800 <= ord(character) <= 0xDFFF for character in name):
@@ -330,21 +366,7 @@ class QuickRepair:
     def _parse(reply: str):
         if not isinstance(reply, str) or len(reply) > MAX_REPLY:
             _fail("修复回复不能超过 2 MB")
-        # One fenced JSON block is accepted for common chat clients; no extraction from prose.
-        candidate = reply.strip()
-        if candidate.startswith("```json\n") and candidate.endswith("\n```"):
-            candidate = candidate[8:-4]
-        try:
-            def pairs(values):
-                obj = {}
-                for key, value in values:
-                    if key in obj:
-                        raise ValueError("重复字段")
-                    obj[key] = value
-                return obj
-            result = json.loads(candidate, object_pairs_hook=pairs)
-        except (ValueError, TypeError, RecursionError):
-            _fail("回复需为完整的 JSON 修复对象")
+        result = parse_json_reply(reply, maximum=MAX_REPLY, label="修复回复")
         if not isinstance(result, dict) or set(result) != {"protocol", "session_id", "summary", "files"} or result["protocol"] != PROTOCOL:
             _fail("修复协议或字段不符合 inkreference.repair.v1")
         if not isinstance(result["session_id"], str) or not isinstance(result["summary"], str) or not 1 <= len(result["summary"]) <= 2000:
@@ -375,6 +397,10 @@ class QuickRepair:
             seen.add(item["path"])
             if not isinstance(item["sha256"], str) or not re.fullmatch(r"[0-9a-f]{64}", item["sha256"]):
                 _fail("原文件 sha256 无效")
+            with self.lock:
+                pinned = self.sessions[plan["session_id"]].get("source_hashes", {}).get(item["path"])
+            if pinned is not None and pinned != item["sha256"]:
+                _fail("补丁与本次诊断的源码版本不符，请重新生成诊断", 409)
             old_raw = path.read_bytes() if self.source else None
             if old_raw is not None and _sha(old_raw) != item["sha256"]:
                 _fail(f"文件已更新：{item['path']}；请重新生成诊断后修复", 409)
@@ -470,9 +496,19 @@ class QuickRepair:
             return operation
 
     def _start(self, callback, *args):
+        from .diagnostics import background_target
+        callback = background_target(callback)
         thread = threading.Thread(target=callback, args=args, daemon=False, name="inkreference-repair")
-        self.threads.append(thread)
-        thread.start()
+        with self.lock:
+            self.threads = [item for item in self.threads if item.is_alive()]
+            self.threads.append(thread)
+            thread.start()
+
+    def _operation_error(self, operation, error):
+        from .diagnostics import record_exception
+        self.record_exception(error)
+        return record_exception("repair", operation["kind"], error, data_dir=self.backups.parent,
+                                task_id=operation["operation_id"], stage=operation.get("stage"))
 
     def _check_open(self):
         if self.closed.is_set():
@@ -634,6 +670,7 @@ class QuickRepair:
             self._check_open()
             self._update(operation, status="succeeded", stage="修复已应用", progress=100, rollback_available=True)
         except Exception as error:
+            diagnostic_id = self._operation_error(operation, error)
             restore_error = None
             try:
                 for number, item in enumerate(operation["files"]):
@@ -646,7 +683,7 @@ class QuickRepair:
                 restore_error = self.redact(str(exc), 600)
             message = self.redact(str(error), 1200)
             self._update(operation, status="failed", stage="修复未应用" if not restore_error else "需要手动恢复", progress=100,
-                         error=message, rollback_available=bool(restore_error), auto_rolled_back=bool(written) and not restore_error,
+                         error=message, diagnostic_id=diagnostic_id, rollback_available=bool(restore_error), auto_rolled_back=bool(written) and not restore_error,
                          **({"restore_error": restore_error} if restore_error else {}))
 
     def rollback(self, operation_id):
@@ -669,7 +706,7 @@ class QuickRepair:
             self._frontend_check(operation, restore=True)
             self._update(operation, status="rolled_back", progress=100, stage="已恢复修复前版本", rollback_available=False)
         except Exception as error:
-            self._update(operation, status="failed", progress=100, stage="恢复未完成", error=self.redact(str(error), 1200))
+            self._update(operation, status="failed", progress=100, stage="恢复未完成", error=self.redact(str(error), 1200), diagnostic_id=self._operation_error(operation, error))
 
     def rebuild_cache(self, document_id: str, version_id: str | None = None):
         if self.cache_rebuilder is None:
@@ -685,7 +722,7 @@ class QuickRepair:
                 operation["checks"].append({"name": "章节缓存重建", "ok": True, "detail": "原文与版本保留"})
                 self._update(operation, status="succeeded", progress=100, stage="章节缓存已重建", result=result)
             except Exception as error:
-                self._update(operation, status="failed", progress=100, stage="缓存重建未完成", error=self.redact(str(error), 1000))
+                self._update(operation, status="failed", progress=100, stage="缓存重建未完成", error=self.redact(str(error), 1000), diagnostic_id=self._operation_error(operation, error))
         self._start(run)
         return self.operation(operation["operation_id"])
 

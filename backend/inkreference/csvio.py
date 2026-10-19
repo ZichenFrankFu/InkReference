@@ -185,6 +185,7 @@ def preview_import(store: DataStore, batch: ImportBatch) -> dict[str, Any]:
             tables.append({"table": item.table, "filename": item.filename, "rows": len(item.rows), "new": len(item.rows) - existing, "existing": existing})
         simulation = sqlite3.connect(":memory:")
         simulation.row_factory = sqlite3.Row
+        store.configure_functions(simulation)
         simulation.execute("PRAGMA foreign_keys = ON")
         source.backup(simulation)
     stats = initial_stats

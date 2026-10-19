@@ -41,27 +41,7 @@ BATCH_TTL_SECONDS = 2 * 60 * 60
 _CHUNK_BYTES = 1024 * 1024
 
 
-def default_data_dir() -> Path:
-    """Return the OS application-data location, without creating it."""
-    configured = os.environ.get("INKREFERENCE_DATA_DIR")
-    if configured:
-        return Path(configured).expanduser().resolve()
-    if sys.platform == "win32":
-        base = Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local")))
-        return base / "InkReference"
-    if sys.platform == "darwin":
-        # Earlier source checkouts used the Linux-style path on macOS. Reuse
-        # an existing workspace so this platform update never hides its data.
-        legacy = Path(os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local" / "share"))) / "InkReference"
-        try:
-            with (legacy / "inkreference.sqlite3").open("rb") as database:
-                if database.read(16) == b"SQLite format 3\x00":
-                    return legacy
-        except OSError:
-            pass
-        return Path.home() / "Library" / "Application Support" / "InkReference"
-    base = Path(os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local" / "share")))
-    return base / "InkReference"
+from .application_paths import default_data_dir
 
 
 class CreateRecord(BaseModel):
@@ -215,13 +195,16 @@ def create_app(data_dir: str | Path | None = None, static_dir: str | Path | None
 
     application = FastAPI(title="InkReference", version=__version__, lifespan=lifespan, docs_url=None, redoc_url=None)
     application.state.runtime = runtime
+    from .diagnostics import install_diagnostics, record_exception
 
     @application.exception_handler(DataError)
     async def handle_data_error(_: Request, exc: DataError):
+        record_exception("http", "validation", exc, data_dir=runtime.data_dir, http_status=exc.status_code)
         return JSONResponse(status_code=exc.status_code, content={"detail": jsonable_encoder(exc.detail)})
 
     @application.exception_handler(RequestValidationError)
     async def handle_validation_error(_: Request, exc: RequestValidationError):
+        record_exception("http", "validation", exc, data_dir=runtime.data_dir, http_status=422)
         # FastAPI's default error includes rejected input, which can be a key.
         errors = [{"loc": item["loc"], "msg": item["msg"], "type": item["type"]} for item in exc.errors()]
         return JSONResponse(status_code=422, content={"detail": jsonable_encoder(errors)})
@@ -263,6 +246,7 @@ def create_app(data_dir: str | Path | None = None, static_dir: str | Path | None
         try:
             response = await call_next(request)
         except Exception as exc:
+            record_exception("http", "dispatch", exc, data_dir=runtime.data_dir, http_status=500)
             try:
                 repair_service(application).record_exception(exc, method=request.method, path=_diagnostic_path(request))
             except Exception:
@@ -299,6 +283,7 @@ def create_app(data_dir: str | Path | None = None, static_dir: str | Path | None
         has_analysis: bool | None = None,
         sort_by: Annotated[str | None, Query(max_length=100)] = None,
         sort_direction: Literal["asc", "desc"] = "asc",
+        include_work_facets: bool = True,
     ):
         filters = {key: value for key, value in {"category": category, "seen": seen, "role": role,
             "character_trait": character_trait, "plot_mechanism": plot_mechanism}.items() if value is not None}
@@ -308,7 +293,7 @@ def create_app(data_dir: str | Path | None = None, static_dir: str | Path | None
             filters["work_ids"] = application.state.catalog_links().filter_work_ids(
                 has_text=has_text, has_analysis=has_analysis)
         return runtime.store.list_records(table, q=q, offset=offset, limit=limit, work_id=work_id,
-            cliche_id=cliche_id, filters=filters, sort_by=sort_by, sort_direction=sort_direction)
+            cliche_id=cliche_id, filters=filters, sort_by=sort_by, sort_direction=sort_direction, include_work_facets=include_work_facets)
 
     @application.get("/api/records/{table}/{record_id}/relations")
     def relations(table: TableName, record_id: str):
@@ -511,6 +496,13 @@ def create_app(data_dir: str | Path | None = None, static_dir: str | Path | None
     application.include_router(create_research_router(lambda: runtime.studio.research))
     from .embedding_download_api import create_embedding_download_router
     application.include_router(create_embedding_download_router(lambda: runtime.studio.embedding_downloads))
+    from .dynamic_routes import create_dynamic_router
+    application.include_router(create_dynamic_router())
+    from .storage_health import StorageHealth, create_storage_router
+    def require_idle_storage():
+        if runtime._studio is not None:
+            runtime.studio.require_idle()
+    application.include_router(create_storage_router(lambda: StorageHealth(runtime.data_dir), require_idle_storage))
 
     # API typos must stay JSON 404s rather than falling through to the SPA.
     @application.api_route("/api/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
@@ -530,6 +522,7 @@ def create_app(data_dir: str | Path | None = None, static_dir: str | Path | None
             <pre>npm install\nnpm run build</pre><p>构建完成后重启服务。开发时可运行 npm run dev。</p>
             <p><a href="/api/health">服务状态</a></p></body></html>"""
 
+    install_diagnostics(application, runtime.data_dir)
     return application
 
 

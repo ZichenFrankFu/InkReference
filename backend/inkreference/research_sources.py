@@ -14,6 +14,7 @@ from urllib.parse import urljoin, urlsplit
 import httpx
 
 from .database import DataError
+from .diagnostics import logged_operation, record_exception
 from .models import ModelService, _now
 
 DEFAULT_ENDPOINTS={"tavily":"https://api.tavily.com/search","brave":"https://api.search.brave.com/res/v1/web/search","searxng":"http://127.0.0.1:8080/search"}
@@ -106,6 +107,7 @@ class ResearchSources:
         if not key and config["provider"]!="searxng": raise DataError(422,"搜索服务缺少 API Key，请先配置搜索连接")
         return key
 
+    @logged_operation("web", "search", lifecycle=False)
     def search(self,query:str,config:dict)->list[dict]:
         key=self._key(config); provider=config["provider"]
         try:
@@ -113,7 +115,10 @@ class ResearchSources:
                 if provider=="tavily": response=client.post(config["endpoint"],headers={"Authorization":"Bearer "+key},json={"query":query,"max_results":5,"search_depth":"basic","include_answer":False,"include_raw_content":False})
                 elif provider=="brave": response=client.get(config["endpoint"],headers={"X-Subscription-Token":key},params={"q":query,"count":5})
                 else: response=client.get(config["endpoint"],params={"q":query,"format":"json","language":"zh-CN"})
-            if not 200<=response.status_code<300: raise DataError(502,f"搜索服务返回 HTTP {response.status_code}，未完成联网检索")
+            if not 200<=response.status_code<300:
+                error=DataError(502,f"搜索服务返回 HTTP {response.status_code}，未完成联网检索")
+                record_exception("web","search",error,status=f"provider_http_{response.status_code}",http_status=response.status_code)
+                raise error
             if len(response.content)>2_000_000: raise DataError(502,"搜索响应超过大小限制")
             data=response.json(); rows=data.get("web",{}).get("results",[]) if provider=="brave" else data.get("results",[])
             if not isinstance(rows,list): raise ValueError
@@ -123,7 +128,9 @@ class ResearchSources:
                 result.append({"url":row["url"],"title":str(row.get("title", ""))[:500],"snippet":str(row.get("content",row.get("description","")))[:1500]})
             return result
         except DataError: raise
-        except Exception: raise DataError(502,"搜索请求失败，未完成联网检索；请检查服务地址及密钥") from None
+        except Exception as error:
+            record_exception("web","search",error)
+            raise DataError(502,"搜索请求失败，未完成联网检索；请检查服务地址及密钥") from None
 
     def _public_url(self,url):
         try:
@@ -137,12 +144,14 @@ class ResearchSources:
 
     def fetch(self,row:dict)->dict:
         source={"id":"src_"+hashlib.sha256(row["url"].encode()).hexdigest()[:16],"url":row["url"],"title":row["title"],"excerpt":"","search_excerpt":row.get("snippet",""),"fetch_status":"failed","fetched_at":_now(),"error":None}
+        http_status=None
         try:
             url=row["url"]
             with httpx.Client(transport=self.transport,timeout=20,follow_redirects=False,trust_env=False,headers={"User-Agent":"InkReference/0.2 research (+user initiated)"}) as client:
                 for redirects in range(6):
                     self._public_url(url)
                     with client.stream("GET",url) as response:
+                        http_status=response.status_code
                         if response.status_code in {301,302,303,307,308}:
                             location=response.headers.get("location")
                             if not location or redirects==5: raise DataError(502,"来源重定向超过限制")
@@ -163,6 +172,10 @@ class ResearchSources:
                     if len(text)<40: raise DataError(502,"来源正文过短或需要登录，未完成核实")
                     source.update(excerpt=text[:8000],fetch_status="verified",final_url=url,content_hash=hashlib.sha256(text.encode()).hexdigest())
                     return source
-        except DataError as exc: source["error"]=str(exc.detail)
-        except Exception: source["error"]="无法读取来源网页"
+        except DataError as exc:
+            record_exception("web","fetch",exc,data_dir=self.models.data_dir,stage="source",status="skipped",http_status=http_status,level="WARNING")
+            source["error"]=str(exc.detail)
+        except Exception as error:
+            record_exception("web","fetch",error,data_dir=self.models.data_dir,stage="source",status="skipped",http_status=http_status,level="WARNING")
+            source["error"]="无法读取来源网页"
         return source

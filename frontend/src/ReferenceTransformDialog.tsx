@@ -1,0 +1,31 @@
+import { useEffect, useRef, useState } from "react";
+import { Sparkles } from "lucide-react";
+import { DynamicModeSwitch, DynamicModelSelector, DynamicPromptExchange, type DynamicMode } from "./DynamicFunction";
+import { ChroniclePlot } from "./ChronicleEditors";
+import { isRemoteModel } from "./model-security";
+import { normalizeList, send, studio, type ModelProfile, type List } from "./studio";
+import { records, stringValue, type ReferenceRecord, type ReferenceState } from "./reference-types";
+import { Busy, Modal, Notice, messageOf } from "./ui";
+
+type Navigation = (id: "library"|"documents"|"reference"|"jobs"|"workflows"|"models"|"backup") => void;
+type Transform = {kind:"summarize"|"translate";entryIndex?:number};
+type Response = {prompt:string; source:string; request_id:string; template:{data:ReferenceRecord}; data?:ReferenceRecord; text?:string; content?:string; validation_error?:string};
+export default function ReferenceTransformDialog({transform,state,navigate,onClose,onApply}:{transform:Transform;state:ReferenceState;navigate:Navigation;onClose:()=>void;onApply:(data:ReferenceRecord)=>Promise<void>}) {
+  const [mode,setMode]=useState<DynamicMode>("automatic"),[profiles,setProfiles]=useState<ModelProfile[]>([]),[profileId,setProfileId]=useState("");
+  const [granularity,setGranularity]=useState("major_event"),[language,setLanguage]=useState("简体中文"),[prompt,setPrompt]=useState(""),[source,setSource]=useState(""),[reply,setReply]=useState(""),[preview,setPreview]=useState<ReferenceRecord|null>(null),[busy,setBusy]=useState(""),[error,setError]=useState(""),[invalid,setInvalid]=useState(false),[editorDirty,setEditorDirty]=useState(false);
+  const revision=useRef(state.revision).current, profile=profiles.find(p=>p.id===profileId);
+  const title=transform.kind==="summarize"?"整理剧情大纲":"翻译原始文本";
+  useEffect(()=>{let live=true;void studio<List<ModelProfile>>("/models").then(result=>{if(live){const items=normalizeList(result);setProfiles(items);setProfileId(items[0]?.id||"");}}).catch(e=>{if(live)setError(messageOf(e));});return()=>{live=false;};},[]);
+  const invoke=async(extra:ReferenceRecord,automatic=false)=>send<Response>(`/documents/${state.document_id}/reference/transform`,{kind:transform.kind,profile_id:automatic?profileId:undefined,remote_consent:automatic&&isRemoteModel(profile),expected_model_fingerprint:automatic?profile?.target_fingerprint:undefined,payload:{output_contract:4,expected_revision:revision,granularity,target_language:language,entry_index:transform.entryIndex??0,...extra}});
+  const prepare=async(automatic=false,manual=false)=>{setBusy(automatic?"生成预览":"准备填写模板");setError("");try{const result=await invoke(automatic?{}:{prompt_only:true},automatic);setPrompt(result.prompt);setSource(result.source);if(automatic){setPreview(result.data||null);setInvalid(!!result.validation_error);if(result.validation_error){setReply(result.content||"");setError(result.validation_error);}}else if(manual)setPreview(result.template.data);}catch(e){setError(messageOf(e));}finally{setBusy("");}};
+  const parse=async()=>{setBusy("校验模型回复");setError("");try{const result=await invoke({reply});setPreview(result.data||null);setInvalid(false);}catch(e){setError(messageOf(e));}finally{setBusy("");}};
+  const apply=async()=>{if(!preview)return;setBusy("校验并保存");setError("");try{const checked=await invoke({manual_data:preview});if(checked.data)await onApply(checked.data);}catch(e){setError(messageOf(e));}finally{setBusy("");}};
+  return <Modal title={title} onClose={() => { if(editorDirty)setError("请先保存或取消当前编辑"); else onClose(); }} busy={!!busy} wide><div className="modal-body ref-transform"><DynamicModeSwitch value={mode} onChange={setMode} disabled={!!busy||editorDirty}/>{transform.kind==="summarize"?<label className="studio-field"><span>事件粒度</span><select aria-label="事件粒度" value={granularity} onChange={event=>{setGranularity(event.target.value);setPreview(null);setPrompt("");}}><option value="major_event">重要事件</option><option value="chapter">章节事件</option><option value="book">简略梗概</option></select></label>:<label className="studio-field"><span>目标语言</span><input aria-label="目标语言" value={language} onChange={event=>{setLanguage(event.target.value);setPreview(null);setPrompt("");}}/></label>}
+    {mode==="automatic"&&<><DynamicModelSelector profiles={profiles} value={profileId} onChange={setProfileId} disabled={!!busy} onConfigure={()=>{onClose();navigate("models");}}/><button className="button primary" disabled={!!busy||!profileId} onClick={()=>void prepare(true)}><Sparkles size={15}/>生成预览</button></>}
+    {mode==="automatic"&&invalid&&<DynamicPromptExchange prompt={prompt} reply={reply} onReplyChange={setReply} onParse={()=>void parse()} disabled={!!busy} replyLabel="修正模型回复" parseLabel="校验并预览"/>}
+    {mode==="semi"&&<><button className="button secondary" disabled={!!busy} onClick={()=>void prepare()}>生成提示词</button><DynamicPromptExchange prompt={prompt} reply={reply} onReplyChange={setReply} onParse={()=>void parse()} disabled={!!busy} replyLabel="模型回复" parseLabel="解析并预览"/></>}
+    {mode==="manual"&&!preview&&<button className="button secondary" disabled={!!busy} onClick={()=>void prepare(false,true)}>打开填写模板</button>}
+    <Notice error>{error}</Notice>{busy&&<Busy label={busy} compact/>}
+    {preview&&<section className="ref-transform-preview"><div className="ref-mini-heading"><h3>{mode==="manual"?"手动填写":"结果预览"}</h3></div>{transform.kind==="summarize"?<ChroniclePlot value={preview} onDirty={setEditorDirty} onSave={async value=>setPreview(value)} busy={!!busy} characters={records(state.sections.characters)} settings={records(state.sections.settings)}/>:<>{mode==="manual"&&<details><summary>原始文本</summary><textarea aria-label="待处理原文" value={source} readOnly rows={5}/></details>}<label className="studio-field"><span>译文</span><textarea aria-label="译文预览" rows={12} value={stringValue(preview.text)} onChange={event=>setPreview({text:event.target.value})}/></label></>}</section>}
+  </div><div className="modal-footer"><button className="button secondary" disabled={!!busy||editorDirty} onClick={onClose}>取消</button><button className="button primary" disabled={!preview||!!busy||editorDirty} onClick={()=>void apply()}>确认保存</button></div></Modal>;
+}

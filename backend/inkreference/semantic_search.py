@@ -16,6 +16,7 @@ from typing import Any
 import httpx
 
 from .database import DataError
+from .diagnostics import logged_operation, record_exception
 from .local_security import target_fingerprint
 from .models import ModelService, _cost, _now, _usage
 
@@ -54,6 +55,7 @@ class SemanticIndex:
             raise DataError(502, "Embedding 服务返回零向量")
         return result
 
+    @logged_operation("embedding", "embed", task_arg="run_id", lifecycle=False)
     def embed(self, texts: list[str], profile: dict, *, model: str | None, run_id: str, check_cancel=lambda: None) -> list[list[float]]:
         if not texts:
             return []
@@ -127,10 +129,12 @@ class SemanticIndex:
                     # Cache is reproducible and bounded; rows already used by
                     # this call remain in memory for the returned comparison.
                     db.execute("DELETE FROM research_vectors WHERE rowid IN (SELECT rowid FROM research_vectors ORDER BY created_at DESC LIMIT -1 OFFSET 50000)")
-            except DataError:
+            except DataError as error:
+                record_exception("embedding","embed",error,task_id=run_id,http_status=record["http_status"])
                 record["status"],record["error"]="error","invalid_or_failed_embedding"
                 raise
-            except Exception:
+            except Exception as error:
+                record_exception("embedding","embed",error,task_id=run_id,http_status=record["http_status"])
                 record["status"],record["error"]="error","embedding_transport_or_format"
                 raise DataError(502,"Embedding 请求失败，请检查模型连接及向量接口") from None
             finally:

@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from .database import DataError
+from .diagnostics import background_target, logged_operation, record_exception
 from .documents import MAX_UPLOAD_BYTES
 
 _TERMINAL = {"completed", "failed", "cancelled", "interrupted"}
@@ -193,7 +194,7 @@ class IngestionStore:
                 connection.execute("UPDATE ing_jobs SET status='running',stage='decoding',progress=NULL,error=NULL,attempt=attempt+1,updated_at=? WHERE id=?",
                                    (_now(), identifier))
             self._cancellations[identifier] = threading.Event()
-            thread = threading.Thread(target=self._run, args=(identifier,), daemon=True, name=f"ingestion-{identifier[:8]}")
+            thread = threading.Thread(target=background_target(self._run), args=(identifier,), daemon=True, name=f"ingestion-{identifier[:8]}")
             self._threads[identifier] = thread
             thread.start()
         return self.get(identifier)
@@ -222,6 +223,7 @@ class IngestionStore:
                 self.conversions.cancel(conversion_id)
         self._update(identifier, status="cancelled", stage="cancelled", progress=None, error=None)
 
+    @logged_operation("ingestion", "upload_task", task_arg="identifier")
     def _run(self, identifier: str) -> None:
         meta = None
         try:
@@ -287,6 +289,7 @@ class IngestionStore:
             if self._closed or self._cancellations[identifier].is_set():
                 self._finish_cancellation(identifier, meta)
                 return
+            record_exception("ingestion", "upload_task", error, task_id=identifier)
             detail = error.detail if isinstance(error, DataError) else f"{type(error).__name__}：{error}"
             if isinstance(detail, dict):
                 detail = detail.get("message", _json(detail))

@@ -4,7 +4,6 @@ export type ReferenceRecord = Record<string, unknown>;
 export type NarrativeRange = { start: number; end: number | null };
 export type CharacterRelationship = { character_id: string; relationship: string };
 export type CharacterSnapshot = ReferenceRecord & { id: string; name?: string; narrative_range: NarrativeRange; story_time: string | null; event_ids: string[]; identity: string; ability: string; personality: string; appearance: string; visual_design: string; relationships: CharacterRelationship[] };
-export const temperamentOptions = ["强大", "智谋", "利他", "共情", "利己", "执念", "反差", "宿命"];
 export type ReferenceSection = "plot" | "characters" | "settings" | "style" | "rhythm" | "opening" | "setting_features" | "raw_entries" | "metadata" | "era_background";
 export type ReferenceChunkRange = { key: string; title: string; startChapter: number; endChapter: number };
 export type ReferenceState = {
@@ -33,7 +32,6 @@ export const settingCategories = [
   ["power_system", "力量体系"], ["factions", "势力组织"], ["geography", "地理"],
   ["social_rules", "社会规则"], ["history", "历史背景"], ["worldview", "世界观"], ["other", "其他"],
 ];
-export const chapterTypes = ["日常", "战斗", "高潮", "角色个人回", "主线事件", "支线事件", "伏笔铺垫", "收束", "转折", "其他"];
 export const roleTags = ["主角", "女主角", "反派", "男配", "女配", "师长", "重要配角", "路人", "其他"];
 export function characterExperiences(character: ReferenceRecord, plot: unknown): ReferenceRecord[] {
   const own = records(character.experiences);
@@ -73,7 +71,5 @@ export const eventRecords = (plot: unknown): ReferenceRecord[] => {
   const p = record(plot);
   return Array.isArray(p.events) ? records(p.events) : records(p.epochs).flatMap(e => records(e.periods).flatMap(p => records(p.events)));
 };
-export const revealChapter = (value: unknown) => Number(record(record(value).revealed_at).chapter || record(value).first_chapter || 0);
 export const stableId = (prefix: string) => `${prefix}_${crypto.randomUUID()}`;
-export const changeTypes = [["addition", "补充"], ["change", "变化"], ["revelation", "揭露"], ["correction", "修正"]];
 export const lineStatuses = [["open", "开启"], ["progressing", "推进"], ["resolved", "解决"], ["abandoned", "放弃"]];
