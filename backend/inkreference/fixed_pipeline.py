@@ -43,6 +43,8 @@ class FixedPipeline:
         db.execute("CREATE TABLE IF NOT EXISTS run_stage_chunks (run_id TEXT NOT NULL,chunk_id TEXT NOT NULL,stage TEXT NOT NULL,stage_order INTEGER NOT NULL,status TEXT NOT NULL DEFAULT 'pending',round_attempts INTEGER NOT NULL DEFAULT 0,result_json TEXT,error TEXT,PRIMARY KEY(run_id,chunk_id,stage),FOREIGN KEY(run_id,chunk_id) REFERENCES run_chunks(run_id,id) ON DELETE CASCADE)")
         db.execute("CREATE INDEX IF NOT EXISTS run_stage_order ON run_stage_chunks(run_id,stage_order,status)")
         db.execute("CREATE TABLE IF NOT EXISTS run_entity_index (run_id TEXT NOT NULL REFERENCES run_jobs(id) ON DELETE CASCADE,kind TEXT NOT NULL,id TEXT NOT NULL,label TEXT NOT NULL,summary TEXT NOT NULL,position INTEGER NOT NULL,PRIMARY KEY(run_id,kind,id))")
+        if "narrative_progress" not in {row[1] for row in db.execute("PRAGMA table_info(run_entity_index)")}:
+            db.execute("ALTER TABLE run_entity_index ADD COLUMN narrative_progress REAL")
         db.execute("CREATE TABLE IF NOT EXISTS run_stage_cache (cache_key TEXT PRIMARY KEY,result_json TEXT NOT NULL,created_at TEXT NOT NULL)")
 
     @staticmethod
@@ -78,14 +80,16 @@ class FixedPipeline:
         maximum = snapshots.get("context_limits", {}).get(stage, CONTEXT_CHARS)
         # Exact current names first, then nearby events. This index is bounded
         # independently of chapter count; full historical analysis stays on disk.
-        rows = db.execute("SELECT kind,id,label,summary,position FROM run_entity_index WHERE run_id=? AND (kind IN ('characters','settings') OR position<=?) AND (kind='plotlines' OR instr(?,label)>0 OR (kind='events' AND position BETWEEN ? AND ?)) ORDER BY CASE WHEN position=? THEN 0 WHEN instr(?,label)>0 THEN 1 ELSE 2 END,position DESC,kind,id LIMIT 200", (run_id, chunk["position"], chunk["text"], max(0, chunk["position"] - 2), chunk["position"], chunk["position"], chunk["text"])).fetchall()
+        rows = db.execute("SELECT kind,id,label,summary,position,narrative_progress FROM run_entity_index WHERE run_id=? AND (kind IN ('characters','settings') OR position<=?) AND (kind='plotlines' OR instr(?,label)>0 OR (kind='events' AND position BETWEEN ? AND ?)) ORDER BY CASE WHEN position=? THEN 0 WHEN instr(?,label)>0 THEN 1 ELSE 2 END,position DESC,kind,id LIMIT 200", (run_id, chunk["position"], chunk["text"], max(0, chunk["position"] - 2), chunk["position"], chunk["position"], chunk["text"])).fetchall()
         context: dict[str, list] = {kind: [] for kind in ("events", "characters", "settings", "plotlines", "states")}
-        if contract(snapshots) == 3:
+        if contract(snapshots) >= 3:
             group = next((item for item in snapshots.get("chunk_groups", []) if item["chunk_id"] == chunk["id"]), None)
             if group:
                 context["scope"] = {key: group[key] for key in ("start", "end", "volume", "start_chapter", "end_chapter", "body_characters_before")}
         for row in rows:
             item = {"id": row["id"], "name": row["label"], "summary": row["summary"] if row["position"] <= chunk["position"] else ""}
+            if contract(snapshots) >= 4 and row["kind"] == "events" and row["narrative_progress"] is not None:
+                item["narrative_progress"] = row["narrative_progress"]
             context[row["kind"]].append(item)
             if len(dump(context)) > maximum:
                 context[row["kind"]].pop()
@@ -94,11 +98,11 @@ class FixedPipeline:
     def _fixed_messages(self, snapshots: dict, text: str, stage: str, context: dict | None = None) -> list[dict[str, str]]:
         workflow = snapshots["workflow"]
         skill = snapshots.get("stage_skills", {}).get(stage, snapshots["skill"])
-        if contract(snapshots) == 3:
+        if contract(snapshots) >= 3:
             document = snapshots["document"]
             context = {**(context or {}), "work": {
                 "title": document.get("title", "")[:300], "author": document.get("author", "")[:200],
-                "total_chapters": len(document.get("progress_chapters", [])),
+                "total_chapters": document.get("narrative_context", {}).get("chapter_count", len(document.get("progress_chapters", []))),
                 "total_body_characters": document.get("body_characters", document.get("characters", 0)),
                 "source_version_id": "",
             }}
@@ -146,12 +150,18 @@ class FixedPipeline:
         boundaries = sorted(canonical_boundaries | {len(text)}) if canonical_boundaries else [m.start() for m in re.finditer(r"(?m)^(?:第[0-9零〇一二三四五六七八九十百千万两]+[章节回]|Chapter\s+\d+)", text, flags=re.I)] + [len(text)]
         volume_boundaries = {item["end"] for item in snapshots["document"].get("volumes", [])
                              if type(item.get("end")) is int and 0 < item["end"] <= len(text)} if contract(snapshots) == 3 else set()
-        chunks, groups, start, before = [], [], 0, 0
-        while start < len(text):
+        intervals = snapshots.get("scope", {}).get("intervals", [{"start": 0, "end": len(text)}])
+        chunks, groups, interval_index = [], [], 0
+        start = intervals[0]["start"]
+        before = sum(not character.isspace() for character in text[:start])
+        while interval_index < len(intervals):
+            interval_end = intervals[interval_index]["end"]
+            reuse = next((item for item in snapshots.get("reused_chunks", []) if item["start"] == start), None)
+            reuse_boundary = reuse["end"] if reuse else min((item["start"] for item in snapshots.get("reused_chunks", []) if item["start"] > start), default=interval_end)
             # A declared volume is a preferred upper boundary, not permission
             # to exceed the smallest stage model's actual context capacity.
             next_volume = min((point for point in volume_boundaries if point > start), default=len(text))
-            lower, upper, end = start + 1, min(len(text), start + workflow["chunk_chars"], next_volume), start
+            lower, upper, end = start + 1, min(interval_end, start + workflow["chunk_chars"], next_volume, reuse_boundary), start
             while lower <= upper:
                 middle = (lower + upper) // 2
                 if all(self._estimate(rendered(stage, text[start:middle])) <= capacities[stage] for stage in FIXED_STAGES):
@@ -168,8 +178,9 @@ class FixedPipeline:
                 if newline >= start:
                     end = newline + 1
             chunks.append({"id": f"chunk-{len(chunks) + 1:06d}", "position": len(chunks), "start": start, "end": end, "text": text[start:end]})
-            if contract(snapshots) == 3:
-                volume = next((item for item in snapshots["document"].get("volumes", []) if item["start"] <= start < item["end"]), None)
+            if contract(snapshots) >= 3:
+                volumes = [item for item in snapshots["document"].get("volumes", []) if item["start"] < end and item["end"] > start]
+                volume = volumes[0] if volumes and (contract(snapshots) == 3 or len(volumes) == 1) else None
                 group_chapters = [index for index, chapter in enumerate(snapshots["document"].get("progress_chapters", []), 1) if chapter["end"] > start and chapter["start"] < end]
                 groups.append({"chunk_id": chunks[-1]["id"], "start": start, "end": end,
                                "volume": volume["title"] if volume else None,
@@ -178,18 +189,27 @@ class FixedPipeline:
                                "body_characters_before": before})
                 before += sum(not character.isspace() for character in text[start:end])
             start = end
-        if contract(snapshots) == 3:
+            if start == interval_end:
+                interval_index += 1
+                if interval_index < len(intervals):
+                    following = intervals[interval_index]["start"]
+                    before += sum(not character.isspace() for character in text[start:following])
+                    start = following
+        if contract(snapshots) >= 3:
             snapshots["chunk_groups"] = groups
         return chunks
 
     def _fixed_index(self, db, run_id: str, chunk: dict, result: dict) -> None:
         entries = []
         plot = result.get("plot", {})
+        event_progress = {item["id"]: item.get("narrative_progress") for item in plot.get("events", [])}
         for kind, items in (("events", plot.get("events", [])), ("plotlines", plot.get("plotlines", [])), ("characters", result.get("characters", [])), ("settings", result.get("settings", []))):
             for item in items:
                 label = item.get("name", item.get("title", item["id"]))
                 summary = item.get("description", item.get("intro", item.get("content", item.get("goal", item.get("initial_state", {}).get("identity", "")))))
-                if kind == "plotlines" and item.get("stages"):
+                if kind == "plotlines" and item.get("time_nodes"):
+                    summary = item["time_nodes"][-1].get("status", "") + ":" + item["time_nodes"][-1].get("description", "")
+                elif kind == "plotlines" and item.get("stages"):
                     summary = item["stages"][-1].get("status", "") + ":" + item["stages"][-1].get("goal", "")
                 entries.append((kind, item["id"], label[:120], summary[:160]))
         def states(node, label=""):
@@ -202,7 +222,7 @@ class FixedPipeline:
                 for value in node: states(value, label)
         states(result)
         for kind, identifier, label, summary in entries:
-            db.execute("INSERT INTO run_entity_index VALUES (?,?,?,?,?,?) ON CONFLICT(run_id,kind,id) DO UPDATE SET label=excluded.label,summary=excluded.summary,position=excluded.position", (run_id, kind, identifier, label, summary, chunk["position"]))
+            db.execute("INSERT INTO run_entity_index (run_id,kind,id,label,summary,position,narrative_progress) VALUES (?,?,?,?,?,?,?) ON CONFLICT(run_id,kind,id) DO UPDATE SET label=excluded.label,summary=excluded.summary,position=excluded.position,narrative_progress=excluded.narrative_progress", (run_id, kind, identifier, label, summary, chunk["position"], event_progress.get(identifier) if kind == "events" else None))
 
     @staticmethod
     def _absolute_anchors(value: Any, start: int, text: str) -> Any:
@@ -270,7 +290,7 @@ class FixedPipeline:
                     elif isinstance(node, list):
                         for child in node: infer(child)
                 infer(result)
-                if contract(snapshots) == 3:
+                if contract(snapshots) >= 3:
                     self._fixed_progress(result, snapshots, chunk)
             except Exception as exc:
                 error = str(exc)
@@ -315,7 +335,7 @@ class FixedPipeline:
             elif isinstance(node, list):
                 for child in node: ground(child)
         ground(result)
-        if contract(snapshots) == 3:
+        if contract(snapshots) >= 3:
             self._fixed_progress(result, snapshots, chunk)
         db.execute("UPDATE run_stage_chunks SET status='completed',result_json=?,error=NULL WHERE run_id=? AND chunk_id=? AND stage=?", (dump(result), run_id, chunk["id"], stage))
         self._fixed_index(db, run_id, chunk, result)
@@ -361,10 +381,16 @@ class FixedPipeline:
         chapters = snapshots["document"].get("progress_chapters", [])
         starts = [chapter["start"] for chapter in chapters]
         total = snapshots["document"].get("body_characters", 0)
+        progress_index = None
+        if contract(snapshots) >= 4 and chapters:
+            from .progress import ProgressIndex
+            progress_index = ProgressIndex({"chapters": chapters}, contract_version=4)
         for fact in facts:
             offset = fact["revealed_at"]["offset"]
             chapter = bisect_right(starts, offset) - 1
-            if chapter >= 0 and offset < chapters[chapter]["end"]:
+            if progress_index is not None and progress_index.at(fact["revealed_at"]) is not None:
+                progress = progress_index.at(fact["revealed_at"])
+            elif chapter >= 0 and offset < chapters[chapter]["end"]:
                 progress = round((chapter + 1) * 100 / len(chapters), 6)
             else:
                 progress = round(counts.get(offset - chunk["start"], 0) * 100 / total, 6) if total else 0.0
@@ -382,7 +408,7 @@ class FixedPipeline:
             return self._edit_fixed_candidate(run_id, chunk_id, parsed, expected_revision)
         with self._registry_lock, self._db(write=True) as db:
             row = self._job(db, run_id)
-            if self._key(run_id) in self._owners or row["status"] in {"running", "cancelling", "approving", "approved"}:
+            if self._key(run_id) in self._owners or row["status"] in {"running", "cancelling", "approving", "approved", "terminated"}:
                 raise DataError(409, "运行中或已入库的任务不能更改候选")
             if type(expected_revision) is not int or row["revision"] != expected_revision:
                 raise DataError(409, "候选已变化，请刷新后保存")
@@ -405,14 +431,14 @@ class FixedPipeline:
 
     def _edit_fixed_candidate(self, run_id: str, chunk_id: str, parsed: dict, expected_revision: int) -> dict:
         """Human edits preserve the model audit and cannot alter committed sections."""
-        from .chronicle_schema import STAGE_SECTIONS, validate_links, validate_v2_section, validate_v3_section
+        from .chronicle_schema import STAGE_SECTIONS, validate_links, validate_v2_section, validate_v3_section, validate_v4_section
         if set(parsed) - {"summary", "characters", "events", "cliches", "reference"}:
             raise DataError(422, "候选包含未声明字段")
         rich = parsed.get("reference")
         if not isinstance(rich, dict): raise DataError(422, "reference 必须为对象")
         with self._registry_lock, self._db(write=True) as db:
             row = self._job(db, run_id)
-            if self._key(run_id) in self._owners or row["status"] in {"running", "cancelling", "approving", "approved"}:
+            if self._key(run_id) in self._owners or row["status"] in {"running", "cancelling", "approving", "approved", "terminated"}:
                 raise DataError(409, "运行中或已入库的任务不能更改候选")
             if type(expected_revision) is not int or row["revision"] != expected_revision:
                 raise DataError(409, "候选已变化，请刷新后保存")
@@ -424,13 +450,13 @@ class FixedPipeline:
             if set(rich) != allowed:
                 raise DataError(422, "只可编辑已经完成的阶段；请保留这些阶段的全部固定字段")
             snapshots = json.loads(row["snapshots_json"])
-            validator = validate_v2_section if contract(snapshots) == 2 else validate_v3_section
+            validator = {2: validate_v2_section, 3: validate_v3_section, 4: validate_v4_section}[contract(snapshots)]
             kwargs = {} if contract(snapshots) == 2 else {"require_evidence": True}
             validated = {section: validator(section, value, chunk["text"], source_version_id=snapshots["document"]["version_id"], offset_base=chunk["start"], **kwargs) for section, value in rich.items()}
             known: dict[str, list] = {kind: [] for kind in ("events", "plotlines", "characters", "settings", "states")}
             def collect_known(value):
                 for kind, entries in (("events", value.get("plot", {}).get("events", [])), ("plotlines", value.get("plot", {}).get("plotlines", [])), ("characters", value.get("characters", [])), ("settings", value.get("settings", []))):
-                    known[kind].extend(entry["id"] for entry in entries)
+                    known[kind].extend(entry if kind == "events" and contract(snapshots) >= 4 else entry["id"] for entry in entries)
                 def states(node):
                     if isinstance(node, dict):
                         if "id" in node and ("attribute" in node or "narrative_range" in node): known["states"].append(node["id"])

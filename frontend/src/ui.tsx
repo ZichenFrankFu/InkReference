@@ -258,6 +258,8 @@ export function Status({ value }: { value: string }) {
     paused: "已暂停",
     failed: "运行失败",
     cancelled: "已取消",
+    terminated: "已终止",
+    cancelling: "正在暂停",
     needs_review: "待审核",
     approved: "已入库",
     completed: "已完成",

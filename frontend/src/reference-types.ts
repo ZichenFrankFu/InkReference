@@ -3,13 +3,14 @@ import type { EvidenceItem } from "./studio";
 export type ReferenceRecord = Record<string, unknown>;
 export type NarrativeRange = { start: number; end: number | null };
 export type CharacterRelationship = { character_id: string; relationship: string };
-export type CharacterSnapshot = ReferenceRecord & { id: string; narrative_range: NarrativeRange; story_time: string | null; event_ids: string[]; identity: string; ability: string; personality: string; appearance: string; visual_design: string; relationships: CharacterRelationship[] };
+export type CharacterSnapshot = ReferenceRecord & { id: string; name?: string; narrative_range: NarrativeRange; story_time: string | null; event_ids: string[]; identity: string; ability: string; personality: string; appearance: string; visual_design: string; relationships: CharacterRelationship[] };
 export const temperamentOptions = ["强大", "智谋", "利他", "共情", "利己", "执念", "反差", "宿命"];
 export type ReferenceSection = "plot" | "characters" | "settings" | "style" | "rhythm" | "opening" | "setting_features" | "raw_entries" | "metadata" | "era_background";
 export type ReferenceChunkRange = { key: string; title: string; startChapter: number; endChapter: number };
 export type ReferenceState = {
   document_id: string;
   schema_version?: number;
+  narrative_context?: { chapter_count: number; chapter_numbers?: number[] };
   as_of_chapter?: number | null;
   revision: number;
   structure_type: "narrative" | "setting_collection";

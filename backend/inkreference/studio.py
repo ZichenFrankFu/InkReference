@@ -19,7 +19,7 @@ from .models import ModelService
 from .projects import MAX_BACKUP_BYTES, ProjectStore
 from .skills import SkillStore
 from .workflow_definitions import WorkflowStore
-from .volumes import VolumeStore, parse_volume_paste
+from .volumes import VolumeStore
 from .reference_analysis import ReferenceAnalysisStore
 
 
@@ -30,18 +30,53 @@ class NewVersion(BaseModel):
     manual_text: str | None = None
 
 
+class ChapterRange(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    start_chapter: StrictInt = Field(ge=1)
+    end_chapter: StrictInt = Field(ge=1)
+
+
 class NewRun(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     document_id: str = Field(min_length=1, max_length=200)
     version_id: str = Field(min_length=1, max_length=200)
     profile_id: str | None = Field(default=None, min_length=1, max_length=100)
     workflow_id: str = "default"
-    workflow_version: str = "3.0.0"
+    workflow_version: str = "4.0.0"
     start: bool = True
     manual: bool = False
     remote_consent: bool = False
     expected_model_fingerprint: str | None = Field(default=None, min_length=64, max_length=64)
     expected_stage_fingerprints: dict[str, str] | None = None
+    chapter_ranges: list[ChapterRange] | None = Field(default=None, max_length=100)
+    reuse_existing: bool = True
+
+
+class ComparisonVariant(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    label: str = Field(min_length=1, max_length=40)
+    profile_id: str = Field(min_length=1, max_length=100)
+    remote_consent: bool = False
+    expected_model_fingerprint: str | None = Field(default=None, min_length=64, max_length=64)
+    expected_stage_fingerprints: dict[str, str] | None = None
+
+
+class ComparisonCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    document_id: str = Field(min_length=1, max_length=200)
+    version_id: str | None = Field(default=None, min_length=1, max_length=200)
+    workflow_id: str = "default"
+    workflow_version: str = "4.0.0"
+    chapter_ranges: list[ChapterRange] | None = Field(default=None, max_length=100)
+    variants: list[ComparisonVariant] = Field(min_length=2, max_length=4)
+    start: bool = False
+    reuse_existing: bool = True
+
+
+class ComparisonSelection(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    run_id: str = Field(min_length=1, max_length=200)
+    expected_revision: StrictInt = Field(ge=1)
 
 
 class ConnectionConsent(BaseModel):
@@ -101,11 +136,25 @@ class VolumePlan(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     expected_revision: StrictInt = Field(ge=0)
     volumes: list[dict[str, Any]]
+    coordinate_version: Literal[1, 2] = 1
+
+
+class VolumeResearchRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    profile_id: str = Field(min_length=1, max_length=100)
+    remote_consent: bool = False
+    expected_model_fingerprint: str | None = Field(default=None, min_length=64, max_length=64)
+    expected_search_fingerprint: str = Field(min_length=64, max_length=64)
+    base_revision: StrictInt | None = Field(default=None, ge=0)
 
 
 class PastedContent(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     content: str = Field(max_length=2_000_000)
+
+
+class VolumePaste(PastedContent):
+    contract_version: Literal[1, 2] = 1
 
 
 class ReferenceRevision(BaseModel):
@@ -145,6 +194,11 @@ class ChunkPaste(Revision):
 
 class ChunkCommit(ReferenceRevision):
     sections: list[str]
+    comparison_id: str | None = Field(default=None, min_length=1, max_length=100)
+
+
+class ComparisonApproval(Revision):
+    comparison_id: str | None = Field(default=None, min_length=1, max_length=100)
 
 
 class ModelAction(BaseModel):
@@ -182,7 +236,7 @@ class Studio:
         self._volumes = self._reference = self._models = None
         self._skills = self._workflows = self._projects = self._runner = None
         self._conversions = self._ingestions = None
-        self._research = self._character_bridge = None
+        self._research = self._character_bridge = self._volume_research = self._embedding_downloads = None
 
     def _service(self, name, factory):
         with self.lock:
@@ -216,6 +270,16 @@ class Studio:
         from .research import ResearchService
         return self._service("research", lambda: ResearchService(self.data_dir, self.models,
             catalog_snapshot=self._runtime.store.catalog_snapshot, catalog_commit=self._runtime.store.apply_research))
+
+    @property
+    def volume_research(self):
+        from .volume_research import VolumeResearch
+        return self._service("volume_research", lambda: VolumeResearch(self.documents, self.volumes, self.models, self.research.sources))
+
+    @property
+    def embedding_downloads(self):
+        from .embedding_downloads import EmbeddingDownloads
+        return self._service("embedding_downloads", lambda: EmbeddingDownloads(self.data_dir, self.models))
 
     @property
     def models(self):
@@ -266,9 +330,17 @@ class Studio:
             workers += self._conversions.active_threads()
         if self._research is not None:
             workers += self._research.active_threads()
+        if self._volume_research is not None:
+            workers += self._volume_research.active_threads()
+        if self._embedding_downloads is not None:
+            workers += self._embedding_downloads.active_threads()
         return workers
 
     def require_idle(self):
+        if self._embedding_downloads is not None and self._embedding_downloads.has_active_runs():
+            raise DataError(409, "请先完成或取消正在下载的 embedding 模型。")
+        if self._volume_research is not None and self._volume_research.has_active_runs():
+            raise DataError(409, "请先完成或取消正在运行的分卷检索。")
         if self._research is not None and self._research.has_active_runs():
             raise DataError(409, "请先完成或暂停正在运行的 AI 更新，再导出项目。")
         if self._ingestions is not None and any(item["status"] in {"queued", "running"} for item in self.ingestions.list()):
@@ -536,26 +608,43 @@ def install_studio_routes(application, runtime):
             return runtime.studio.documents.version_summary(result) if summary else result
 
     @router.get("/documents/{document_id}/versions/{version_id}/volumes")
-    def volumes(document_id: str, version_id: str):
-        return runtime.studio.volumes.get(document_id, version_id)
+    def volumes(document_id: str, version_id: str, coordinate_version: Annotated[int, Query(ge=1, le=2)] = 1):
+        return runtime.studio.volumes.get(document_id, version_id, coordinate_version=coordinate_version)
 
     @router.put("/documents/{document_id}/versions/{version_id}/volumes")
     def save_volumes(document_id: str, version_id: str, body: VolumePlan):
         with runtime.studio.lock:
-            return runtime.studio.volumes.save(document_id, version_id, body.volumes, body.expected_revision)
+            return runtime.studio.volumes.save(document_id, version_id, body.volumes, body.expected_revision, coordinate_version=body.coordinate_version)
 
     @router.get("/documents/{document_id}/versions/{version_id}/volumes/prompt")
     def volume_prompt(document_id: str, version_id: str):
-        return runtime.studio.volumes.prompt(document_id, version_id)
+        return runtime.studio.volumes.web_prompt(document_id, version_id)
 
     @router.post("/documents/{document_id}/versions/{version_id}/volumes/detect")
-    def detect_volume_plan(document_id: str, version_id: str):
-        return runtime.studio.volumes.detect(document_id, version_id)
+    def detect_volume_plan(document_id: str, version_id: str, coordinate_version: Annotated[int, Query(ge=1, le=2)] = 1):
+        return runtime.studio.volumes.detect(document_id, version_id, coordinate_version=coordinate_version)
 
     @router.post("/documents/{document_id}/versions/{version_id}/volumes/paste")
-    def paste_volume_plan(document_id: str, version_id: str, body: PastedContent):
+    def paste_volume_plan(document_id: str, version_id: str, body: VolumePaste):
         count = runtime.studio.documents.get_version_summary(document_id, version_id)["chapter_count"]
-        return {"volumes": parse_volume_paste(body.content, count)}
+        from .volume_research import parse_web_volume_reply
+        if body.contract_version == 2:
+            current = runtime.studio.volumes.web_prompt(document_id, version_id)
+            return parse_web_volume_reply(body.content, current["chapter_count"], expected_request_id=current["request_id"], title=current["title"], author=current["author"])
+        return parse_web_volume_reply(body.content, count)
+
+    @router.post("/documents/{document_id}/versions/{version_id}/volumes/research", status_code=202)
+    def research_volumes(document_id: str, version_id: str, body: VolumeResearchRequest):
+        with runtime.studio.lock:
+            return runtime.studio.volume_research.create(document_id, version_id, **body.model_dump())
+
+    @router.get("/documents/{document_id}/versions/{version_id}/volumes/research/{job_id}")
+    def volume_research_job(document_id: str, version_id: str, job_id: str):
+        return runtime.studio.volume_research.get(job_id, document_id, version_id)
+
+    @router.post("/documents/{document_id}/versions/{version_id}/volumes/research/{job_id}/cancel")
+    def cancel_volume_research(document_id: str, version_id: str, job_id: str):
+        return runtime.studio.volume_research.cancel(job_id, document_id, version_id)
 
     @router.post("/documents/{document_id}/versions/{version_id}/volumes/model")
     def model_volume_plan(document_id: str, version_id: str, body: ModelAction):
@@ -596,7 +685,7 @@ def install_studio_routes(application, runtime):
     @router.get("/documents/{document_id}/reference/projection")
     def project_reference(document_id: str, chapter: Annotated[int | None, Query(ge=1)] = None,
                           progress: Annotated[float | None, Query(ge=0, le=100)] = None,
-                          schema_version: Annotated[int | None, Query(ge=2, le=3)] = None):
+                          schema_version: Annotated[int | None, Query(ge=2, le=4)] = None):
         state = runtime.studio.reference.get(document_id)
         events = state["sections"].get("plot", {}).get("events", [])
         sources = {item.get("source_version_id") for item in events if isinstance(item, dict) and item.get("source_version_id")}
@@ -631,7 +720,7 @@ def install_studio_routes(application, runtime):
             identifiers.add(body.source_version_id)
         for identifier in identifiers:
             sources[identifier] = runtime.studio.documents.get_version(document_id, identifier)
-        return {"sections": project_sections(body.sections, target_version=3, source_versions=sources)}
+        return {"sections": project_sections(body.sections, target_version=4, source_versions=sources)}
 
     @router.post("/reference-collections", status_code=201)
     def new_collection(body: NewCollection):
@@ -690,8 +779,26 @@ def install_studio_routes(application, runtime):
     @router.post("/jobs", status_code=201)
     def create_job(body: NewRun):
         with runtime.studio.lock:
-            result = runtime.studio.runner.create_run(body.document_id, body.version_id, workflow_id=body.workflow_id, workflow_version=body.workflow_version, profile_id=body.profile_id, remote_consent=body.remote_consent, expected_model_fingerprint=body.expected_model_fingerprint, expected_stage_fingerprints=body.expected_stage_fingerprints, manual=body.manual)
-            return runtime.studio.runner.start(result["id"], remote_consent=body.remote_consent) if body.start and not body.manual else result
+            result = runtime.studio.runner.create_run(body.document_id, body.version_id, workflow_id=body.workflow_id, workflow_version=body.workflow_version, profile_id=body.profile_id, remote_consent=body.remote_consent, expected_model_fingerprint=body.expected_model_fingerprint, expected_stage_fingerprints=body.expected_stage_fingerprints, manual=body.manual, chapter_ranges=[item.model_dump() for item in body.chapter_ranges] if body.chapter_ranges is not None else None, reuse_existing=body.reuse_existing)
+            return runtime.studio.runner.start(result["id"], remote_consent=body.remote_consent) if body.start and not body.manual and result["status"] == "queued" else result
+
+    @router.post("/jobs/comparisons", status_code=201)
+    def create_comparison(body: ComparisonCreate):
+        with runtime.studio.lock:
+            return runtime.studio.runner.create_comparison(**body.model_dump())
+
+    @router.get("/jobs/comparisons")
+    def list_comparisons(document_id: str | None = None, limit: Annotated[int, Query(ge=1, le=200)] = 100):
+        return {"items": runtime.studio.runner.list_comparisons(document_id=document_id, limit=limit)}
+
+    @router.get("/jobs/comparisons/{comparison_id}")
+    def get_comparison(comparison_id: str):
+        return runtime.studio.runner.get_comparison(comparison_id)
+
+    @router.post("/jobs/comparisons/{comparison_id}/select")
+    def select_comparison(comparison_id: str, body: ComparisonSelection):
+        with runtime.studio.lock:
+            return runtime.studio.runner.select_comparison(comparison_id, **body.model_dump())
 
     @router.get("/jobs/{run_id}")
     def job(run_id: str, summary: bool = False):
@@ -719,6 +826,7 @@ def install_studio_routes(application, runtime):
     @router.post("/jobs/{run_id}/chunks/{chunk_id}/commit")
     def commit_chunk(run_id: str, chunk_id: str, body: ChunkCommit):
         with runtime.studio.lock:
+            runtime.studio.runner.assert_comparison_selection(run_id, body.comparison_id)
             return runtime.studio.reference.commit_candidate(runtime.studio.runner.get_run(run_id), chunk_id, body.sections, body.expected_revision)
 
     @router.post("/jobs/{run_id}/resume")
@@ -735,15 +843,23 @@ def install_studio_routes(application, runtime):
     def cancel_job(run_id: str):
         return runtime.studio.runner.cancel(run_id)
 
+    @router.post("/jobs/{run_id}/pause")
+    def pause_job(run_id: str):
+        return runtime.studio.runner.pause(run_id)
+
+    @router.post("/jobs/{run_id}/terminate")
+    def terminate_job(run_id: str):
+        return runtime.studio.runner.terminate(run_id)
+
     @router.put("/jobs/{run_id}/results")
     def review_job(run_id: str, body: Review):
         with runtime.studio.lock:
             return runtime.studio.runner.edit_result(run_id, body.results, body.expected_revision)
 
     @router.post("/jobs/{run_id}/approve")
-    def approve_job(run_id: str, body: Revision):
+    def approve_job(run_id: str, body: ComparisonApproval):
         with runtime.studio.lock:
-            return runtime.studio.runner.approve(run_id, body.expected_revision)
+            return runtime.studio.runner.approve(run_id, body.expected_revision, body.comparison_id)
 
     @router.get("/models")
     def models():
@@ -802,7 +918,7 @@ def install_studio_routes(application, runtime):
             return runtime.studio.skills.save(body)
 
     @router.post("/skills/upload", status_code=201)
-    async def upload_skill(file: Annotated[UploadFile, File()], contract_version: Annotated[int | None, Query(ge=2, le=3)] = None):
+    async def upload_skill(file: Annotated[UploadFile, File()], contract_version: Annotated[int | None, Query(ge=2, le=4)] = None):
         raw = await _upload(file, 2 * 1024 * 1024)
         def save():
             with runtime.studio.lock:

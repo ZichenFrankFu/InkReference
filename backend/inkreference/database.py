@@ -137,7 +137,9 @@ def validate_values(table: str, values: dict[str, str], *, partial: bool = False
                 try: aliases=json.loads(normalized.get("别名","[]"))
                 except (TypeError, ValueError) as exc:raise DataError(422,"别名必须为 JSON 数组") from exc
                 from .character_contract import normalize_character
-                canonical=normalize_character({"schema_version":3,"id":normalized.get("人物ID",values.get("人物ID","")),"name":normalized.get("角色名",values.get("角色名","")),"aliases":aliases,"role_tag":normalized.get("角色定位",""),"temperament":normalized.get("性格基调",""),"visual_design":normalized.get("视觉元素设计",""),"initial_state":json.loads(normalized.get("初始状态","{}")),"snapshots":json.loads(normalized.get("阶段状态","[]"))})
+                snapshot_rows=json.loads(normalized.get("阶段状态","[]"))
+                character_version=4 if any(isinstance(s,dict) and "name" in s for s in snapshot_rows) else 3
+                canonical=normalize_character({"schema_version":character_version,"id":normalized.get("人物ID",values.get("人物ID","")),"name":normalized.get("角色名",values.get("角色名","")),"aliases":aliases,"role_tag":normalized.get("角色定位",""),"temperament":normalized.get("性格基调",""),"visual_design":normalized.get("视觉元素设计",""),"initial_state":json.loads(normalized.get("初始状态","{}")),"snapshots":json.loads(normalized.get("阶段状态","[]"))})
                 normalized["初始状态"]=_json(canonical["initial_state"])
                 normalized["阶段状态"]=_json(canonical["snapshots"])
 

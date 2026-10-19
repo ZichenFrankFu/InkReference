@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ArrowDownToLine, ArrowRight, BookOpen, CheckCircle2, Link2, FileText, History, Layers3, PencilLine, RefreshCw, RotateCcw, Search, Server, SlidersHorizontal, Upload, X } from "lucide-react";
+import { ArrowDownToLine, ArrowRight, BookOpen, CheckCircle2, ChevronDown, Link2, FileText, History, Layers3, PencilLine, RefreshCw, RotateCcw, Search, Server, SlidersHorizontal, Upload, X } from "lucide-react";
 import { ApiError, download } from "./api";
 import ChapterWorkbench from "./ChapterWorkbench";
 import ChapterRecognitionSettings from "./ChapterRecognitionSettings";
@@ -35,6 +35,8 @@ export default function Documents({ navigate, onJob }: Props) {
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
   const [uploadOpen, setUploadOpen] = useState(false);
+  const [uploadMenuOpen, setUploadMenuOpen] = useState(false);
+  const uploadMenu = useRef<HTMLDivElement>(null);
   const [uploadTarget, setUploadTarget] = useState<DocumentMeta | null>(null);
   const [ingestions, setIngestions] = useState<IngestionTask[]>([]);
   const [ingestion, setIngestion] = useState<IngestionTask | null>(null);
@@ -90,7 +92,15 @@ export default function Documents({ navigate, onJob }: Props) {
   const remote = modelTargets.some(isRemoteModel);
   const modelTargetsReady = !!selectedProfile && stageProfiles.every(item => item.profile && (!isRemoteModel(item.profile) || !!item.profile.target_fingerprint)) && modelTargets.every(item => !isRemoteModel(item) || !!item.target_fingerprint);
   const guard = (action: () => void) => dirtyRef.current ? setDiscardAction(() => action) : action();
-  const openUpload = (doc: DocumentMeta | null = null) => guard(() => { setUploadTarget(doc); setUploadOpen(true); setError(""); });
+  const openUpload = (doc: DocumentMeta | null = null) => { setUploadMenuOpen(false); guard(() => { setUploadTarget(doc); setUploadOpen(true); setError(""); }); };
+  useEffect(() => {
+    if (!uploadMenuOpen) return;
+    uploadMenu.current?.querySelector<HTMLButtonElement>('[role="menuitem"]')?.focus();
+    const outside = (event: PointerEvent) => { if (!uploadMenu.current?.contains(event.target as Node)) setUploadMenuOpen(false); };
+    const escape = (event: KeyboardEvent) => { if (event.key === "Escape") { setUploadMenuOpen(false); uploadMenu.current?.querySelector<HTMLButtonElement>('[aria-haspopup="menu"]')?.focus(); } };
+    window.addEventListener("pointerdown", outside); window.addEventListener("keydown", escape);
+    return () => { window.removeEventListener("pointerdown", outside); window.removeEventListener("keydown", escape); };
+  }, [uploadMenuOpen]);
 
   const load = useCallback(async () => {
     const documents = studio<List<DocumentMeta>>("/documents").then((data) => {
@@ -266,7 +276,7 @@ export default function Documents({ navigate, onJob }: Props) {
   const pendingTasks = ingestions.filter((task) => ingestionRunning(task) || ["failed", "interrupted"].includes(task.status));
 
   return <main className="studio-main documents-page">
-    <PageTitle kicker="" title="文本清理" description="" action={<button className="button primary" onClick={() => openUpload()}><Upload size={16} />新建作品</button>} />
+    <PageTitle title="文本清理" />
     {progressLabel && <Busy label={progressLabel} delay={150} />}
     <Notice error={!!error} success={!error && !!message}>{error || message}</Notice>
     <div className="document-layout">
@@ -280,13 +290,13 @@ export default function Documents({ navigate, onJob }: Props) {
         {!!pendingTasks.length && <div className="document-task-picker"><span>处理任务</span><div>{pendingTasks.map((task) => <button key={task.id} className={ingestion?.id === task.id ? "active" : ""} onClick={() => setIngestion(task)}>{task.filename}<IngestionStatus status={task.status} /></button>)}</div></div>}
         {ingestion && ingestion.status !== "completed" && <IngestionProgress task={ingestion} action={(kind) => void ingestionAction(kind)} busy={!!busy} />}
         {!selected ? loading || busy === "version" ? <div className="document-first-load"><div className="document-loading-skeleton"><i /><i /><i /></div></div> : <Empty icon={BookOpen} title={ingestion && ingestionRunning(ingestion) ? "正在准备正文" : "尚未上传文件"} action={<button className="button secondary" onClick={() => openUpload()}><Upload size={16} />上传文件</button>} /> : <>
-          <div className="document-detail-header"><div className="document-heading-copy"><h2 className="document-desktop-title">{selected.title}</h2><label className="document-title-picker"><span>参考作品库</span><select aria-label="参考作品库" value={selected.id} onChange={(event) => { if (event.target.value) void choose(event.target.value); }}>{items.map((doc) => <option key={doc.id} value={doc.id}>{doc.title} · {wordCount(doc.current_characters ?? doc.source_characters)} · {documentType(doc)}</option>)}</select></label></div><div className="inline-actions"><button className="icon-button document-metadata-button" aria-label="作品信息" title="作品信息" disabled={!!busy} onClick={() => void openMetadata()}><PencilLine size={16} /></button><button className="button secondary document-upload-button compact-button" aria-label="上传文件" title="上传文件" disabled={!!busy} onClick={() => openUpload(selected)}><Upload size={15} />上传文件</button><button className="icon-button document-history-button" title="历史版本" aria-label="历史版本" disabled={!!busy} onClick={() => guard(() => void openHistory())}><History size={16} /></button><button className="button primary compact-button document-analyze-button" aria-label="开始分析" title="开始分析" disabled={!!busy || !version || workspaceDirty || (!!run && activeRun(run))} onClick={() => void startDialog()}><ArrowRight size={15} /><span className="document-analyze-label">开始分析</span></button></div></div>
+          <div className="document-detail-header"><div className="document-heading-copy"><h2 className="document-desktop-title">{selected.title}</h2><label className="document-title-picker"><span>参考作品库</span><select aria-label="参考作品库" value={selected.id} onChange={(event) => { if (event.target.value) void choose(event.target.value); }}>{items.map((doc) => <option key={doc.id} value={doc.id}>{doc.title} · {wordCount(doc.current_characters ?? doc.source_characters)} · {documentType(doc)}</option>)}</select></label></div><div className="inline-actions"><button className="button primary compact-button document-analyze-button" aria-label="开始分析" title="开始分析" disabled={!!busy || !version || workspaceDirty || (!!run && activeRun(run))} onClick={() => void startDialog()}><ArrowRight size={15} /><span className="document-analyze-label">开始分析</span></button></div></div>
           {run && <section className="document-analysis-progress" aria-label="全文分析进度"><div className="document-analysis-heading"><strong>作品分析</strong><Status value={run.status} /><button className="text-button" onClick={() => onJob(run.id)}>查看任务<ArrowRight size={13} /></button></div><Progress completed={run.total ? run.completed : undefined} total={run.total || undefined} stage={runStage[run.stage] || (activeRun(run) ? "正在分析" : "分析任务")} busy={activeRun(run)} />{run.error && <Notice error>{run.error}</Notice>}</section>}
-          <div className="document-subbar"><div className="document-review-tabs" role="tablist" aria-label="文本清理工作区">{([["files", "原始文件", FileText], ["body", "正文清理", BookOpen], ["volumes", "分卷与章节", Layers3]] as const).map(([id, label, TabIcon], index) => <button key={id} role="tab" aria-selected={tab === id} className={tab === id ? "active" : ""} onClick={() => guard(() => setTab(id))}><span className="document-step-number">{index + 1}</span><TabIcon size={14} />{label}</button>)}</div></div>
+          <div className="document-subbar"><div className="document-review-tabs" role="tablist" aria-label="文本清理工作区">{([["files", "元数据", FileText], ["volumes", "分卷与章节", Layers3], ["body", "正文清理", BookOpen]] as const).map(([id, label, TabIcon], index) => <button key={id} role="tab" aria-selected={tab === id} className={tab === id ? "active" : ""} onClick={() => guard(() => setTab(id))}><span className="document-step-number">{index + 1}</span><TabIcon size={14} />{label}</button>)}</div></div>
           {version ? <>
             {tab === "body" && <ChapterWorkbench key={`${selected.id}:${chapterReset}`} documentId={selected.id} version={version} onDirty={setChapterDirty} onActivity={chapterActivity} onVersion={receiveVersion} onComplete={() => guard(() => void openFinish())} />}
-            {tab === "volumes" && <div className="document-structure"><ChapterRecognitionSettings key={`recognition:${selected.id}:${chapterReset}`} documentId={selected.id} version={version} onVersion={receiveVersion} onDirty={setRecognitionDirty} onActivity={recognitionActivity} blocked={volumeDirty} /><VolumePanel key={`${selected.id}:${version.id}:${chapterReset}`} documentId={selected.id} versionId={version.id} onDirty={setVolumeDirty} onActivity={volumeActivity} /></div>}
-            {tab === "files" && <DocumentSources document={selected} versionId={version.id} onActivity={sourcesActivity} />}
+            {tab === "volumes" && <div className="document-structure"><VolumePanel key={`${selected.id}:${version.id}:${chapterReset}`} documentId={selected.id} versionId={version.id} onDirty={setVolumeDirty} onActivity={volumeActivity} /><ChapterRecognitionSettings key={`recognition:${selected.id}:${chapterReset}`} documentId={selected.id} version={version} onVersion={receiveVersion} onDirty={setRecognitionDirty} onActivity={recognitionActivity} blocked={volumeDirty} /></div>}
+            {tab === "files" && <div className="document-metadata-workspace" aria-label="元数据"><section className="document-metadata-card"><div className="document-metadata-heading"><h3>作品信息</h3><div className="document-metadata-actions"><button className="button secondary compact-button" aria-label="编辑信息" disabled={!!busy} onClick={() => void openMetadata()}><PencilLine size={14} />编辑信息</button><button className="button secondary compact-button" aria-label="版本历史" disabled={!!busy} onClick={() => guard(() => void openHistory())}><History size={14} />版本历史</button><div className="document-upload-split" ref={uploadMenu}><button className="button primary compact-button" aria-label="上传文件" disabled={!!busy} onClick={() => openUpload(selected)}><Upload size={14} />上传文件</button><button className="button primary compact-button document-upload-options" aria-label="更多上传选项" title="更多上传选项" aria-haspopup="menu" aria-expanded={uploadMenuOpen} disabled={!!busy} onClick={() => setUploadMenuOpen(value => !value)}><ChevronDown size={14} /></button>{uploadMenuOpen && <div role="menu" className="document-upload-menu"><button role="menuitem" onClick={() => { setUploadMenuOpen(false); openUpload(); }}><Upload size={14} />上传其他作品</button></div>}</div></div></div><dl className="document-metadata-values"><div><dt>书名</dt><dd>{selected.book_title || selected.title}</dd></div><div><dt>作者</dt><dd>{selected.author || selected.catalog_author || "—"}</dd></div><div><dt>作品类型</dt><dd>{documentType(selected)}</dd></div><div><dt>最早更新时间</dt><dd>{selected.earliest_update_at || "—"}</dd></div><div><dt>字数</dt><dd>{wordCount(selected.current_characters ?? selected.source_characters)}</dd></div><div><dt>当前版本</dt><dd>版本 {version.version_number} · {chapterLabel(version)}</dd></div></dl>{selected.storage_folder && <div className="document-storage-location"><span>章节文件夹</span><code>{selected.storage_folder}</code></div>}</section><DocumentSources document={selected} versionId={version.id} onActivity={sourcesActivity} /></div>}
           </> : <div className="document-version-loading"><div className="document-loading-skeleton"><i /><i /><i /></div></div>}
         </>}
       </section>

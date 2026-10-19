@@ -53,9 +53,11 @@ import {
 } from "./api";
 import "./library.css";
 import CharacterSnapshots, { characterTemperaments } from "./CharacterSnapshots";
+import { NarrativeProvider } from "./NarrativePosition";
 import { record, records, stringList, stringValue, type ReferenceRecord } from "./reference-types";
 import { Busy, Modal, PageTitle } from "./ui";
 const WorkReference = lazy(() => import("./WorkReference"));
+const ResearchIntake = lazy(() => import("./Research"));
 
 const TABLES: {
   key: TableKey;
@@ -105,7 +107,7 @@ const canonicalColumns: Record<TableKey, string[]> = {
 const normalizeItem = (item: Item): Item => ({ ...item, values: valuesOf(item) });
 const scoreOf = (item: Item) => { const raw = (item as CatalogItem).computed?.cliche_score ?? valuesOf(item)["cliché评分"]; return raw !== null && raw !== undefined && raw !== "" && Number.isFinite(Number(raw)) ? Number(raw).toFixed(1) : "—"; };
 function jsonValue(value: string | undefined, fallback: unknown): unknown { try { return value ? JSON.parse(value) : fallback; } catch { return fallback; } }
-function characterFromValues(values: Record<string, string>): ReferenceRecord { return { schema_version: 3, id: values["人物ID"] || "", name: values["角色名"] || values["角色"] || "", aliases: jsonValue(values["别名"], []), role_tag: values["角色定位"] || "", temperament: values["性格基调"] || "", visual_design: values["视觉元素设计"] || "", initial_state: jsonValue(values["初始状态"], { gender: null, age: "", identity: "", ability: "", personality: "", appearance: "", relationships: [], narrative_progress: 0, story_time: null }), snapshots: jsonValue(values["阶段状态"], []) }; }
+function characterFromValues(values: Record<string, string>): ReferenceRecord { return { schema_version: 4, id: values["人物ID"] || "", name: values["角色名"] || values["角色"] || "", aliases: jsonValue(values["别名"], []), role_tag: values["角色定位"] || "", temperament: values["性格基调"] || "", visual_design: values["视觉元素设计"] || "", initial_state: jsonValue(values["初始状态"], { gender: null, age: "", identity: "", ability: "", personality: "", appearance: "", relationships: [], narrative_progress: 0, story_time: null }), snapshots: jsonValue(values["阶段状态"], []) }; }
 function valuesFromCharacter(values: Record<string, string>, character: ReferenceRecord): Record<string, string> { return { ...values, "角色名": stringValue(character.name), "别名": JSON.stringify(Array.isArray(character.aliases) ? character.aliases : stringList(character.aliases)), "角色定位": stringValue(character.role_tag), "性格基调": stringValue(character.temperament), "视觉元素设计": stringValue(character.visual_design), "初始状态": JSON.stringify(record(character.initial_state)), "阶段状态": JSON.stringify(records(character.snapshots)) }; }
 const isLong = (column: string) =>
   /概括|梗概|说明|内容|出现作品|桥段|能力|性格|身份|关系/.test(column);
@@ -327,7 +329,7 @@ function ExportDialog({ onClose, notify }: { onClose: () => void; notify: (messa
 }
 
 type Selection = { table: TableKey; id?: string };
-type CharacterContext = { character_id: string; work_id: string; document_id: string; extracted_character_id: string; revision: number; reference_revision: number | null; character: ReferenceRecord; characters: ReferenceRecord[]; events: ReferenceRecord[] };
+type CharacterContext = { character_id: string; work_id: string; document_id: string; extracted_character_id: string; revision: number; reference_revision: number | null; character: ReferenceRecord; display_character?: ReferenceRecord; characters: ReferenceRecord[]; events: ReferenceRecord[]; narrative_context?: { chapter_count?: number; chapter_numbers?: number[] } };
 type CharacterContexts = { character_id: string; catalog_revision: string; contexts: CharacterContext[] };
 function DetailPanel({
   selection,
@@ -338,6 +340,7 @@ function DetailPanel({
   onNavigate,
   onDirty,
   refreshRecord,
+  embedded = false,
 }: {
   selection: Selection;
   meta: TableMeta | undefined;
@@ -347,6 +350,7 @@ function DetailPanel({
   onNavigate: (table: TableKey, id: string) => void;
   onDirty: (dirty: boolean) => void;
   refreshRecord: number;
+  embedded?: boolean;
 }) {
   const { table, id } = selection;
   const [item, setItem] = useState<Item | null>(null);
@@ -398,7 +402,7 @@ function DetailPanel({
       ]);
       setItem(normalizeItem(record));
       const context = contexts?.contexts[0];
-      const next = context ? valuesFromCharacter(valuesOf(record), context.character) : valuesOf(record);
+      const next = context ? valuesFromCharacter(valuesOf(record), context.display_character || context.character) : valuesOf(record);
       setDraft(next);
       setBaseline(next);
       setContextWorkId(context?.work_id || "");
@@ -432,7 +436,7 @@ function DetailPanel({
   const chooseCharacterContext = (workId: string) => {
     if (dirty && !window.confirm("有未保存的修改，是否放弃？")) return;
     const context = characterContexts?.contexts.find(candidate => candidate.work_id === workId);
-    const next = context ? valuesFromCharacter(item?.values || {}, context.character) : item?.values || {};
+    const next = context ? valuesFromCharacter(item?.values || {}, context.display_character || context.character) : item?.values || {};
     setContextWorkId(workId); setDraft(next); setBaseline(next); setEditingRelations(false); setError(""); setConflict(false);
   };
   const save = async (event: React.FormEvent) => {
@@ -445,7 +449,7 @@ function DetailPanel({
         await request(`/library/characters/${encoded(id)}/contexts/${encoded(characterContext.work_id)}`, { method: "PUT", ...jsonBody({ character: { ...characterContext.character, ...characterFromValues(draft), id: characterContext.extracted_character_id }, expected_revision: characterContext.revision, expected_catalog_revision: characterContexts?.catalog_revision, expected_reference_revision: characterContext.reference_revision }) });
         const [updated, contexts] = await Promise.all([request<Item>(`/records/characters/${encoded(id)}`), request<CharacterContexts>(`/library/characters/${encoded(id)}/contexts`)]);
         const current = contexts.contexts.find(context => context.work_id === contextWorkId);
-        const next = current ? valuesFromCharacter(valuesOf(updated), current.character) : valuesOf(updated);
+        const next = current ? valuesFromCharacter(valuesOf(updated), current.display_character || current.character) : valuesOf(updated);
         setItem(normalizeItem(updated)); setCharacterContexts(contexts); setDraft(next); setBaseline(next); onDirty(false); onSaved(updated);
         window.dispatchEvent(new Event("inkreference:reference-refresh"));
         return;
@@ -503,9 +507,9 @@ function DetailPanel({
   };
   const columns = canonicalColumns[table].filter(column => !hiddenColumns.has(column));
   return (
-    <aside className="detail-panel" aria-label={`${labelFor(table)}详情`}>
+    <aside className={`detail-panel ${embedded ? "detail-panel-embedded" : ""}`} aria-label={`${labelFor(table)}详情`}>
       {(loading || saving) && <Busy label={saving ? "正在保存素材" : "正在读取素材"} />}
-      <div className="detail-heading">
+      {!embedded && <div className="detail-heading">
         <div>
           <span className="eyebrow">{id ? "素材详情" : "创建素材"}</span>
           <h2 title={title}>{title}</h2>
@@ -514,7 +518,7 @@ function DetailPanel({
         <button className="icon-button" onClick={onClose} aria-label="收起详情">
           <PanelRightClose size={20} />
         </button>
-      </div>
+      </div>}
       {
         <div className="detail-tabs" role="tablist" aria-label="详情视图">
           <button
@@ -566,7 +570,7 @@ function DetailPanel({
                 )}
           <form id="library-record-form" className="detail-scroll" hidden={tab !== "details"} onSubmit={(e) => void save(e)}>
                 {table === "cliches" && <ClicheTypeFields values={draft} onChange={(key, value) => setDraft(d => ({ ...d, [key]: value }))} />}
-                {table === "characters" ? <>{!!characterContexts?.contexts.length && <label className="catalog-character-context"><span>作品状态</span><select aria-label="人物作品状态" value={contextWorkId} onChange={event => chooseCharacterContext(event.target.value)}><option value="">人物资料</option>{characterContexts.contexts.map(context => <option key={context.work_id} value={context.work_id}>{relations.works.find(work => work.id === context.work_id)?.values["作品"] || context.work_id}</option>)}</select></label>}<div className="field"><label htmlFor="catalog-character-id">人物 ID</label><input id="catalog-character-id" value={draft["人物ID"] || ""} readOnly={!!id} onChange={event => setDraft(current => ({ ...current, "人物ID": event.target.value }))} /></div><CharacterSnapshots value={characterFromValues(draft)} characters={characterContext?.characters || characterChoices} events={characterContext?.events || []} identityOnly={!!characterContexts?.contexts.length && !contextWorkId} onCharacterSearch={characterContext ? undefined : searchCharacters} onChange={character => setDraft(current => valuesFromCharacter(current, character))} /></> : columns.filter(column => !isRelationColumn(column) && !(table === "cliches" && clicheTypes.some(group => group.key === column))).map((column) => {
+                {table === "characters" ? <>{!!characterContexts?.contexts.length && <label className="catalog-character-context"><span>作品状态</span><select aria-label="人物作品状态" value={contextWorkId} onChange={event => chooseCharacterContext(event.target.value)}><option value="">人物资料</option>{characterContexts.contexts.map(context => <option key={context.work_id} value={context.work_id}>{relations.works.find(work => work.id === context.work_id)?.values["作品"] || context.work_id}</option>)}</select></label>}<div className="field"><label htmlFor="catalog-character-id">人物 ID</label><input id="catalog-character-id" value={draft["人物ID"] || ""} readOnly={!!id} onChange={event => setDraft(current => ({ ...current, "人物ID": event.target.value }))} /></div><NarrativeProvider chapterCount={characterContext?.narrative_context?.chapter_count || 0} chapterNumbers={characterContext?.narrative_context?.chapter_numbers}><CharacterSnapshots value={characterFromValues(draft)} characters={characterContext?.characters || characterChoices} events={characterContext?.events || []} identityOnly={!!characterContexts?.contexts.length && !contextWorkId} onCharacterSearch={characterContext ? undefined : searchCharacters} onChange={character => setDraft(current => valuesFromCharacter(current, character))} /></NarrativeProvider></> : columns.filter(column => !isRelationColumn(column) && !(table === "cliches" && clicheTypes.some(group => group.key === column))).map((column) => {
                   const immutable = (!!id && column === meta?.id_field) || ["cliché评分", "热度权重"].includes(column);
                   const fieldId = `field-${column}`;
                   return <div className={`field ${isLong(column) ? "field-long" : ""}`} key={column}>
@@ -721,6 +725,29 @@ function DetailPanel({
   );
 }
 
+type IntakeMode = "automatic" | "semi" | "manual";
+function WorkIntake({ initialMode = "automatic", initialTable = "works", targetWork, metas, onClose, onSaved }: { initialMode?: IntakeMode; initialTable?: TableKey; targetWork?: Item; metas: TableMeta[]; onClose: () => void; onSaved: (message: string) => void }) {
+  const [mode, setMode] = useState<IntakeMode>(initialMode), [manualSelection, setManualSelection] = useState<Selection>({ table: initialTable, ...(targetWork && initialTable === "works" ? { id: targetWork.id } : {}) });
+  const [dirty, setDirty] = useState(false), [pending, setPending] = useState<(() => void) | null>(null), [generation, setGeneration] = useState(0);
+  const dirtyRef = useRef(dirty); dirtyRef.current = dirty;
+  const guard = (action: () => void) => { if (dirtyRef.current) setPending(() => action); else action(); };
+  const close = () => guard(onClose);
+  useEffect(() => { const unload = (event: BeforeUnloadEvent) => { if (dirtyRef.current) event.preventDefault(); }; window.addEventListener("beforeunload", unload); return () => window.removeEventListener("beforeunload", unload); }, []);
+  const chooseMode = (next: IntakeMode) => { if (next === mode) return; guard(() => { setDirty(false); setMode(next); }); };
+  const chooseManual = (table: TableKey, id?: string) => guard(() => { setDirty(false); setManualSelection({ table, id }); setGeneration(value => value + 1); });
+  const navigate = (section: string) => guard(() => { onClose(); window.dispatchEvent(new CustomEvent("inkreference:navigate", { detail: { section } })); });
+  return <Modal title={targetWork ? "作品资料" : "新增作品"} wide onClose={close}>
+    <div className="work-intake">
+      <div className="intake-mode-switch" role="tablist" aria-label="新增方式">{([["automatic", "自动"], ["semi", "半自动"], ["manual", "手动"]] as const).map(([value, label]) => <button role="tab" type="button" key={value} className={mode === value ? "active" : ""} aria-selected={mode === value} onClick={() => chooseMode(value)}>{label}</button>)}</div>
+      {pending && <div className="intake-discard" role="alert"><span>有未保存的修改</span><button className="button secondary" onClick={() => setPending(null)}>继续编辑</button><button className="button danger" onClick={() => { const action = pending; setPending(null); setDirty(false); dirtyRef.current = false; action(); }}>放弃修改</button></div>}
+      {mode === "manual" ? <section className="intake-manual">
+        <div className="intake-manual-toolbar"><div className="intake-record-types" role="tablist" aria-label="素材类型">{TABLES.map(table => <button role="tab" type="button" key={table.key} aria-selected={manualSelection.table === table.key} className={manualSelection.table === table.key ? "active" : ""} onClick={() => chooseManual(table.key)}><table.icon size={15} />{table.singular}</button>)}</div><button className="icon-button" aria-label={`新增${TABLES.find(table => table.key === manualSelection.table)?.singular}`} onClick={() => chooseManual(manualSelection.table)}><Plus size={17} /></button></div>
+        <DetailPanel key={`${manualSelection.table}:${manualSelection.id || "new"}:${generation}`} embedded selection={manualSelection} meta={metas.find(meta => meta.key === manualSelection.table)} refreshRecord={0} onClose={close} onDirty={setDirty} onNavigate={chooseManual} onSaved={item => { setDirty(false); setManualSelection(current => ({ ...current, id: item.id })); onSaved("素材已保存"); }} onDeleted={() => { setDirty(false); setManualSelection(current => ({ table: current.table })); setGeneration(value => value + 1); onSaved("素材已删除"); }} />
+      </section> : <Suspense fallback={<Busy label="正在读取作品资料" />}><ResearchIntake key={mode} mode={mode} targetWork={targetWork} onDirtyChange={setDirty} onComplete={() => { onSaved("作品、角色与桥段已入库"); onClose(); }} navigate={navigate} /></Suspense>}
+    </div>
+  </Modal>;
+}
+
 type LibraryFacets = { categories?: string[]; roles?: string[]; character_traits?: string[]; plot_mechanisms?: string[]; works?: { id: string; title: string }[] };
 type LibraryPage = Page & { facets?: LibraryFacets };
 function RecordTable({ table, items, selectedId, onSelect, onToggleSeen, seenBusy }: {
@@ -759,6 +786,7 @@ export default function Library() {
     null,
   );
   const [toast, setToast] = useState("");
+  const [intake, setIntake] = useState<{ mode: IntakeMode; table: TableKey; work?: Item } | null>(null);
   const [category, setCategory] = useState("");
   const [seen, setSeen] = useState("");
   const [hasText, setHasText] = useState("");
@@ -923,14 +951,22 @@ export default function Library() {
     reload();
   };
   const closeModal = useCallback(() => setModal(null), []);
+  const openIntake = async (mode: IntakeMode = "automatic", targetTable: TableKey = "works", id?: string) => {
+    if (!canLeave(() => void openIntake(mode, targetTable, id))) return;
+    try { const work = id ? await request<Item>(`/records/works/${encoded(id)}`) : undefined; setIntake({ mode, table: targetTable, work }); }
+    catch (e) { notify(errorMessage(e)); }
+  };
   const focusRecord = useRef(chooseRecord); focusRecord.current = chooseRecord;
+  const intakeRef = useRef(openIntake); intakeRef.current = openIntake;
   useEffect(() => {
-    const consume = (target: { section?: string; workId?: string } | undefined) => {
-      if (target?.section !== "library" || !target.workId) return;
-      focusRecord.current("works", target.workId);
+    const consume = (target: { section?: string; workId?: string; intake?: boolean } | undefined) => {
+      if (target?.section !== "library") return;
+      if (target.intake) void intakeRef.current("automatic", "works", target.workId);
+      else if (target.workId) focusRecord.current("works", target.workId);
+      else return;
       try { sessionStorage.removeItem("inkreference.catalog-focus"); } catch { /* Navigation still works without session storage. */ }
     };
-    const focus = (event: Event) => consume((event as CustomEvent<{ section?: string; workId?: string }>).detail);
+    const focus = (event: Event) => consume((event as CustomEvent<{ section?: string; workId?: string; intake?: boolean }>).detail);
     window.addEventListener("inkreference:catalog-focus", focus);
     try { const pending = sessionStorage.getItem("inkreference.catalog-focus"); if (pending) consume(JSON.parse(pending)); } catch { /* Ignore an obsolete navigation target. */ }
     return () => window.removeEventListener("inkreference:catalog-focus", focus);
@@ -950,10 +986,10 @@ export default function Library() {
       {(loading || seenBusy) && <Busy label={seenBusy ? "正在保存看过状态" : "正在读取素材库"} />}
       <div className="library-main">
         <main id="main-content" className="main-content" tabIndex={-1}>
-          <PageTitle title={config.label} action={<div className="library-heading-actions"><button className="button secondary" onClick={() => window.dispatchEvent(new CustomEvent("inkreference:navigate", { detail: { section: "research", ...(selection?.table === "works" && selection.id ? { workId: selection.id } : {}), table } }))}><Sparkles size={15} />AI 更新</button>
+          <PageTitle title={config.label} action={<div className="library-heading-actions">{selection?.table === "works" && selection.id && <button className="button secondary" onClick={() => void openIntake("automatic", "works", selection.id)}><Sparkles size={15} />更新资料</button>}
             <button
               className="button primary heading-create"
-              onClick={() => chooseRecord(table)}
+              onClick={() => void openIntake(table === "works" ? "automatic" : "manual", table)}
             >
               <Plus size={17} />
               新增{config.singular}
@@ -1101,7 +1137,7 @@ export default function Library() {
                       </button>
                       <button
                         className="button secondary"
-                        onClick={() => chooseRecord(table)}
+                        onClick={() => void openIntake("manual", table)}
                       >
                         <Plus size={16} />
                         手动新增
@@ -1242,6 +1278,7 @@ export default function Library() {
       {modal === "export" && (
         <ExportDialog onClose={closeModal} notify={notify} />
       )}
+      {intake && <WorkIntake initialMode={intake.mode} initialTable={intake.table} targetWork={intake.work} metas={metas} onClose={() => setIntake(null)} onSaved={message => { notify(message); reload(); }} />}
       {toast && (
         <div className="toast" role="status">
           <CheckCircle2 size={18} />

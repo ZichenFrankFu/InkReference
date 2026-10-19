@@ -27,6 +27,8 @@ FIXED_WORKFLOW = {**copy.deepcopy(REFERENCE_WORKFLOW), "version": "2.0.0", "skil
                   "max_input_tokens": 64000, "budget_tokens": 800000}
 PROGRESS_WORKFLOW = {**copy.deepcopy(FIXED_WORKFLOW), "version": "3.0.0", "skill_version": "3.0.0",
                      "chunk_chars": 100000, "max_input_tokens": 128000, "max_output_tokens": 12000}
+ADAPTIVE_WORKFLOW = {**copy.deepcopy(PROGRESS_WORKFLOW), "version": "4.0.0", "skill_version": "4.0.0",
+                     "chunk_chars": 400000, "max_input_tokens": 1000000, "max_output_tokens": 16000}
 
 
 def validate_workflow(definition: Any) -> dict[str, Any]:
@@ -77,7 +79,7 @@ def validate_workflow(definition: Any) -> dict[str, Any]:
             validate_key(profile_id, f"{stage} 模型配置 ID")
     if not isinstance(result["custom_prompt"], str) or len(result["custom_prompt"]) > MAX_PROMPT_CHARS:
         raise DataError(422, "自定义提示词过长或格式无效")
-    limits = {"chunk_chars": (100, 100000), "retry_limit": (0, 8),
+    limits = {"chunk_chars": (100, 1000000), "retry_limit": (0, 8),
               "max_input_tokens": (128, 2000000), "max_output_tokens": (64, 128000),
               "budget_tokens": (1, 100000000)}
     for key, (minimum, maximum) in limits.items():
@@ -89,12 +91,16 @@ def validate_workflow(definition: Any) -> dict[str, Any]:
 
 class WorkflowStore(_VersionedDefinitions):
     def __init__(self, data_dir: str | Path):
-        super().__init__(data_dir, "workflow_definitions.sqlite3", validate_workflow(PROGRESS_WORKFLOW))
+        super().__init__(data_dir, "workflow_definitions.sqlite3", validate_workflow(ADAPTIVE_WORKFLOW))
         with self._db() as connection:
             connection.execute("CREATE TABLE IF NOT EXISTS layouts (workflow_id TEXT NOT NULL, workflow_version TEXT NOT NULL, revision INTEGER NOT NULL, layout_json TEXT NOT NULL, PRIMARY KEY(workflow_id,workflow_version))")
 
     def save(self, definition: dict[str, Any]) -> dict[str, Any]:
         """Save a new immutable version. retry_limit is *additional* attempts."""
+        if isinstance(definition, dict) and (definition.get("id"), definition.get("version")) == (PROGRESS_WORKFLOW["id"], PROGRESS_WORKFLOW["version"]):
+            if _dump(validate_workflow(definition)) != _dump(PROGRESS_WORKFLOW):
+                raise DataError(409, "内建版本不可修改；请使用新 ID 或新 version")
+            return self.get(PROGRESS_WORKFLOW["id"], PROGRESS_WORKFLOW["version"])
         if isinstance(definition, dict) and (definition.get("id"), definition.get("version")) == (FIXED_WORKFLOW["id"], FIXED_WORKFLOW["version"]):
             if _dump(validate_workflow(definition)) != _dump(FIXED_WORKFLOW):
                 raise DataError(409, "内建版本不可修改；请使用新 ID 或新 version")
@@ -111,6 +117,8 @@ class WorkflowStore(_VersionedDefinitions):
         return self._save_validated(validate_workflow(definition))
 
     def get(self, identifier: str | None = None, version: str | None = None) -> dict[str, Any]:
+        if identifier == PROGRESS_WORKFLOW["id"] and version == PROGRESS_WORKFLOW["version"]:
+            return copy.deepcopy(PROGRESS_WORKFLOW) | {"builtin": True}
         if identifier == FIXED_WORKFLOW["id"] and version == FIXED_WORKFLOW["version"]:
             return copy.deepcopy(FIXED_WORKFLOW) | {"builtin": True}
         if identifier == REFERENCE_WORKFLOW["id"] and version == REFERENCE_WORKFLOW["version"]:

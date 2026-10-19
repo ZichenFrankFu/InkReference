@@ -90,11 +90,11 @@ STAGE_SECTIONS = {"plot": ("plot",), "characters": ("characters",), "settings": 
 def canonical_stage_schema(stage: str, version: int = 3) -> dict:
     if stage not in STAGE_SECTIONS:
         raise DataError(422, "未知固定提取阶段")
-    if version not in (2, 3):
+    if version not in (2, 3, 4):
         raise DataError(422, "未知分析内容合同版本")
-    contract = REFERENCE_V2_SCHEMA if version == 2 else REFERENCE_V3_SCHEMA
+    contract = REFERENCE_V2_SCHEMA if version == 2 else REFERENCE_V3_SCHEMA if version == 3 else _v4().REFERENCE_V4_SCHEMA
     schema = obj({name: copy.deepcopy(contract["properties"][name]) for name in STAGE_SECTIONS[stage]})
-    return schema if version == 2 else require_source_schema(schema)
+    return schema if version == 2 else require_source_schema(schema) if version == 3 else _v4().source_schema_v4(schema)
 
 
 def _validate(value: Any, schema: dict, path: str) -> None:
@@ -181,11 +181,11 @@ def validate_v2_section(section: str, value: Any, source_text: str | None = None
 
 
 def validate_stage_result(stage: str, value: Any, source_text: str, source_version_id: str = "", known_entities: dict | None = None, *, offset_base: int = 0) -> dict:
-    versions = {item.get("schema_version") for child in value.values() for item in (child if isinstance(child, list) else [child]) if isinstance(item, dict) and item.get("schema_version") in (2, 3)} if isinstance(value, dict) else set()
+    versions = {item.get("schema_version") for child in value.values() for item in (child if isinstance(child, list) else [child]) if isinstance(item, dict) and item.get("schema_version") in (2, 3, 4)} if isinstance(value, dict) else set()
     if len(versions) > 1: raise DataError(422, "同一阶段不能混用分析合同版本")
     version = next(iter(versions), 3)
     _validate(value, canonical_stage_schema(stage, version), stage)
-    validator = validate_v2_section if version == 2 else validate_v3_section
+    validator = validate_v2_section if version == 2 else validate_v3_section if version == 3 else validate_v4_section
     kwargs = {} if version == 2 else {"require_evidence": True}
     result = {key: validator(key, item, source_text, source_version_id=source_version_id, offset_base=offset_base, **kwargs) for key, item in value.items()}
     validate_links(result, known_entities or {})
@@ -208,7 +208,7 @@ def validate_links(sections: dict, known: dict | None = None) -> None:
              "settings": _ids(known.get("settings")) | _ids(sections.get("settings")), "states": set()}
     for key, seq in (("events", plot.get("events", [])), ("plotlines", plot.get("plotlines", [])),
                      ("characters", sections.get("characters", [])), ("settings", sections.get("settings", []))):
-        ids = [item["id"] for item in seq if item.get("id") and item.get("schema_version", 2) in (2, 3)]
+        ids = [item["id"] for item in seq if item.get("id") and item.get("schema_version", 2) in (2, 3, 4)]
         if len(ids) != len(set(ids)):
             raise DataError(422, f"{key} ID 重复")
     def collect(node):
@@ -239,6 +239,19 @@ def validate_links(sections: dict, known: dict | None = None) -> None:
     all_settings = list(known_settings.values()) if isinstance(known_settings, dict) else [item for item in known_settings if isinstance(item, dict)]
     all_settings = {item["id"]: item for item in [*all_settings, *sections.get("settings", [])] if isinstance(item, dict) and item.get("id")}
     validate_setting_ancestry(list(all_settings.values()))
+    # A character phase may cite events since the preceding phase began. Older
+    # experiences belong to that earlier phase; IDs still resolve globally.
+    known_events = known.get("events", [])
+    event_values = list(known_events.values()) if isinstance(known_events, dict) else [item for item in known_events if isinstance(item, dict)]
+    event_index = {item["id"]: item for item in [*event_values, *plot.get("events", [])] if isinstance(item, dict) and item.get("id")}
+    for person in sections.get("characters", []):
+        if person.get("schema_version") != 4: continue
+        lower = person.get("initial_state", {}).get("narrative_progress", 0)
+        for snapshot in sorted(person.get("snapshots", []), key=lambda item: (item["narrative_range"]["start"], item["id"])):
+            for identity in snapshot.get("event_ids", []):
+                point = event_index.get(identity, {}).get("narrative_progress")
+                if type(point) in (int, float) and point < lower: raise DataError(422, "阶段事件不可早于上一阶段的叙事进度")
+            lower = snapshot["narrative_range"]["start"]
     # An event may have multiple causes, but cannot ultimately cause itself.
     edges = {event["id"]: set(event.get("results", [])) for event in plot.get("events", [])}
     for event in plot.get("events", []):
@@ -340,7 +353,7 @@ def is_v3(section: str, value: Any) -> bool:
 
 
 def is_modern(section: str, value: Any) -> bool:
-    return is_v2(section, value) or is_v3(section, value)
+    return is_v2(section, value) or is_v3(section, value) or is_v4(section, value)
 
 
 def _proof3(node: dict) -> dict:
@@ -573,3 +586,18 @@ def validate_setting_ancestry(settings: list[dict]) -> None:
             if cursor in seen: raise DataError(422, "追加设定关联形成循环")
             seen.add(cursor)
             cursor = parents[cursor]
+
+
+# V4 is lazy to keep direct module imports cycle-free.
+def _v4():
+    from . import analysis_contract_v4
+    return analysis_contract_v4
+
+def is_v4(section, value): return _v4().is_v4(section, value)
+def adapt_v3_section(section, value, **kwargs): return _v4().adapt_v3_section(section, value, **kwargs)
+def normalize_v4_section(section, value, **kwargs): return _v4().normalize_v4_section(section, value, **kwargs)
+def validate_v4_section(section, value, *args, **kwargs): return _v4().validate_v4_section(section, value, *args, **kwargs)
+def __getattr__(name):
+    if name == "REFERENCE_V4_SCHEMA": return _v4().REFERENCE_V4_SCHEMA
+    raise AttributeError(name)
+SCHEMA_VERSION = 4

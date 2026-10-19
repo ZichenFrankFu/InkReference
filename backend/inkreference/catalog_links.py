@@ -163,4 +163,4 @@ class CatalogLinks:
         if chapter is not None or progress is not None:
             state = {**state, "sections": projection}
         return {"work_id": work_id, "document_id": document_id, "latest_version_id": link["latest_version_id"],
-                "reference": state, "projection": projection, "chapter": chapter, "progress":progress}
+                "reference": state, "projection": projection, "chapter": chapter, "progress":progress, "narrative_context": projected.get("narrative_context", {"chapter_count":0}) if progress is not None or schema_version is not None else {"chapter_count":0}}

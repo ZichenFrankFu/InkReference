@@ -1,13 +1,14 @@
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import {
   Activity, Check, CheckCircle2, ChevronDown, Cloud, Cpu, Eye, EyeOff,
-  Globe, LockKeyhole, Plus, RefreshCw, Save, Server,
+  Globe, LockKeyhole, Plus, RefreshCw, Save, Server, Download,
   ShieldCheck, SlidersHorizontal, Trash2, Wallet, Zap,
 } from "lucide-react";
 import { studio, send, normalizeList, type ModelProfile, type List } from "./studio";
 import { isLoopbackEndpoint, isRemoteModel, modelEndpoint } from "./model-security";
 import { Busy, Empty, Metric, Modal, Notice, PageTitle, SelectField, dateLabel, messageOf } from "./ui";
 import "./model-settings.css";
+import EmbeddingDownloads from "./EmbeddingDownloads";
 
 const tokenSource = (value: string | undefined) =>
   ({ actual: "实测", estimated: "估算", unknown: "未知", mixed: "混合" })[value || "unknown"] || value;
@@ -105,6 +106,7 @@ type UsageSummary = {
 
 export default function Models() {
   const [tab, setTab] = useState("models");
+  const [showDownloads, setShowDownloads] = useState(false);
   const [items, setItems] = useState<ModelProfile[]>([]);
   const [security, setSecurity] = useState<Security | null>(null);
   const [draft, setDraft] = useState<ModelProfile | null>(null);
@@ -266,12 +268,13 @@ export default function Models() {
   return (
     <main className="studio-main model-settings-page">
       <PageTitle kicker="MODEL SETTINGS" title="模型设置" action={
-        <button className="button primary" disabled={!!busy} onClick={() => create()}><Plus size={17} />添加模型</button>
+        <div className="model-header-actions"><button className="button secondary" disabled={!!busy} onClick={() => guarded(() => setShowDownloads(true))}><Download size={17} />下载向量模型</button><button className="button primary" disabled={!!busy} onClick={() => create()}><Plus size={17} />添加模型</button></div>
       } />
       <div className="page-tabs" aria-label="模型设置分类">
         <button className={tab === "models" ? "active" : ""} disabled={!!busy} onClick={() => setTab("models")}><Server size={16} />连接配置<span>{items.length}</span></button>
         <button className={tab === "usage" ? "active" : ""} disabled={!!busy} onClick={() => setTab("usage")}><Activity size={16} />调用与用量</button>
       </div>
+      {showDownloads && <EmbeddingDownloads profiles={items} onClose={() => setShowDownloads(false)} onRegistered={profile => { notifyChanged(); void load(); setShowDownloads(false); activate(cleanProfile(profile)); }} />}
       <Notice error={!!error} success={!error && !!message}>{error || message}</Notice>
       {tab === "models" ? (
         <div className="connection-layout">

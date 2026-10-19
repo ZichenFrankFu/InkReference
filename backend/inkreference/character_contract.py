@@ -52,6 +52,9 @@ def normalize_character(value: Any, *, require_provenance: bool = False) -> dict
     if not isinstance(value, dict):
         from .database import DataError
         raise DataError(422, "角色需为对象")
+    if value.get("schema_version") == 4:
+        from .analysis_contract_v4 import normalize_v4_section
+        return validate_character(normalize_v4_section("characters", [value], manual=not require_provenance)[0], require_provenance=require_provenance)
     if value.get("schema_version") != 3:
         from .chronicle_schema import adapt_v2_section
         result = adapt_v2_section("characters", [value])[0]
@@ -84,7 +87,8 @@ def normalize_character(value: Any, *, require_provenance: bool = False) -> dict
 
 def validate_character(value: Any, *, require_provenance: bool = False) -> dict:
     from .chronicle_schema import _validate, require_source_schema
-    schema = require_source_schema(CHARACTER_SCHEMA) if require_provenance else CHARACTER_SCHEMA
+    base_schema = CHARACTER_V4_SCHEMA if isinstance(value, dict) and value.get("schema_version") == 4 else CHARACTER_SCHEMA
+    schema = require_source_schema(base_schema) if require_provenance else base_schema
     _validate(value, schema, "characters")
     for snapshot in value["snapshots"]:
         span = snapshot["narrative_range"]
@@ -92,3 +96,10 @@ def validate_character(value: Any, *, require_provenance: bool = False) -> dict:
             from .database import DataError
             raise DataError(422, "阶段叙事进度的结束不能早于开始")
     return copy.deepcopy(value)
+
+
+# Keep the v3 schema immutable for old runs and cache snapshots.
+CHARACTER_V4_SCHEMA = copy.deepcopy(CHARACTER_SCHEMA)
+CHARACTER_V4_SCHEMA["properties"]["schema_version"]["enum"] = [4]
+CHARACTER_V4_SCHEMA["properties"]["snapshots"]["items"]["properties"]["name"] = txt(1000)
+CHARACTER_V4_SCHEMA["properties"]["snapshots"]["items"]["required"].append("name")

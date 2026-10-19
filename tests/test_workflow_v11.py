@@ -62,9 +62,9 @@ def setup(tmp_path, text="第1章 来信\n甲把信交给乙。\n第2章 离开\
     return runner, documents, document, models
 
 
-def test_default_v3_real_graph_derives_progress_and_preserves_proofs(tmp_path):
+def test_historical_v3_real_graph_derives_progress_and_preserves_proofs(tmp_path):
     runner, documents, document, models = setup(tmp_path)
-    run = runner.create_run(document["id"], profile_id="synthetic")
+    run = runner.create_run(document["id"], workflow_version="3.0.0", profile_id="synthetic")
     assert run["workflow_version"] == "3.0.0"
     assert run["snapshots"]["contract_version"] == 3
     final = runner.execute(run["id"])
@@ -83,7 +83,7 @@ def test_default_v3_real_graph_derives_progress_and_preserves_proofs(tmp_path):
 
 def test_unchaptered_v3_progress_uses_body_characters(tmp_path):
     runner, _, document, _ = setup(tmp_path, "序" * 20 + "甲" + "乙" * 79)
-    run = runner.create_run(document["id"], profile_id="synthetic")
+    run = runner.create_run(document["id"], workflow_version="3.0.0", profile_id="synthetic")
     final = runner.execute(run["id"])
     assert final["status"] == "needs_review", final["error"]
     event = final["candidates"][0]["result"]["reference"]["plot"]["events"][0]
@@ -105,7 +105,7 @@ def test_v3_snapshot_includes_event_experience_and_derived_range(tmp_path):
             response["content"] = json.dumps(result, ensure_ascii=False)
         return response
     models.invoke = with_snapshot
-    run = runner.create_run(document["id"], profile_id="synthetic")
+    run = runner.create_run(document["id"], workflow_version="3.0.0", profile_id="synthetic")
     final = runner.execute(run["id"])
     assert final["status"] == "needs_review", final["error"]
     character = final["candidates"][0]["result"]["reference"]["characters"][0]
@@ -122,7 +122,7 @@ def test_v3_saved_volume_boundaries_are_coarse_and_source_is_complete(tmp_path):
         {"title": "上卷", "start_chapter": 1, "end_chapter": 4},
         {"title": "下卷", "start_chapter": 5, "end_chapter": 8},
     ], 0)
-    run = runner.create_run(document["id"], profile_id="synthetic")
+    run = runner.create_run(document["id"], workflow_version="3.0.0", profile_id="synthetic")
     assert run["total"] == 2
     assert [group["volume"] for group in run["snapshots"]["chunk_groups"]] == ["上卷", "下卷"]
     with sqlite3.connect(runner.db_path) as db:
@@ -169,7 +169,7 @@ def test_v3_stage_override_cannot_change_contract_and_upload_is_atomic(tmp_path)
 
 def test_v2_builtin_contract_prompt_and_cache_namespace_are_preserved(tmp_path):
     skills, workflows = SkillStore(tmp_path), WorkflowStore(tmp_path)
-    assert skills.get()["version"] == workflows.get()["version"] == "3.0.0"
+    assert skills.get()["version"] == workflows.get()["version"] == "4.0.0"
     old = skills.get("unified-reference", "2.0.0")
     assert old["contract_version"] == 2
     prompt = build_stage_prompt(old, "characters", "甲。")

@@ -1,7 +1,7 @@
 """Lazy HTTP surface for reviewed web-based catalog updates."""
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Query
 from pydantic import BaseModel, ConfigDict, Field
@@ -30,6 +30,7 @@ class ResearchCreate(ResearchBody):
     remote_consent:bool=False
     expected_fingerprints:dict[str,str]|None=None
     start:bool=True
+    mode:Literal["automatic"]="automatic"
 
 
 class ResearchChat(ResearchBody):
@@ -48,6 +49,40 @@ class ResearchApproval(ResearchBody):
     decisions:dict[str,Any]
 
 
+class ComparisonCreate(ResearchBody):
+    title:str=Field(min_length=1,max_length=500)
+    author:str=Field(min_length=1,max_length=500)
+    target_work_id:str|None=None
+
+
+class ComparisonAttach(ResearchBody):
+    job_id:str=Field(min_length=1,max_length=100)
+    expected_revision:int=Field(ge=1)
+    label:str|None=Field(default=None,max_length=100)
+
+
+class ComparisonCompose(ResearchBody):
+    source_job_id:str=Field(min_length=1,max_length=100)
+    expected_revision:int=Field(ge=1)
+
+
+class SemiPrompt(ResearchBody):
+    title:str=Field(min_length=1,max_length=500)
+    author:str=Field(min_length=1,max_length=500)
+    message:str=Field(default="",max_length=4000)
+    target_work_id:str|None=None
+
+
+class SemiReply(ResearchBody):
+    reply:str=Field(min_length=1,max_length=300000)
+    expected_revision:int=Field(ge=1)
+    verify_sources:bool=False
+    embedding_profile_id:str|None=None
+    embedding_model:str|None=None
+    remote_consent:bool=False
+    expected_embedding_fingerprint:str|None=None
+
+
 def create_research_router(service_or_getter):
     """Accept a lazy getter so app startup never opens the research stores."""
     router=APIRouter(prefix="/api/studio/research")
@@ -62,6 +97,33 @@ def create_research_router(service_or_getter):
     @router.get("/targets")
     def targets(model_profile_id:str,embedding_profile_id:str,embedding_model:str|None=None):
         return service().targets(model_profile_id,embedding_profile_id,embedding_model)
+
+    @router.post("/comparisons")
+    def create_comparison(body:ComparisonCreate):return service().create_comparison(**body.model_dump())
+
+    @router.get("/comparisons")
+    def comparisons(title:str|None=None,author:str|None=None):return service().list_comparisons(title=title,author=author)
+
+    @router.get("/comparisons/{identifier}")
+    def comparison(identifier:str):return service().get_comparison(identifier)
+
+    @router.post("/comparisons/{identifier}/jobs")
+    def comparison_attach(identifier:str,body:ComparisonAttach):return service().add_comparison_job(identifier,**body.model_dump())
+
+    @router.post("/comparisons/{identifier}/compose")
+    def comparison_compose(identifier:str,body:ComparisonCompose):return service().compose_comparison(identifier,**body.model_dump())
+
+    @router.post("/semi/prompt")
+    def semi_prompt(body:SemiPrompt):return service().create_semi(**body.model_dump())
+
+    @router.post("/jobs/{job_id}/reply")
+    def semi_reply(job_id:str,body:SemiReply):return service().reply(job_id,**body.model_dump())
+
+    @router.get("/embedding-target")
+    def embedding_target_info(embedding_profile_id:str,embedding_model:str|None=None):
+        from .semantic_search import embedding_target
+        profile=service().models.snapshot(embedding_profile_id)
+        return {"profile_id":profile["id"],"model":embedding_model or profile["model"],"endpoint":profile["base_url"],"connection_mode":profile["connection_mode"],"fingerprint":embedding_target(profile,embedding_model)}
 
     @router.get("/jobs")
     def jobs():return service().list()

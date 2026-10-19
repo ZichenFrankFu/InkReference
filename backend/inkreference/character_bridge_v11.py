@@ -16,7 +16,7 @@ class _ReferenceConnection:
     """Route the store's fixed internal reference tables to the attached database."""
     def __init__(self,connection):self.connection=connection
     def execute(self,sql,parameters=()):
-        sql=re.sub(r'\b(reference_analysis_history|reference_analysis|reference_section_commits|reference_section_overrides)\b',r'texts.\1',sql)
+        sql=re.sub(r'\b(reference_contract_archives|reference_analysis_history|reference_analysis|reference_section_commits|reference_section_overrides)\b',r'texts.\1',sql)
         return self.connection.execute(sql,parameters)
 
 class _DirectReferenceConnection(_ReferenceConnection):
@@ -39,7 +39,7 @@ class CharacterBridge:
         result=[]
         for row in rows:
             character=json.loads(row.pop('character_json'))
-            item={**row,'character':character,'reference_revision':None,'characters':[],'events':[],'source_available':False,'missing_source':False}
+            item={**row,'character':character,'reference_revision':None,'characters':[],'events':[],'source_available':False,'missing_source':False,'narrative_context':{'chapter_count':0}}
             if item['document_id']:
                 with self.documents._connection() as source_db:source=source_db.execute('SELECT work_id FROM doc_documents WHERE id=?',(item['document_id'],)).fetchone()
                 if source is None:item['missing_source']=True
@@ -48,11 +48,16 @@ class CharacterBridge:
                     reference_store=self.reference()
                     with reference_store._connect() as source_db:
                         if source_db.execute('SELECT 1 FROM reference_analysis WHERE document_id=?',(item['document_id'],)).fetchone() is None:raise DataError(409,'人物的原始分析不存在，请重新绑定人物来源')
-                        reference=reference_store._get(source_db,item['document_id'])
+                    reference=reference_store.project(item['document_id'],target_version=4)
                     if not any(c.get('id')==item['extracted_character_id'] for c in reference['sections'].get('characters',[]) if isinstance(c,dict)):raise DataError(409,'人物的原始提取 ID 已变化，请重新绑定人物来源')
                     item['source_available']=True;item['reference_revision']=reference['revision']
+                    item['narrative_context']=reference.get('narrative_context',{'chapter_count':0})
+                    displayed=copy.deepcopy(next((c for c in reference['sections'].get('characters',[]) if c.get('id')==item['extracted_character_id']),character))
+                    displayed.pop('current_snapshot',None)
+                    for snapshot in displayed.get('snapshots',[]):snapshot.pop('events',None)
+                    item['display_character']=displayed
                     item['characters']=[{'id':c.get('id'),'name':c.get('name','')} for c in reference['sections'].get('characters',[]) if isinstance(c,dict)]
-                    item['events']=[{'id':e.get('id'),'name':e.get('name','')} for e in reference['sections'].get('plot',{}).get('events',[]) if isinstance(e,dict)]
+                    item['events']=[{'id':e.get('id'),'name':e.get('name',''),'narrative_progress':e.get('narrative_progress')} for e in reference['sections'].get('plot',{}).get('events',[]) if isinstance(e,dict)]
             result.append(item)
         return {'character_id':character_id,'catalog_revision':revision,'contexts':result}
 
@@ -69,9 +74,8 @@ class CharacterBridge:
             if not document or not document[0]:raise DataError(409,'请先将文本关联到作品')
             work_id=document[0];self.store._row(db,'works',work_id)
             character=next((c for c in state['sections'].get('characters',[]) if c.get('id')==extracted_character_id),None)
-            if character is None or character.get("schema_version") != 3:
-                from .chronicle_schema import adapt_v2_section
-                adapted=adapt_v2_section('characters',state['sections'].get('characters',[]))
+            if character is None or character.get("schema_version") not in (3, 4):
+                adapted=[normalize_character(c) for c in state['sections'].get('characters',[])]
                 character=next((c for c in adapted if c.get('id')==extracted_character_id),None)
                 if character is not None:
                     from .reference_analysis import validate_section

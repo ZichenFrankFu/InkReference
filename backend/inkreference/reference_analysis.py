@@ -23,9 +23,9 @@ from typing import Any, Iterator
 
 from .database import DataError
 from .chronicle_schema import (is_v2, is_v3, is_modern, validate_v2_section, validate_v3_section, validate_links,
-                               normalize_v3_section, adapt_v2_section)
+                               normalize_v3_section, adapt_v2_section, is_v4, normalize_v4_section, validate_v4_section, adapt_v3_section)
 from .analysis_projection import project_sections
-from .language_analysis import compute_language_statistics
+from .language_analysis import compute_language_statistics, naming_statistics
 
 ARRAY_SECTIONS = {"characters", "settings", "setting_features", "raw_entries"}
 OBJECT_SECTIONS = {"plot", "style", "rhythm", "opening", "metadata", "era_background"}
@@ -81,10 +81,10 @@ def validate_section(section: str, data: Any) -> Any:
             result = []
             for original in data:
                 item = copy.deepcopy(original)
-                if item.get("schema_version") == 3:
+                if item.get("schema_version") in (3, 4):
                     item.pop("current_snapshot", None)
                     for snapshot in item.get("snapshots", []): snapshot.pop("events", None)
-                    result.append(validate_v3_section(section, [item])[0])
+                    result.append((validate_v4_section if item.get("schema_version") == 4 else validate_v3_section)(section, [item])[0])
                 elif item.get("schema_version") == 2: result.append(validate_v2_section(section, [item])[0])
                 else: result.append(validate_section(section, [item])[0])
             return result
@@ -94,10 +94,10 @@ def validate_section(section: str, data: Any) -> Any:
                      "rhythm": ("legacy",), "opening": ("legacy",), "era_background": ("statistics", "legacy")}.get(section, ())):
             if key in candidate:
                 derived = candidate.pop(key)
-                if candidate.get("schema_version") != 3 or key not in {"views", "outlines", "statistics"}: computed[key] = derived
-        if section == "plot" and candidate.get("schema_version") == 3:
+                if candidate.get("schema_version") not in (3, 4) or key not in {"views", "outlines", "statistics"}: computed[key] = derived
+        if section == "plot" and candidate.get("schema_version") in (3, 4):
             for line in candidate.get("plotlines", []): line.pop("current_status", None)
-        validator = validate_v3_section if candidate.get("schema_version") == 3 else validate_v2_section
+        validator = validate_v4_section if candidate.get("schema_version") == 4 else validate_v3_section if candidate.get("schema_version") == 3 else validate_v2_section
         value = validator(section, candidate)
         if computed: value.update(computed)
         return value
@@ -190,6 +190,10 @@ def merge_named(existing: list[dict], incoming: list[dict], section: str) -> lis
             result.append(copy.deepcopy(item))
             continue
         old = result[indices[k]]
+        if old.get("schema_version") == 4 or item.get("schema_version") == 4:
+            old = adapt_v3_section(section, [old])[0]
+            item = adapt_v3_section(section, [item])[0]
+            result[indices[k]] = old
         if old.get("schema_version") == 3 and item.get("schema_version") != 3:
             item = adapt_v2_section(section, [item])[0]
         if item.get("schema_version") == 3 and old.get("schema_version") != 3:
@@ -213,7 +217,7 @@ def merge_named(existing: list[dict], incoming: list[dict], section: str) -> lis
             # Existing edited scalar facts intentionally win. New chapter facts
             # remain in rich lists instead of replacing a user's description.
     for entity in result:
-        if entity.get("schema_version") != 3: continue
+        if entity.get("schema_version") not in (3, 4): continue
         snapshots = sorted(entity.get("snapshots", []), key=lambda state: (state.get("narrative_range", {}).get("start", 0), (state.get("revealed_at") or {}).get("offset") or 0, state.get("id", "")))
         for previous, following in zip(snapshots, snapshots[1:]):
             span = previous.get("narrative_range", {})
@@ -242,7 +246,7 @@ def merge_by_id(existing: list[dict], incoming: list[dict]) -> list[dict]:
 
 
 def merge_object(old: dict, value: dict) -> dict:
-    if value.get("schema_version") in (2, 3) and old and old.get("schema_version") != value.get("schema_version"):
+    if value.get("schema_version") in (2, 3, 4) and old and old.get("schema_version") != value.get("schema_version"):
         return {**copy.deepcopy(value), "legacy": copy.deepcopy(old)}
     result = copy.deepcopy(old)
     for key, child in value.items():
@@ -279,6 +283,32 @@ def aggregate_style(entries: list[dict]) -> dict:
             result[key] = _union([], [item for value, _ in values for item in value])
         else:
             result[key] = copy.deepcopy(values[0][0])
+    return result
+
+
+
+def aggregate_style_v4(entries: list[dict]) -> dict:
+    if not entries: return {}
+    result = copy.deepcopy(entries[0]["data"])
+    total = sum(max(0, entry["chars"]) for entry in entries) or len(entries)
+    votes = {}
+    for entry in entries:
+        view = entry["data"].get("focalization")
+        if view is not None: votes[view] = votes.get(view, 0) + max(1, entry["chars"])
+    result["focalization"] = max(votes, key=votes.get) if votes else None
+    result["rhetoric"] = _union([], [judgment for entry in entries for judgment in entry["data"].get("rhetoric", [])])
+    result["dialogue_style"] = {"description": "\n".join(dict.fromkeys(entry["data"].get("dialogue_style", {}).get("description", "") for entry in entries if entry["data"].get("dialogue_style", {}).get("description"))),
+        "examples": _union([], [example for entry in entries for example in entry["data"].get("dialogue_style", {}).get("examples", [])])}
+    result["naming_style"] = "\n".join(dict.fromkeys(entry["data"].get("naming_style", "") for entry in entries if entry["data"].get("naming_style")))
+    result["narrative_composition"] = []
+    for kind in ("action", "description", "psychology", "exposition"):
+        facts = [(next(item for item in entry["data"]["narrative_composition"] if item["kind"] == kind), entry["chars"] or 1) for entry in entries]
+        fact = copy.deepcopy(facts[0][0])
+        fact["percentage"] = round(sum(item["percentage"] * weight for item, weight in facts) / sum(weight for _, weight in facts), 4)
+        fact["assessment"] = "\n".join(dict.fromkeys(item.get("assessment", "") for item, _ in facts if item.get("assessment")))
+        result["narrative_composition"].append(fact)
+    result["narrative_composition"][-1]["percentage"] = round(100 - sum(item["percentage"] for item in result["narrative_composition"][:-1]), 4)
+    result["schema_version"] = 4
     return result
 
 
@@ -346,6 +376,7 @@ class ReferenceAnalysisStore:
         self.catalog_sync = None
         self.write_lock = threading.RLock()
         with self._connect() as db:
+            db.execute("CREATE TABLE IF NOT EXISTS reference_contract_archives (document_id TEXT NOT NULL,section TEXT NOT NULL,contract_version INTEGER NOT NULL,data_json TEXT NOT NULL,PRIMARY KEY(document_id,section,contract_version))")
             db.execute("CREATE TABLE IF NOT EXISTS reference_analysis (document_id TEXT PRIMARY KEY,revision INTEGER NOT NULL,structure_type TEXT NOT NULL,sections_json TEXT NOT NULL,updated_at TEXT NOT NULL)")
             db.execute("CREATE TABLE IF NOT EXISTS reference_section_commits (document_id TEXT NOT NULL,run_id TEXT NOT NULL,chunk_id TEXT NOT NULL,section TEXT NOT NULL,data_json TEXT NOT NULL,chars INTEGER NOT NULL,committed_at TEXT NOT NULL,PRIMARY KEY(document_id,run_id,chunk_id,section))")
             columns = {row[1] for row in db.execute("PRAGMA table_info(reference_section_commits)")}
@@ -391,7 +422,7 @@ class ReferenceAnalysisStore:
         result = {}
         for name, value in sections.items():
             if name in {"characters", "settings"}:
-                entries = [item for item in value if item.get("schema_version") in (2, 3)]
+                entries = [item for item in value if item.get("schema_version") in (2, 3, 4)]
                 if entries: result[name] = entries
             elif is_modern(name, value):
                 # Saved compatibility snapshots are not new claimed evidence.
@@ -445,8 +476,23 @@ class ReferenceAnalysisStore:
                 for child in node: walk(child)
         walk(self._modern_sections(sections))
 
+    @staticmethod
+    def _archive_contract(db, document_id, section, value):
+        if not value: return
+        if isinstance(value, dict):
+            if value.get("schema_version") == 4: return
+            version = value.get("schema_version", 1)
+        else:
+            old = [item for item in value if item.get("schema_version") != 4]
+            if not old: return
+            version = max((item.get("schema_version", 1) if type(item.get("schema_version", 1)) is int else 1 for item in old), default=1)
+        if type(version) is not int: version = 1
+        db.execute("INSERT OR IGNORE INTO reference_contract_archives VALUES (?,?,?,?)", (document_id, section, version, _dump(value)))
+
     def _write(self, db: sqlite3.Connection, document_id: str, sections: dict, structure_type: str) -> None:
         validate_links(self._modern_sections(sections))
+        if sections.get("style", {}).get("schema_version") == 4:
+            sections["style"].setdefault("deterministic_statistics", {})["naming"] = naming_statistics(sections.get("characters", []))
         sync = getattr(self, "catalog_sync", None)
         if sync is not None: sync(db, document_id, sections)
         db.execute("UPDATE reference_analysis SET sections_json=?,structure_type=?,revision=revision+1,updated_at=? WHERE document_id=?", (_dump(sections), structure_type, datetime.now(timezone.utc).isoformat(), document_id))
@@ -463,12 +509,14 @@ class ReferenceAnalysisStore:
     def project(self, document_id: str, chapter: int | None = None, *, volumes: list[dict] | None = None, target_version: int | None = None, progress: float | None = None) -> dict:
         state = self.get(document_id)
         sources = {}
+        declared_sources = set()
         ledger_sources = {item.get("source_version_id") for item in state["commits"] if item.get("source_version_id")}
         legacy_source = next(iter(ledger_sources)) if len(ledger_sources) == 1 else "" if ledger_sources else None
-        if target_version == 3 and self.documents:
+        if target_version in (3, 4) and self.documents:
             def collect(node):
                 if isinstance(node, dict):
                     identity = node.get("source_version_id")
+                    if identity: declared_sources.add(identity)
                     if identity and identity not in sources:
                         try: sources[identity] = self.documents.get_version(document_id, identity)
                         except DataError: pass
@@ -481,6 +529,12 @@ class ReferenceAnalysisStore:
                 except DataError: pass
         state["sections"] = project_sections(state["sections"], chapter, volumes=volumes, target_version=target_version, source_versions=sources, progress=progress, legacy_source_version_id=legacy_source)
         state["projection"] = {"chapter": chapter, "schema_version": target_version or 2, "progress": progress}
+        if target_version == 4 and self.documents:
+            all_sources = declared_sources | ledger_sources
+            if len(all_sources) > 1: state["narrative_context"] = {"chapter_count": 0}
+            else:
+                identity = next(iter(all_sources), None)
+                state["narrative_context"] = self.documents.get_narrative_context(document_id, identity)
         return state
 
     def get(self, document_id: str) -> dict:
@@ -505,17 +559,17 @@ class ReferenceAnalysisStore:
             return self._get(db, document_id)
 
     def save_section(self, document_id: str, section: str, data: Any, expected_revision: int) -> dict:
-        value = validate_section(section, normalize_v3_section(section, data, manual=True) if is_v3(section, data) else data)
+        value = validate_section(section, normalize_v4_section(section, data, manual=True) if is_v4(section, data) else normalize_v3_section(section, data, manual=True) if is_v3(section, data) else data)
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             self._ensure(db, document_id)
             state = self._get(db, document_id)
             self._revision(state, expected_revision)
-            if section == "style" and value.get("schema_version") in (2, 3):
+            if section == "style" and value.get("schema_version") in (2, 3, 4):
                 value.pop("deterministic_statistics", None)
                 old_statistics = state["sections"]["style"].get("deterministic_statistics")
                 if old_statistics: value["deterministic_statistics"] = copy.deepcopy(old_statistics)
-            if is_v3(section, value):
+            if is_v3(section, value) or is_v4(section, value):
                 old_ids = {}
                 def index_facts(node):
                     if isinstance(node, dict):
@@ -535,6 +589,7 @@ class ReferenceAnalysisStore:
                         for child in node: mark_manual(child)
                 mark_manual(value)
             self._validate_sources(db, document_id, {section: value})
+            if is_v4(section, value): self._archive_contract(db, document_id, section, state["sections"][section])
             state["sections"][section] = value
             if section in {"style", "rhythm", "opening"}:
                 db.execute("INSERT INTO reference_section_overrides VALUES (?,?,?) ON CONFLICT(document_id,section) DO UPDATE SET data_json=excluded.data_json", (document_id, section, _dump(value)))
@@ -564,23 +619,31 @@ class ReferenceAnalysisStore:
             source_cache = {}
             for section in pending:
                 value = incoming[section]
-                if is_v3(section, value): value = validate_v3_section(section, value, require_evidence=True)
+                if is_v3(section, value) or is_v4(section, value): value = (validate_v4_section if is_v4(section, value) else validate_v3_section)(section, value, require_evidence=True)
                 self._validate_sources(db, document_id, {section: value}, source_cache)
-                if is_v3(section, value):
-                    value = normalize_v3_section(section, value, source_versions=source_cache)
+                if section == "style" and is_v4(section, value) and self.documents:
+                    source = source_cache.get(run["version_id"]) or self.documents.get_version(document_id, run["version_id"])
+                    value = validate_v4_section(section, value, source["text"], source_version_id=run["version_id"], require_evidence=True)
+                if is_v3(section, value) or is_v4(section, value):
+                    value = (normalize_v4_section if is_v4(section, value) else normalize_v3_section)(section, value, source_versions=source_cache)
                     value = validate_section(section, value)
                 old = state["sections"][section]
+                if is_v4(section, old) or is_v4(section, value):
+                    self._archive_contract(db, document_id, section, old)
+                    old = normalize_v4_section(section, old, source_versions=source_cache)
+                    value = normalize_v4_section(section, value, source_versions=source_cache)
                 if isinstance(old, dict) and old.get("schema_version") == 3 and isinstance(value, dict) and value.get("schema_version") == 2:
                     value = adapt_v2_section(section, value, source_versions=source_cache)
                 if section in {"characters", "settings", "setting_features"}:
                     state["sections"][section] = merge_named(old, value, section)
                 elif section == "plot":
                     plot = copy.deepcopy(old)
-                    plot["epochs"] = _union(plot.get("epochs", []), value.get("epochs", []))
-                    if value.get("schema_version") in (2, 3):
-                        if value.get("schema_version") == 3 and plot.get("schema_version") != 3:
+                    if value.get("schema_version") == 4: plot.pop("epochs", None)
+                    else: plot["epochs"] = _union(plot.get("epochs", []), value.get("epochs", []))
+                    if value.get("schema_version") in (2, 3, 4):
+                        if value.get("schema_version") in (3, 4) and plot.get("schema_version") != value.get("schema_version"):
                             legacy = copy.deepcopy(plot)
-                            plot = adapt_v2_section("plot", plot, source_versions=source_cache)
+                            plot = (adapt_v3_section if value.get("schema_version") == 4 else adapt_v2_section)("plot", plot, source_versions=source_cache)
                             if legacy: plot["legacy"] = legacy
                         plot["schema_version"] = value["schema_version"]
                         plot["events"] = merge_by_id(plot.get("events", []), value.get("events", []))
@@ -591,12 +654,12 @@ class ReferenceAnalysisStore:
                 elif section == "style":
                     ledger = [{"data": json.loads(row[0]), "chars": row[1]} for row in db.execute("SELECT data_json,chars FROM reference_section_commits WHERE document_id=? AND section='style' ORDER BY committed_at", (document_id,))]
                     ledger.append({"data": value, "chars": chunk["end"] - chunk["start"]})
-                    modern = value.get("schema_version") in (2, 3)
+                    modern = value.get("schema_version") in (2, 3, 4)
                     selected_ledger = [entry for entry in ledger if entry["data"].get("schema_version") == value.get("schema_version")] if modern else ledger
-                    state["sections"][section] = aggregate_style(selected_ledger)
+                    state["sections"][section] = aggregate_style_v4(selected_ledger) if value.get("schema_version") == 4 else aggregate_style(selected_ledger)
                     if modern:
                         state["sections"][section]["schema_version"] = value["schema_version"]
-                        for key in ("observations", "narrative_composition", "catchphrases"):
+                        for key in (() if value.get("schema_version") == 4 else ("observations", "narrative_composition", "catchphrases")):
                             previous = adapt_v2_section("style", old, source_versions=source_cache) if value.get("schema_version") == 3 and old.get("schema_version") != 3 else old
                             state["sections"][section][key] = _union(previous.get(key, []), value.get(key, []))
                         if old and old.get("schema_version") != value.get("schema_version"):
@@ -614,7 +677,7 @@ class ReferenceAnalysisStore:
                 else:
                     state["sections"][section] = merge_object(old, value) if is_modern(section, value) else {**old, **value}
                 db.execute("INSERT INTO reference_section_commits (document_id,run_id,chunk_id,section,data_json,chars,committed_at,source_version_id) VALUES (?,?,?,?,?,?,?,?)", (document_id, run["id"], chunk_id, section, _dump(value), chunk["end"] - chunk["start"], now, run["version_id"]))
-            if "style" in pending and self.documents and state["sections"]["style"].get("schema_version") in (2, 3):
+            if "style" in pending and self.documents and state["sections"]["style"].get("schema_version") in (2, 3, 4):
                 source = source_cache.get(run["version_id"]) or self.documents.get_version(document_id, run["version_id"])
                 chapters = source.get("chapters", [])
                 body_ranges = [(item.get("body_start"), item.get("end")) for item in chapters if isinstance(item, dict) and not item.get("placeholder")]

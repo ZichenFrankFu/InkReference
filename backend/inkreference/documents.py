@@ -1114,6 +1114,15 @@ class DocumentStore:
     def get_version_navigation(self, document_id: str, version_id: str | None = None) -> dict[str, Any]:
         return self._view(document_id, version_id, "navigation_json")
 
+    def get_narrative_context(self, document_id: str, version_id: str | None = None) -> dict[str, Any]:
+        """Read chapter coordinates without hydrating source text or findings."""
+        from .progress import narrative_chapter_context
+        summary = self.get_version_summary(document_id, version_id)
+        with self._connection() as connection:
+            chapters = [json.loads(row[0]) for row in connection.execute(
+                "SELECT metadata_json FROM doc_chapter_views WHERE version_id=? ORDER BY chapter_order", (summary["id"],))]
+        return narrative_chapter_context(chapters)
+
     def chapter_previews(self, document_id: str, version_id: str, *, preview_chars: int = 200) -> list[dict[str, Any]]:
         """Bounded chapter heads for volume planning, without full snapshots."""
         if type(preview_chars) is not int or not 0 <= preview_chars <= 1000:

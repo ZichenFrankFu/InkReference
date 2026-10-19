@@ -207,6 +207,10 @@ def create_app(data_dir: str | Path | None = None, static_dir: str | Path | None
                         await run_in_threadpool(runtime._studio.runner.shutdown)
                     if runtime._studio._research is not None:
                         await run_in_threadpool(runtime._studio.research.shutdown)
+                    if runtime._studio._volume_research is not None:
+                        await run_in_threadpool(runtime._studio.volume_research.shutdown)
+                    if runtime._studio._embedding_downloads is not None:
+                        await run_in_threadpool(runtime._studio.embedding_downloads.shutdown)
                 runtime.pending.clear()
 
     application = FastAPI(title="InkReference", version=__version__, lifespan=lifespan, docs_url=None, redoc_url=None)
@@ -505,6 +509,8 @@ def create_app(data_dir: str | Path | None = None, static_dir: str | Path | None
     install_character_routes(application, runtime)
     from .research_api import create_research_router
     application.include_router(create_research_router(lambda: runtime.studio.research))
+    from .embedding_download_api import create_embedding_download_router
+    application.include_router(create_embedding_download_router(lambda: runtime.studio.embedding_downloads))
 
     # API typos must stay JSON 404s rather than falling through to the SPA.
     @application.api_route("/api/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])

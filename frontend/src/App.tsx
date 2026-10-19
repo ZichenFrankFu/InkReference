@@ -15,7 +15,6 @@ import {
   Sun,
   Wrench,
   SlidersHorizontal,
-  Sparkles,
 } from "lucide-react";
 import { Busy, Modal, Notice, PageActivityScope, PageNavigationScope, PageTitle } from "./ui";
 import { download } from "./api";
@@ -29,7 +28,6 @@ const Jobs = memo(lazy(() => import("./Jobs")));
 const ReferencePage = memo(lazy(() => import("./Jobs").then(module => ({ default: module.ReferencePage }))));
 const Workflows = memo(lazy(() => import("./Workflows")));
 const Models = memo(lazy(() => import("./Models")));
-const Research = memo(lazy(() => import("./Research")));
 const QuickRepair = lazy(() => import("./QuickRepair"));
 type Section =
   | "library"
@@ -46,14 +44,13 @@ const sections: {
   icon: typeof BookOpen;
 }[] = [
   { id: "library", label: "作品库", icon: BookOpen },
-  { id: "research", label: "AI 更新", icon: Sparkles },
   {
     id: "documents",
     label: "文本清理",
     icon: FileText,
   },
   { id: "reference", label: "参考作品分析", icon: FileSearch },
-  { id: "jobs", label: "任务管理", icon: ListTodo },
+  { id: "jobs", label: "提取任务管理", icon: ListTodo },
   {
     id: "workflows",
     label: "Agent 与 Skills",
@@ -67,6 +64,10 @@ const sections: {
 ];
 const initial = (): Section => {
   const hash = window.location.hash.slice(1);
+  if (hash === "research") {
+    try { sessionStorage.setItem("inkreference.catalog-focus", JSON.stringify({ section: "library", intake: true })); } catch { /* Optional focus state. */ }
+    return "library";
+  }
   if (hash === "jobs") {
     try {
       const focus = JSON.parse(sessionStorage.getItem("inkreference.catalog-focus") || "null");
@@ -79,7 +80,8 @@ const initial = (): Section => {
 };
 export default function App() {
   const [section, setSection] = useState<Section>(initial);
-  const [visited, setVisited] = useState<Section[]>([initial()]);
+  useEffect(() => { if (window.location.hash === "#research") window.history.replaceState(null, "", "#library"); }, []);
+  const [visited, setVisited] = useState<Section[]>(() => [initial()]);
   const [mobile, setMobile] = useState(false);
   useEffect(() => {
     if (!mobile) return;
@@ -124,6 +126,7 @@ export default function App() {
     if (window.location.hash === "#jobs" && sectionRef.current === "reference") window.history.replaceState(null, "", "#reference");
   }, []);
   const nav = useCallback((id: Section) => {
+    if (id === "research") id = "library";
     setMobile(false);
     setAppearanceOpen(false);
     if (id === sectionRef.current) return;
@@ -142,8 +145,8 @@ export default function App() {
   useEffect(() => {
     const open = (event: Event) => {
       const incoming = (event as CustomEvent).detail;
-      if (!incoming || !["library", "documents", "reference", "jobs", "research"].includes(incoming.section)) return;
-      const target = incoming.section === "jobs" && incoming.documentId ? { ...incoming, section: "reference" } : incoming;
+      if (!incoming || !["library", "documents", "reference", "jobs", "research", "models", "workflows", "backup"].includes(incoming.section)) return;
+      const target = incoming.section === "research" ? { ...incoming, section: "library", intake: true } : incoming.section === "jobs" && incoming.documentId ? { ...incoming, section: "reference" } : incoming;
       if (target.section === "jobs" && typeof target.runId === "string") setJobId(target.runId);
       // Keep the focus target until a lazy page has mounted and consumed it.
       try { sessionStorage.setItem("inkreference.catalog-focus", JSON.stringify(target)); } catch { /* focus event still works */ }
@@ -251,8 +254,6 @@ export default function App() {
                   <ReferencePage navigate={nav} />
                 ) : page === "jobs" ? (
                   <Jobs initialId={jobId} navigate={nav} />
-                ) : page === "research" ? (
-                  <Research navigate={nav} />
                 ) : page === "workflows" ? (
                   <Workflows />
                 ) : page === "models" ? (

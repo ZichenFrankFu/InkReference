@@ -51,7 +51,7 @@ def install_catalog_routes(application, runtime):
     def analysis(work_id: str, document_id: str,
                  chapter: Annotated[int | None, Query(ge=0)] = None,
                  progress: Annotated[float | None, Query(ge=0, le=100)] = None,
-                 schema_version: Annotated[int | None, Query(ge=2, le=3)] = None):
+                 schema_version: Annotated[int | None, Query(ge=2, le=4)] = None):
         return catalog().analysis(work_id, document_id, chapter, progress=progress, schema_version=schema_version)
 
     @router.get("/documents/{document_id}/catalog")

@@ -66,6 +66,10 @@ def _outline(events: list[dict]) -> str:
 def project_sections(sections: dict, chapter: int | None = None, *, volumes: list[dict] | None = None,
                      target_version: int | None = None, source_versions: dict | None = None,
                      progress: float | None = None, legacy_source_version_id: str | None = None) -> dict:
+    if target_version == 4 or (target_version is None and any(
+        isinstance(value, dict) and value.get("schema_version") == 4 or isinstance(value, list) and any(isinstance(item, dict) and item.get("schema_version") == 4 for item in value)
+        for value in sections.values())):
+        return _project_v4(sections, chapter, volumes=volumes, source_versions=source_versions, progress=progress, legacy_source_version_id=legacy_source_version_id)
     if target_version == 3 or (target_version is None and any(
         isinstance(value, dict) and value.get("schema_version") == 3 or isinstance(value, list) and any(isinstance(item, dict) and item.get("schema_version") == 3 for item in value)
         for value in sections.values())):
@@ -379,4 +383,55 @@ def _project_v3(sections: dict, chapter: int | None = None, *, volumes=None, sou
                     hit["character_ids"] = [cid for cid in hit.get("character_ids", []) if cid in character_ids]
         coverage = result.get("style", {}).get("deterministic_statistics", {}).get("coverage", {}).get("characters", 0)
         era["statistics"] = era_statistics(era, people, character_count=coverage)
+    return result
+
+
+def _project_v4(sections, chapter=None, *, volumes=None, source_versions=None, progress=None, legacy_source_version_id=None):
+    from .analysis_contract_v4 import adapt_v3_section, normalize_v4_section
+    from .language_analysis import naming_statistics
+    from .progress import prepare_progress_sources_v4, narrative_progress_v4
+    sources = prepare_progress_sources_v4(source_versions)
+    modern = copy.deepcopy(sections)
+    # Legacy chapter coordinates are located against the same immutable source as
+    # v3, then recalculated to v4's gap-inclusive chapter denominator.
+    legacy_sources = {identity: {**source, "_progress_index": source["_progress_index_v4"]} for identity, source in sources.items()}
+    legacy_view = _project_v3(sections, None, volumes=volumes, source_versions=legacy_sources, legacy_source_version_id=legacy_source_version_id) if not any(
+        isinstance(value, dict) and value.get("schema_version") == 4 or isinstance(value, list) and any(isinstance(item, dict) and item.get("schema_version") == 4 for item in value) for value in sections.values()) else sections
+    for section in ("plot", "characters", "settings", "style", "rhythm", "opening", "era_background"):
+        if section in modern: modern[section] = normalize_v4_section(section, legacy_view.get(section, modern[section]), source_versions=sources)
+    if chapter is not None and progress is None:
+        cutoffs = [narrative_progress_v4(source, {"chapter": chapter}) for source in sources.values()]
+        cutoffs = [value for value in cutoffs if value is not None]
+        if cutoffs: progress = max(cutoffs)
+    # Feed the existing visibility/link projection a v3 copy. This never crosses
+    # a provider/cache boundary, so historical v3 contracts and files stay intact.
+    proxy = copy.deepcopy(modern)
+    for section in ("plot", "rhythm", "opening", "era_background"):
+        if isinstance(proxy.get(section), dict): proxy[section]["schema_version"] = 3
+    for line in proxy.get("plot", {}).get("plotlines", []):
+        line["goal"] = line.pop("description", "")
+        line["stages"] = [{**{key: value for key, value in node.items() if key != "description"}, "goal": node.get("description", "")} for node in line.pop("time_nodes", [])]
+    names = {}
+    for person in proxy.get("characters", []):
+        person["schema_version"] = 3
+        for snapshot in person.get("snapshots", []): names[snapshot["id"]] = snapshot.pop("name", "")
+    for setting in proxy.get("settings", []):
+        setting["schema_version"] = 3
+        setting["snapshots"] = []
+    proxy["style"] = {"schema_version": 3, "narrative_person": "", "focalization": "", "register": "", "colloquialism": "",
+                       "rhetoric": [], "dialogue_style": "", "catchphrases": [], "naming": {"patterns": [], "style": "", "examples": []},
+                       "narrative_composition": [], "observations": [],
+                       "deterministic_statistics": copy.deepcopy(modern.get("style", {}).get("deterministic_statistics", {}))}
+    result = _project_v3(proxy, chapter, volumes=volumes, source_versions={}, progress=progress, legacy_source_version_id=legacy_source_version_id)
+    for section in ("plot", "characters", "settings", "rhythm", "opening", "era_background"):
+        if section in result: result[section] = adapt_v3_section(section, result[section])
+    for person in result.get("characters", []):
+        for snapshot in person.get("snapshots", []): snapshot["name"] = names.get(snapshot["id"], "")
+        if person.get("current_snapshot"): person["current_snapshot"]["name"] = names.get(person["current_snapshot"]["id"], "")
+    result["plot"].pop("outlines", None)
+    result["plot"].pop("epochs", None)
+    result["plot"]["logline"] = modern.get("plot", {}).get("logline", "")
+    result["style"] = copy.deepcopy(modern.get("style", {}))
+    stats = result["style"].setdefault("deterministic_statistics", {})
+    stats["naming"] = naming_statistics(result.get("characters", []))
     return result

@@ -317,7 +317,7 @@ def test_default_manual_task_fits_actual_conservative_estimator(tmp_path):
     runner = WorkflowRunner(tmp_path)
     document = runner.documents.upload("synthetic.txt", "第1章 来信\n甲把信交给乙。".encode())
     run = runner.create_run(document["id"], manual=True)
-    assert run["workflow_version"] == "3.0.0"
+    assert run["workflow_version"] == "4.0.0"
     assert 100 <= run["snapshots"]["context_limits"]["language"] <= 6000
     assert run["total"] >= 1
 
@@ -390,7 +390,7 @@ def test_context_does_not_send_future_event_or_state_facts_to_earlier_chunks(tmp
     runner, run, models, docs = setup(tmp_path)
     with runner._db(write=True) as db:
         for kind, identifier, label in [("events", "future-event", "甲"), ("states", "future-state", "甲"), ("plotlines", "future-line", "future"), ("characters", "character-jia", "甲")]:
-            db.execute("INSERT INTO run_entity_index VALUES (?,?,?,?,?,?)", (run["id"], kind, identifier, label, "后文秘密事实。", 99))
+            db.execute("INSERT INTO run_entity_index (run_id,kind,id,label,summary,position) VALUES (?,?,?,?,?,?)", (run["id"], kind, identifier, label, "后文秘密事实。", 99))
         chunk = dict(db.execute("SELECT * FROM run_chunks WHERE run_id=? ORDER BY position LIMIT 1", (run["id"],)).fetchone())
         context = runner._fixed_context(db, run["id"], chunk, "settings")
     assert context["events"] == context["states"] == context["plotlines"] == []
