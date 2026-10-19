@@ -118,6 +118,8 @@ class Runtime:
             if self._store is None:
                 self.data_dir.mkdir(parents=True, exist_ok=True)
                 self._store = DataStore(self.data_dir / "inkreference.sqlite3")
+                self._store.write_lock = self.lock
+                self._store.character_sync = lambda connection, character_id, values: self.studio.character_bridge.sync_identity_from_catalog_connection(connection, character_id, values)
             return self._store
 
     def expire_batches(self) -> None:
@@ -203,6 +205,8 @@ def create_app(data_dir: str | Path | None = None, static_dir: str | Path | None
                         await run_in_threadpool(conversions.shutdown)
                     if runtime._studio._runner is not None:
                         await run_in_threadpool(runtime._studio.runner.shutdown)
+                    if runtime._studio._research is not None:
+                        await run_in_threadpool(runtime._studio.research.shutdown)
                 runtime.pending.clear()
 
     application = FastAPI(title="InkReference", version=__version__, lifespan=lifespan, docs_url=None, redoc_url=None)
@@ -497,6 +501,10 @@ def create_app(data_dir: str | Path | None = None, static_dir: str | Path | None
     install_repair_routes(application, runtime)
     from .catalog_routes import install_catalog_routes
     install_catalog_routes(application, runtime)
+    from .character_routes import install_character_routes
+    install_character_routes(application, runtime)
+    from .research_api import create_research_router
+    application.include_router(create_research_router(lambda: runtime.studio.research))
 
     # API typos must stay JSON 404s rather than falling through to the SPA.
     @application.api_route("/api/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])

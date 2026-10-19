@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .database import (
-    TABLES, LEGACY_TABLES, SCHEMA4_COLUMNS, modern_values, WORK_RELATION_FIELD, DataError, DataStore, parse_work_relations,
+    TABLES, LEGACY_TABLES, SCHEMA4_COLUMNS, SCHEMA5_COLUMNS, modern_values, WORK_RELATION_FIELD, DataError, DataStore, parse_work_relations,
     record_id, require_table, validate_values,
 )
 
@@ -67,7 +67,7 @@ def parse_files(files: list[tuple[str, bytes]]) -> ImportBatch:
                 raise DataError(422, "文件为空或缺少表头")
             if len(header) != len(set(header)):
                 raise DataError(422, "CSV 存在重复表头")
-            matches = [table for table in TABLES if set(header) in (set(TABLES[table]["columns"]),set(SCHEMA4_COLUMNS[table]),set(LEGACY_TABLES[table]["columns"]))]
+            matches = [table for table in TABLES if set(header) in (set(TABLES[table]["columns"]),set(SCHEMA4_COLUMNS[table]),set(SCHEMA5_COLUMNS[table]),set(LEGACY_TABLES[table]["columns"]))]
             if len(matches) != 1:
                 raise DataError(422, "表头无法识别：必须包含作品、角色或桥段表的全部字段，且不能含未知字段")
             table = matches[0]
@@ -116,7 +116,11 @@ def _apply_import(store: DataStore, connection: sqlite3.Connection, batch: Impor
             if existing is not None:
                 if policy == "error":
                     raise DataError(409, f"ID 已存在：{identifier}；请选择跳过或显式更新")
-                if policy == "skip" or store._render(connection, source.table, existing)["values"] == values:
+                current_values=store._render(connection, source.table, existing)["values"]
+                if source.table=="cliches" and "cliché评分" in current_values and "cliché评分" in values:
+                    same={k:v for k,v in current_values.items() if k!="cliché评分"}=={k:v for k,v in values.items() if k!="cliché评分"}
+                else:same=current_values==values
+                if policy == "skip" or same:
                     counts["skipped"] += 1
                     continue
                 action = "updated"

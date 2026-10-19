@@ -24,7 +24,7 @@ from typing import Any, Callable, Iterator, TypedDict
 from .database import DataError
 from .skills import build_prompt, validate_result
 from .local_security import require_remote_consent, remote_model, target_fingerprint
-from .fixed_pipeline import FixedPipeline, fixed
+from .fixed_pipeline import FixedPipeline, fixed, contract
 from .workflow_definitions import FIXED_STAGES
 
 KINDS = ("characters", "events", "cliches")
@@ -222,7 +222,7 @@ class WorkflowRunner(FixedPipeline):
         text = version["text"]
         if not isinstance(text, str) or not text.strip():
             raise DataError(422, "当前全文版本为空，不能分析")
-        workflow_version = workflow_version or ("2.0.0" if workflow_id == "default" else "1.0.0")
+        workflow_version = workflow_version or ("3.0.0" if workflow_id == "default" else "1.0.0")
         workflow = self.workflows.get(workflow_id, workflow_version)
         skill = self.skills.get(workflow["skill_id"], workflow["skill_version"])
         if manual:
@@ -240,6 +240,10 @@ class WorkflowRunner(FixedPipeline):
                                  "target_base_url": model.get("base_url"), "target_model": model.get("model")},
                      "document": {"id": document_id, "version_id": version["id"], "title": document.get("title", ""), "work_id": document.get("work_id"), "filename": document.get("filename", ""), "sha256": _hash(text), "characters": len(text)}}
         if fixed(snapshots):
+            contract_version = skill.get("contract_version")
+            if contract_version not in (2, 3):
+                raise DataError(422, "固定流程需要 v2 或 v3 固定输出 Skill")
+            snapshots["contract_version"] = contract_version
             if expected_stage_fingerprints is not None and (not isinstance(expected_stage_fingerprints, dict) or set(expected_stage_fingerprints) - set(FIXED_STAGES) or any(not isinstance(value, str) for value in expected_stage_fingerprints.values())):
                 raise DataError(422, "阶段模型确认信息格式无效")
             snapshots["stage_models"], snapshots["stage_model_fingerprints"] = {}, {}
@@ -255,12 +259,27 @@ class WorkflowRunner(FixedPipeline):
                 snapshots["stage_models"][stage] = selected_model
                 snapshots["stage_model_fingerprints"][stage] = actual
             snapshots["document"]["chapters"] = [{"start": chapter["start"], "end": chapter["end"], "number": chapter.get("number") or index + 1} for index, chapter in enumerate(version.get("chapters", []))]
+            if contract_version == 3:
+                from .volumes import VolumeStore
+                chapters = version.get("chapters", [])
+                snapshots["document"]["author"] = document.get("author", "")
+                snapshots["document"]["body_characters"] = sum(not character.isspace() for character in text)
+                snapshots["document"]["progress_chapters"] = [
+                    {"start": chapter["start"], "end": chapter["end"], "number": chapter.get("number") or index + 1}
+                    for index, chapter in enumerate(chapters)
+                    if chapter.get("kind") not in {"preamble", "fallback"} and chapter.get("raw_marker")
+                ]
+                plan = VolumeStore(self.data_dir, self.documents).get(document_id, version["id"])
+                snapshots["document"]["volumes"] = [
+                    {**item, "start": chapters[item["start_chapter"] - 1]["start"], "end": chapters[item["end_chapter"] - 1]["end"]}
+                    for item in plan["volumes"]
+                ]
             snapshots["stage_skills"] = {}
             for stage in FIXED_STAGES:
                 selection = workflow.get("stage_skills", {}).get(stage)
                 selected = self.skills.get(selection["id"], selection["version"]) if selection else skill
-                if selected.get("contract_version") != 2:
-                    raise DataError(422, "固定流程只能使用固定输出格式的 v2 Skill")
+                if selected.get("contract_version") != contract_version:
+                    raise DataError(422, f"各阶段 Skill 必须与主 Skill 使用同一 v{contract_version} 输出合同")
                 if selection:
                     snapshots["stage_skills"][stage] = selected
         # Copy through JSON to detach caller-owned definitions and exclude runtime objects.
@@ -774,7 +793,7 @@ class WorkflowRunner(FixedPipeline):
             capacity = min(snapshots["workflow"]["max_input_tokens"], selected_model.get("context_window", snapshots["workflow"]["max_input_tokens"] + output_reserve) - output_reserve)
             if input_estimate > capacity:
                 raise DataError(422, "当前阶段的输入超过上下文上限，未发送正文")
-            cache_key = self._fixed_cache_key(messages, selected_model, output_reserve) if fixed(snapshots) and snapshots["workflow"].get("reuse_candidates", True) else ""
+            cache_key = self._fixed_cache_key(messages, selected_model, output_reserve, contract(snapshots)) if fixed(snapshots) and snapshots["workflow"].get("reuse_candidates", True) else ""
             cached = db.execute("SELECT result_json FROM run_stage_cache WHERE cache_key=?", (cache_key,)).fetchone() if cache_key else None
             if cached is not None:
                 try:

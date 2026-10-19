@@ -1,5 +1,7 @@
 # InkOctoBot 参考数据库：逐项复刻基线
 
+当前变更以文末 V11 为准；V10 及以前章节保留当时实现和审查记录，不代表新版仍暴露旧字段。
+
 审查对象：[`ZichenFrankFu/InkOctoBot`](https://github.com/ZichenFrankFu/InkOctoBot)，提交 `51c82b6f01f6a5b5210e1bae9302be257b3b8083`。本清单来自当前实际渲染的页面、事件处理及后端函数；旧注释、未挂载组件和仅存在的 API 不算作页面已实现功能。
 
 本文件先明确完整审查范围与验收方法。表内“复刻目标”是需求与设计，不代表该行已通过运行验收；本轮实际实现、差异和独立验收结果见末尾，跨平台及浏览器结果见 `docs/validation.md`。
@@ -188,3 +190,23 @@
 严格分析结构定义位于 `chronicle_schema.py`；合并与证据持久化在 `reference_analysis.py`；只读投影在 `analysis_projection.py`；新编辑器为 `ChronicleEditors.tsx`。旧层级、数组及未知字段保留兼容数据，不把迁移读取宣称为重新提取或补齐证据。新版角色／设定 ID 属于文档分析实体，全局素材库仍以自己的外部 ID 管理；同名不自动合并。
 
 分析恢复快照仍限最近 10 次；正式事件、状态、当前分析和有效贡献不随快照裁剪。当前 work-level JSON 有明确大小／深度／条目上限，超限报错，不静默截断；超长正文分块不代表分析事实库无限容量。商业模型的长期实体连续性、热梗召回与日期准确度仍需真实模型验收，不能由固定响应测试推断。
+
+
+## V11：共享角色合同、平面编年史与联网资料
+
+本批继续审查 InkOctoBot `51c82b6f01f6a5b5210e1bae9302be257b3b8083`（MIT），不是仅按同名功能推测实现。以下源文件及函数实际读过，并改造成当前需求。
+
+| 上游实际机制 | 当前实现与调整 |
+|---|---|
+| `agents/reference_extractors/skills/chronicle_event_extract/skill.py`：每章 1–3 个章节弧事件，客观事件名／描述与显式时间，不编造日期 | `skills.py` v3 plot prompt 保留粗事件粒度；平面事件加入主题、进度及稳定因果／情节线关系；不用 epochs/periods 包裹。原文证据隐藏在核验层，日期未知则空 |
+| `reference_pipeline/ai_extractor.py::{ai_extract_outline_events,ai_summarize_outline}`：先提取平面事件，再按故事时间整理，保持事件内容 | `analysis_projection.py` 从已审核事件派生故事／叙述双视角与卷／全书梗概；不额外模型重写事实，不复制上游层级分组。明确日期可排序，未知日期保持叙述位置 |
+| `reference_pipeline/prompts.py` 的 `reference.characters` 与 `character_profile/skill.py`：作品／卷／绝对章范围上下文、姓名别名、关系、外貌／性格／经历分类，禁止同一事实跨类重复 | v3 共享 `character_contract.py`：稳定 ID、初始状态与事件驱动完整阶段快照；进度范围替代对外章号，关系使用目标 ID。人物库通过 `character_bridge_v11.py` 明确绑定，同一作品 context 双向同步，其他旧素材字段归档 |
+| `reference_pipeline/prompts.py` 的 `reference.settings`：概括性标题、简介与首次出现／被扩展／被推翻更新 | v3 设定保存阶段内容与可选故事时间，`earlier_setting_id` 表示追加到更早的设定，验证父项存在及无循环；去除 UI 的排序键、修正链和额外时间字段 |
+| `reference_pipeline/ai_extractor.py::build_segment_text_chunks`：按完整章节累积约 32000 字并显示绝对章节范围 | `fixed_pipeline.py` v3 默认较大章组、优先保存卷边界；各阶段真实上下文／输出／记忆决定实际大小。保留内部块和逐次账单，UI 显示粗卷／阶段。上游超长单章截尾行为不移植，改用段落切分且完整覆盖 |
+| `reference_pipeline/prompts.py` 的 `reference.style` 与 `reference_pipeline/nlp_stats.py`：纯统计与语义判断分工 | 继续本地计算句长、段长和标点，不让模型重复产统计；语义风格及剧情信号使用叙事进度和内部原文证据 |
+
+新增的 schema-6 素材合同、热度加权 cliché 评分、Tavily／Brave／SearXNG 独立检索抓取、真实 embedding 余弦匹配、聊天草稿审核事务和安装 metadata 修复，均为 InkReference 自己的代码，不是已移植的 InkOctoBot L1/L2/L3 索引或 market extractor。使用现有 HTTPX、LangGraph、SQLite 和凭据封装，没有复制另一整套应用。
+
+v2 `FIXED_BUILTIN_SKILL`／`FIXED_WORKFLOW` 保留，v3 另建不可变 `PROGRESS_*` 内建版本；实测四阶段 v2 prompt 与前一提交逐字一致。Schema-3 时间坐标为进度及可选故事时间，旧字段的兼容适配不等于重新验证或补全。角色最早 source 初始状态在倒序审核时仍正确选择，手工初始状态及范围优先保留。
+
+联网来源状态只证明页面取回，语义事实和商业／讨论热度仍需人工核对；主角／配角和三桥段仅为有来源支持的候选，不能保证全网排名。向量来自真实协议调用，缺失时不会降级成关键词匹配；阈值尚未用真实语料校准。当前响应测试均使用合成 transport/provider，不构成真实 LLM 准确率或时代事实验收。

@@ -8,6 +8,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import zipfile
 
 import pytest
 
@@ -158,6 +159,7 @@ def test_install_targets_selected_environment_and_isolates_optional_mineru_const
     monkeypatch.setattr(manage, 'resolve_runtime', lambda *a: runtime)
     monkeypatch.setattr(manage, 'checked_runtime', lambda *a, **kw: runtime)
     monkeypatch.setattr(manage, 'frontend_tools', lambda selected: (['node'], ['npm'], 'v24.0.0'))
+    monkeypatch.setattr(manage, 'repair_packaging', lambda selected, project_root: False)
     calls = []
     monkeypatch.setattr(manage, 'run_phase', lambda command, description, **kw: calls.append((command, kw)))
     assert manage.install(args('install', '--current-environment', '--mineru', '--dev'), root) == 0
@@ -173,6 +175,102 @@ def test_install_targets_selected_environment_and_isolates_optional_mineru_const
     assert not (root / '.venv').exists()
     assert manage.frontend_status(root)['state'] == 'current'
     assert (root / 'frontend/dist' / manage.FRONTEND_STAMP).is_file()
+
+
+def _packaging_wheel(directory):
+    """Build an offline wheel from the already installed dependency."""
+    import packaging
+    package = Path(packaging.__file__).parent
+    version = packaging.__version__
+    metadata = f'packaging-{version}.dist-info'
+    files = {
+        f'packaging/{path.relative_to(package).as_posix()}': path.read_bytes()
+        for path in package.rglob('*')
+        if path.is_file() and '__pycache__' not in path.parts and path.suffix != '.pyc'
+    }
+    files[f'{metadata}/METADATA'] = f'Metadata-Version: 2.3\nName: packaging\nVersion: {version}\n'.encode()
+    files[f'{metadata}/WHEEL'] = b'Wheel-Version: 1.0\nGenerator: offline-test\nRoot-Is-Purelib: true\nTag: py3-none-any\n'
+    files[f'{metadata}/RECORD'] = ''.join(f'{name},,\n' for name in (*files, f'{metadata}/RECORD')).encode()
+    wheel = directory / f'packaging-{version}-py3-none-any.whl'
+    with zipfile.ZipFile(wheel, 'w') as archive:
+        for name, content in files.items():
+            archive.writestr(name, content)
+    return wheel, version
+
+
+@pytest.mark.parametrize('damage', ['record', 'metadata', 'stale_metadata'])
+def test_real_selected_venv_packaging_repair_is_offline_and_idempotent(tmp_path, monkeypatch, damage):
+    root = tmp_path / '中文 repair environment'
+    root.mkdir()
+    wheel, version = _packaging_wheel(root)
+    (root / 'requirements-lock.txt').write_text(f'packaging=={version}\n', encoding='utf-8')
+    subprocess.run([sys.executable, '-m', 'venv', str(root / '.venv')], check=True, capture_output=True)
+    runtime = manage.Runtime(str(manage.venv_python(root)), label='isolated repair fixture')
+    subprocess.run(runtime.command('-m', 'pip', 'install', '--no-index', str(wheel)), check=True, capture_output=True)
+    initial = manage.packaging_status(runtime)
+    metadata = Path(initial['entries'][0]['path'])
+    if damage == 'record':
+        (metadata / 'RECORD').unlink()
+    elif damage == 'metadata':
+        (metadata / 'METADATA').unlink()
+    else:
+        stale = metadata.with_name('packaging-0.0.dist-info')
+        stale.mkdir()
+        (stale / 'METADATA').write_text('Name: packaging\n', encoding='utf-8')
+    monkeypatch.setenv('PIP_NO_INDEX', '1')
+    monkeypatch.setenv('PIP_FIND_LINKS', root.as_uri())
+    monkeypatch.setenv('PIP_DISABLE_PIP_VERSION_CHECK', '1')
+    assert manage.repair_packaging(runtime, root) is True
+    fixed = manage.packaging_status(runtime)
+    assert fixed['version'] == fixed['active_version'] == version
+    assert len(fixed['entries']) == 1
+    assert not fixed['entries'][0]['issues']
+    assert not list(metadata.parent.glob('.inkreference-packaging-*'))
+    monkeypatch.setattr(manage, 'run_phase', lambda *a, **kw: pytest.fail('healthy installation must not be overwritten'))
+    assert manage.repair_packaging(runtime, root) is False
+
+
+def test_packaging_repair_refuses_external_metadata_before_install(tmp_path, monkeypatch):
+    outside = tmp_path / 'outside' / 'packaging-1.dist-info'
+    outside.mkdir(parents=True)
+    monkeypatch.setattr(manage, 'packaging_status', lambda runtime: {
+        'roots': [str(tmp_path / 'selected')],
+        'entries': [{'path': str(outside), 'version': None, 'issues': ['missing RECORD']}],
+        'module': None, 'active_path': str(outside), 'active_version': None,
+    })
+    monkeypatch.setattr(manage, 'run_phase', lambda *a, **kw: pytest.fail('must not install outside selected environment'))
+    with pytest.raises(manage.EnvironmentError, match='outside the selected environment'):
+        manage.repair_packaging(manage.Runtime(sys.executable, label='selected'), tmp_path)
+    assert outside.is_dir()
+
+
+def test_healthy_inherited_packaging_does_not_trigger_repair(tmp_path, monkeypatch):
+    monkeypatch.setattr(manage, 'packaging_status', lambda runtime: {
+        'roots': [str(tmp_path / 'venv')], 'entries': [], 'active_valid': True,
+        'module': str(tmp_path / 'system' / 'packaging' / '__init__.py'),
+        'active_path': str(tmp_path / 'system' / 'packaging-26.3.dist-info'),
+        'active_version': '26.3', 'version': '26.3', 'error': None,
+    })
+    monkeypatch.setattr(manage, 'run_phase', lambda *a, **kw: pytest.fail('healthy inherited package must not be overwritten'))
+    assert manage.repair_packaging(manage.Runtime(sys.executable, label='selected'), tmp_path) is False
+
+
+def test_failed_packaging_repair_restores_metadata_and_stops(tmp_path, monkeypatch):
+    metadata = tmp_path / 'site-packages' / 'packaging-1.dist-info'
+    metadata.mkdir(parents=True)
+    (metadata / 'METADATA').write_text('broken original', encoding='utf-8')
+    (tmp_path / 'requirements-lock.txt').write_text('packaging==26.3\n', encoding='utf-8')
+    monkeypatch.setattr(manage, 'packaging_status', lambda runtime: {
+        'roots': [str(metadata.parent)], 'entries': [{'path': str(metadata), 'version': None, 'issues': ['missing RECORD']}],
+        'module': None, 'active_path': str(metadata), 'active_version': None,
+    })
+    def fail_install(*a, **kw):
+        raise manage.EnvironmentError('network unavailable')
+    monkeypatch.setattr(manage, 'run_phase', fail_install)
+    with pytest.raises(manage.EnvironmentError, match='network unavailable'):
+        manage.repair_packaging(manage.Runtime(sys.executable, label='selected'), tmp_path)
+    assert (metadata / 'METADATA').read_text(encoding='utf-8') == 'broken original'
+    assert not list(metadata.parent.glob('.inkreference-packaging-*'))
 
 
 def test_incomplete_checkout_fails_before_installing_anything(tmp_path, monkeypatch):

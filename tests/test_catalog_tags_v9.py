@@ -11,11 +11,11 @@ import pytest
 from inkreference.csvio import ImportBatch, ImportTable, commit_import, parse_files, preview_import
 from inkreference.database import (
     CLICHE_CHARACTER_TRAITS, CLICHE_PLOT_MECHANISMS, CLICHE_TAGS,
-    DataError, DataStore, LEGACY_TABLES, SCHEMA4_COLUMNS, TABLES, validate_values,
+    DataError, DataStore, LEGACY_TABLES, SCHEMA4_COLUMNS, SCHEMA5_COLUMNS, TABLES, validate_values,
 )
 from inkreference.library_exchange import (
     FORMAT, FORMAT_VERSION, LEGACY_COLUMNS, SCHEMA4_COLUMNS as EXCHANGE_SCHEMA4_COLUMNS,
-    COLUMNS, _digest, _export_csv, _export_db, _export_xlsx,
+    SCHEMA5_COLUMNS as EXCHANGE_SCHEMA5_COLUMNS, COLUMNS, _digest, _export_csv, _export_db, _export_xlsx,
     commit_library_import, export_library, parse_library_files, preview_library_import,
 )
 
@@ -31,7 +31,7 @@ def csv_bytes(columns, rows):
 def modern_rows():
     return {
         "works": [validate_values("works", {"作品ID":"W1", "作品":"测试书", "类别":"小说"})],
-        "characters": [validate_values("characters", {"人物ID":"P1", "角色":"甲", "角色定位":"主角"})],
+        "characters": [validate_values("characters", {"人物ID":"P1", "角色名":"甲", "角色定位":"主角"})],
         "cliches": [validate_values("cliches", {"clichéID":"C1", "cliché内容":"原始\r\n内容😀"})],
     }
 
@@ -40,11 +40,15 @@ def old_rows(version):
     if version == 3:
         fixtures = Path(__file__).parent / "fixtures"
         return {table:list(csv.DictReader(io.StringIO((fixtures/(table+".csv")).read_bytes().decode("utf-8-sig"), newline=""))) for table in TABLES}
-    return {table:[{column:row[column] for column in SCHEMA4_COLUMNS[table]} for row in rows] for table,rows in modern_rows().items()}
+    rows={table:[{column:"[]" if column in {"别名","关联作品","关联角色","关联cliché"} else "" for column in columns}] for table,columns in SCHEMA4_COLUMNS.items()}
+    rows["works"][0].update({"作品ID":"W1","作品":"测试书","类别":"小说"})
+    rows["characters"][0].update({"人物ID":"P1","角色":"甲","角色定位":"主角"})
+    rows["cliches"][0].update({"clichéID":"C1","cliché内容":"原始\r\n内容😀"})
+    return rows
 
 
 def portable(rows, version, fmt):
-    columns = {3:LEGACY_COLUMNS, 4:EXCHANGE_SCHEMA4_COLUMNS, 5:COLUMNS}[version]
+    columns = {3:LEGACY_COLUMNS, 4:EXCHANGE_SCHEMA4_COLUMNS, 5:EXCHANGE_SCHEMA5_COLUMNS,6:COLUMNS}[version]
     manifest = {
         "format":FORMAT, "format_version":FORMAT_VERSION,
         "schema_version":version, "bundle_id":"synthetic-old-library",
@@ -114,7 +118,7 @@ def test_classification_filters_apply_before_paging_and_facets_are_global(tmp_pa
     store.create_record("works",{"作品ID":"W1","作品":"第一部","类别":"小说"})
     store.create_record("works",{"作品ID":"W2","作品":"第二部","类别":"影视"})
     for index,role in enumerate(("主角","配角","主角"),1):
-        store.create_record("characters",{"人物ID":f"P{index}","角色":f"人物{index}","角色定位":role})
+        store.create_record("characters",{"人物ID":f"P{index}","角色名":f"人物{index}","角色定位":role})
     cases = [("强大","信息反转"),("共情","信息反转"),("强大","代价交换"),("强大","信息反转")]
     for index,(trait,mechanism) in enumerate(cases,1):
         store.create_record("cliches",{"clichéID":f"C{index}","cliché内容":f"桥段{index}","人设塑造":trait,"剧情机制":mechanism})
@@ -129,8 +133,7 @@ def test_classification_filters_apply_before_paging_and_facets_are_global(tmp_pa
     assert store.list_records("cliches",filters={"人设塑造":"共情"})["total"] == 1
     with pytest.raises(DataError,match="筛选值无效"):
         store.list_records("cliches",filters={"plot_mechanism":"A,B"})
-    with pytest.raises(DataError,match="不支持"):
-        store.list_records("characters",filters={"character_trait":"强大"})
+    assert store.list_records("characters",filters={"character_trait":"强大"})["total"] == 0
 
 
 @pytest.mark.parametrize("version",[3,4])
@@ -140,13 +143,15 @@ def test_old_portable_formats_upgrade_without_false_digest_warning(tmp_path,vers
     store = DataStore(tmp_path/"upgraded.db")
     batch,preview,_ = import_files(store,portable(rows,version,fmt))
     assert not [message for message in preview["warnings"] if "导出时不同" in message]
-    assert store.meta()["schema_version"] == 5
+    assert store.meta()["schema_version"] == 6
     for record in store.all_records("cliches"):
         assert record["values"]["人设塑造"] == record["values"]["剧情机制"] == ""
     if version == 4:
+        with store.connect() as db:
+            archived={(row["table_key"],row["record_id"]):json.loads(row["values_json"]) for row in db.execute("SELECT * FROM catalog_field_archive WHERE source_schema='4'")}
         for table,source in rows.items():
-            actual = store.all_records(table)
-            assert [{key:item["values"][key] for key in SCHEMA4_COLUMNS[table]} for item in actual] == source
+            id_field=TABLES[table]["id_field"]
+            assert [{key:archived[(table,row[id_field])][key] for key in SCHEMA4_COLUMNS[table]} for row in source] == source
         _,_,repeat = import_files(store,portable(rows,version,fmt),"update")
         assert repeat["updated"] == 0 and repeat["skipped"] == sum(map(len,rows.values()))
     _,_,restored = import_files(DataStore(tmp_path/"restore.db"),[("new.db",export_library(store,"db"))])
@@ -200,12 +205,12 @@ def test_schema4_persisted_database_upgrade_preserves_revisions_and_original_fie
     source = DataStore(path)
     item = source.create_record("cliches",{"clichéID":"C1","cliché内容":"原字\r\n😀"})
     with source.transaction() as connection:
-        connection.execute("DELETE FROM schema_migrations WHERE version=5")
-        connection.execute("UPDATE cliches SET values_json=? WHERE id='C1'",(json.dumps({key:item["values"][key] for key in SCHEMA4_COLUMNS["cliches"]},ensure_ascii=False),))
+        connection.execute("DELETE FROM schema_migrations WHERE version>=5")
+        connection.execute("UPDATE cliches SET values_json=? WHERE id='C1'",(json.dumps({key:item["values"].get(key,"[]" if key in {"关联作品","关联角色"} else "") for key in SCHEMA4_COLUMNS["cliches"]},ensure_ascii=False),))
     migrated = DataStore(path)
     result = migrated.get_record("cliches","C1")
     assert result["revision"] == item["revision"]
     assert result["values"] == item["values"]
     with migrated.connect() as connection:
-        assert [row[0] for row in connection.execute("SELECT version FROM schema_migrations ORDER BY version")] == [1,2,3,4,5]
+        assert [row[0] for row in connection.execute("SELECT version FROM schema_migrations ORDER BY version")] == [1,2,3,4,5,6]
     assert DataStore(path).get_record("cliches","C1") == result

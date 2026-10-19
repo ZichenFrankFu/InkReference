@@ -49,12 +49,15 @@ def test_materialization_commits_relationships_and_exact_evidence_once(services)
     assert store.stats() == {"works": 1, "characters": 1, "cliches": 1, "work_cliches": 1}
     work = store.get_record("works", result["work_id"])
     assert work["values"]["作品"] == "合成样本"
-    assert work["values"]["两句话概括"] == run["results"]["summary"]
+    assert work["values"]["剧情梗概"] == run["results"]["summary"]
     assert "剧情补充说明" not in work["values"]
     assert documents.get_document(run["document_id"])["work_id"] == result["work_id"]
     character = store.get_record("characters", result["character_ids"][0])
     assert json.loads(character["values"]["关联作品"])[0]["作品ID"] == result["work_id"]
-    assert character["values"]["角色"] == "林舟"
+    assert character["values"]["角色名"] == "林舟"
+    with store.connect() as db:
+        archived=json.loads(db.execute("SELECT values_json FROM catalog_field_archive WHERE record_id=? AND source_schema='legacy-extraction'",(character["id"],)).fetchone()[0])
+    assert archived == run["results"]["characters"][0]
     cliche = store.get_record("cliches", result["cliche_ids"][0])
     assert result["cliche_ids"][0] in work["values"]["关联cliché"]
     association = json.loads(cliche["values"]["关联作品"])[0]

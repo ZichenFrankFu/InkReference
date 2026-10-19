@@ -69,7 +69,7 @@ class Materializer:
                 work_id = "WAI" + digest("work")
                 work = {
                     "作品ID": work_id, "作品": document.get("title") or document.get("filename") or "未命名作品",
-                    "两句话概括": results.get("summary", ""),
+                    "剧情梗概": results.get("summary", ""),
                 }
                 self.store._insert_raw(connection, "works", work)
                 work = self.store._render(connection, "works", self.store._row(connection, "works", work_id))["values"]
@@ -87,10 +87,12 @@ class Materializer:
                     "版本": character_version(work.get("版本与原作关系", "")),
                     "角色": item["name"], "人物补充说明": item["description"],
                 } if not modern else {
-                    "人物ID": identifier, "角色": item["name"], "人物补充说明": item["description"],
+                    "人物ID": identifier, "角色名": item["name"],
                     "关联作品": json.dumps([{"作品ID": work_id}], ensure_ascii=False),
                 }
                 self.store._insert_raw(connection, "characters", values)
+                if modern:
+                    connection.execute("INSERT OR REPLACE INTO catalog_field_archive VALUES(?,?,?,?)",("characters",identifier,"legacy-extraction",json.dumps(item,ensure_ascii=False)))
                 if modern:
                     saved = self.store._render(connection, "characters", self.store._row(connection, "characters", identifier))["values"]
                     self.store._sync_modern_views(connection, "characters", identifier, {}, saved)

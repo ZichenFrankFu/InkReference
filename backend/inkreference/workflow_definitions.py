@@ -25,6 +25,8 @@ FIXED_WORKFLOW = {**copy.deepcopy(REFERENCE_WORKFLOW), "version": "2.0.0", "skil
                   "fixed_pipeline": True, "stage_prompts": {stage: "" for stage in FIXED_STAGES},
                   "stage_settings": {}, "stage_skills": {}, "stage_models": {}, "reuse_candidates": True,
                   "max_input_tokens": 64000, "budget_tokens": 800000}
+PROGRESS_WORKFLOW = {**copy.deepcopy(FIXED_WORKFLOW), "version": "3.0.0", "skill_version": "3.0.0",
+                     "chunk_chars": 100000, "max_input_tokens": 128000, "max_output_tokens": 12000}
 
 
 def validate_workflow(definition: Any) -> dict[str, Any]:
@@ -87,12 +89,16 @@ def validate_workflow(definition: Any) -> dict[str, Any]:
 
 class WorkflowStore(_VersionedDefinitions):
     def __init__(self, data_dir: str | Path):
-        super().__init__(data_dir, "workflow_definitions.sqlite3", validate_workflow(FIXED_WORKFLOW))
+        super().__init__(data_dir, "workflow_definitions.sqlite3", validate_workflow(PROGRESS_WORKFLOW))
         with self._db() as connection:
             connection.execute("CREATE TABLE IF NOT EXISTS layouts (workflow_id TEXT NOT NULL, workflow_version TEXT NOT NULL, revision INTEGER NOT NULL, layout_json TEXT NOT NULL, PRIMARY KEY(workflow_id,workflow_version))")
 
     def save(self, definition: dict[str, Any]) -> dict[str, Any]:
         """Save a new immutable version. retry_limit is *additional* attempts."""
+        if isinstance(definition, dict) and (definition.get("id"), definition.get("version")) == (FIXED_WORKFLOW["id"], FIXED_WORKFLOW["version"]):
+            if _dump(validate_workflow(definition)) != _dump(FIXED_WORKFLOW):
+                raise DataError(409, "内建版本不可修改；请使用新 ID 或新 version")
+            return self.get(FIXED_WORKFLOW["id"], FIXED_WORKFLOW["version"])
         if isinstance(definition, dict) and (definition.get("id"), definition.get("version")) == (REFERENCE_WORKFLOW["id"], REFERENCE_WORKFLOW["version"]):
             if _dump(validate_workflow(definition)) != _dump(REFERENCE_WORKFLOW):
                 raise DataError(409, "内建版本不可修改；请使用新 ID 或新 version")
@@ -105,6 +111,8 @@ class WorkflowStore(_VersionedDefinitions):
         return self._save_validated(validate_workflow(definition))
 
     def get(self, identifier: str | None = None, version: str | None = None) -> dict[str, Any]:
+        if identifier == FIXED_WORKFLOW["id"] and version == FIXED_WORKFLOW["version"]:
+            return copy.deepcopy(FIXED_WORKFLOW) | {"builtin": True}
         if identifier == REFERENCE_WORKFLOW["id"] and version == REFERENCE_WORKFLOW["version"]:
             return copy.deepcopy(REFERENCE_WORKFLOW) | {"builtin": True}
         if identifier == DEFAULT_WORKFLOW["id"] and version == DEFAULT_WORKFLOW["version"]:

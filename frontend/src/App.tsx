@@ -15,6 +15,7 @@ import {
   Sun,
   Wrench,
   SlidersHorizontal,
+  Sparkles,
 } from "lucide-react";
 import { Busy, Modal, Notice, PageActivityScope, PageNavigationScope, PageTitle } from "./ui";
 import { download } from "./api";
@@ -28,11 +29,13 @@ const Jobs = memo(lazy(() => import("./Jobs")));
 const ReferencePage = memo(lazy(() => import("./Jobs").then(module => ({ default: module.ReferencePage }))));
 const Workflows = memo(lazy(() => import("./Workflows")));
 const Models = memo(lazy(() => import("./Models")));
+const Research = memo(lazy(() => import("./Research")));
 const QuickRepair = lazy(() => import("./QuickRepair"));
 type Section =
   | "library"
   | "documents"
   | "reference"
+  | "research"
   | "jobs"
   | "workflows"
   | "models"
@@ -43,6 +46,7 @@ const sections: {
   icon: typeof BookOpen;
 }[] = [
   { id: "library", label: "作品库", icon: BookOpen },
+  { id: "research", label: "AI 更新", icon: Sparkles },
   {
     id: "documents",
     label: "文本清理",
@@ -138,7 +142,7 @@ export default function App() {
   useEffect(() => {
     const open = (event: Event) => {
       const incoming = (event as CustomEvent).detail;
-      if (!incoming || !["library", "documents", "reference", "jobs"].includes(incoming.section)) return;
+      if (!incoming || !["library", "documents", "reference", "jobs", "research"].includes(incoming.section)) return;
       const target = incoming.section === "jobs" && incoming.documentId ? { ...incoming, section: "reference" } : incoming;
       if (target.section === "jobs" && typeof target.runId === "string") setJobId(target.runId);
       // Keep the focus target until a lazy page has mounted and consumed it.
@@ -247,6 +251,8 @@ export default function App() {
                   <ReferencePage navigate={nav} />
                 ) : page === "jobs" ? (
                   <Jobs initialId={jobId} navigate={nav} />
+                ) : page === "research" ? (
+                  <Research navigate={nav} />
                 ) : page === "workflows" ? (
                   <Workflows />
                 ) : page === "models" ? (

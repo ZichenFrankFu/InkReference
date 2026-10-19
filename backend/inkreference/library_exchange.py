@@ -25,11 +25,11 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from .csvio import ImportBatch, ImportTable, _apply_import, _csv_bytes, _decode, _snapshot
-from .database import TABLES, LEGACY_TABLES, SCHEMA4_COLUMNS as CORE_SCHEMA4_COLUMNS, ASSOCIATIONS, modern_values, association_items, DataError, DataStore, character_version, parse_work_relations, record_id, validate_values
+from .database import TABLES, LEGACY_TABLES, SCHEMA4_COLUMNS as CORE_SCHEMA4_COLUMNS, SCHEMA5_COLUMNS as CORE_SCHEMA5_COLUMNS, ASSOCIATIONS, modern_values, association_items, DataError, DataStore, character_version, parse_work_relations, record_id, validate_values
 
 FORMAT = "InkReference material library"
 FORMAT_VERSION = 1
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 MAX_BYTES = 128 * 1024 * 1024
 MAX_EXPANDED_BYTES = 256 * 1024 * 1024
 MAX_ROWS = 200_000
@@ -39,8 +39,11 @@ RELATION_COLUMNS = ["work_id", "cliche_id", "detail", "work_position", "cliche_p
 MATERIAL_RELATION_COLUMNS = ["id", "source_table", "source_id", "target_table", "target_id", "relation_type", "description", "metadata_json"]
 COLUMNS = {**{key: list(spec["columns"]) for key, spec in TABLES.items()}, "material_relations": MATERIAL_RELATION_COLUMNS, "legacy_values": ["table_key","record_id","values_json"]}
 LEGACY_COLUMNS = {**{key:list(spec["columns"]) for key,spec in LEGACY_TABLES.items()}, "work_cliches":RELATION_COLUMNS,"material_relations":MATERIAL_RELATION_COLUMNS}
+SCHEMA5_COLUMNS = {**CORE_SCHEMA5_COLUMNS, "material_relations": MATERIAL_RELATION_COLUMNS, "legacy_values": ["table_key","record_id","values_json"]}
 SCHEMA4_COLUMNS = {**CORE_SCHEMA4_COLUMNS, "material_relations": MATERIAL_RELATION_COLUMNS, "legacy_values": ["table_key","record_id","values_json"]}
-LABELS = {**{key: spec["label"] for key, spec in TABLES.items()}, "work_cliches": "作品与桥段关联", "material_relations": "素材关联说明", "legacy_values":"旧版字段归档"}
+COLUMNS["catalog_field_archive"] = ["table_key","record_id","source_schema","values_json"]
+COLUMNS["character_contexts"] = ["character_id","work_id","document_id","extracted_character_id","character_json"]
+LABELS = {**{key: spec["label"] for key, spec in TABLES.items()}, "work_cliches": "作品与桥段关联", "material_relations": "素材关联说明", "legacy_values":"旧版字段归档", "character_contexts":"作品人物阶段状态", "catalog_field_archive":"历史字段归档"}
 LEGACY_NAMES = {"works": "works_library_v8.csv", "characters": "character_database_v8.csv", "cliches": "cliche_database_v8.csv"}
 CELL_REF = "__INKREFERENCE_TEXT__:"
 BAD_XML = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
@@ -126,11 +129,11 @@ def _zip_entries(data: bytes, *, xlsx: bool = False) -> dict[str, bytes]:
 def _manifest(value: Any) -> dict[str, Any]:
     if not isinstance(value,dict) or value.get("format") != FORMAT or value.get("format_version") != FORMAT_VERSION:
         raise DataError(422,"manifest.json / _manifest 不是受支持的 InkReference 素材库格式")
-    if value.get("schema_version") not in {3,4,5}:
-        raise DataError(422,f"素材库结构版本为 {value.get('schema_version')}，当前支持 3、4、5；请使用匹配版本应用重新导出全部表")
+    if value.get("schema_version") not in {3,4,5,6}:
+        raise DataError(422,f"素材库结构版本为 {value.get('schema_version')}，当前支持 3、4、5、6；请使用匹配版本应用重新导出全部表")
     if not isinstance(value.get("bundle_id"),str) or not value["bundle_id"] or not isinstance(value.get("tables"),dict):
         raise DataError(422,"格式信息缺少 bundle_id 或 tables")
-    columns = {3: LEGACY_COLUMNS, 4: SCHEMA4_COLUMNS, 5: COLUMNS}[value["schema_version"]]
+    columns = {3: LEGACY_COLUMNS, 4: SCHEMA4_COLUMNS, 5: SCHEMA5_COLUMNS, 6: COLUMNS}[value["schema_version"]]
     missing = set(TABLES) - set(value["tables"])
     extra = set(value["tables"]) - set(columns)
     if missing or extra:
@@ -211,7 +214,7 @@ def _parse_csv(batch: ExchangeBatch, files: list[tuple[str, bytes]]) -> None:
             if {"_bundle_id", "_schema_version"} & set(header):
                 batch.legacy = False
             plain = [field for field in header if field not in {"_bundle_id", "_schema_version"}]
-            matches = list(dict.fromkeys(table for specs in (COLUMNS,SCHEMA4_COLUMNS,LEGACY_COLUMNS) for table,columns in specs.items() if set(plain) == set(columns)))
+            matches = list(dict.fromkeys(table for specs in (COLUMNS,SCHEMA5_COLUMNS,SCHEMA4_COLUMNS,LEGACY_COLUMNS) for table,columns in specs.items() if set(plain) == set(columns)))
             if len(matches) != 1:
                 raise DataError(422, _header_error(filename, header))
             table = matches[0]
@@ -322,7 +325,7 @@ def _parse_xlsx(batch: ExchangeBatch, filename: str, data: bytes) -> None:
                 header = [cell.value for cell in next(iterator,[])]
                 if not header or any(not isinstance(column,str) or not column for column in header) or len(header) != len(set(header)):
                     raise DataError(422,f"{filename} / {sheet.title} 缺少有效表头或存在重复字段；请每个字段仅保留一列。")
-                matches = list(dict.fromkeys(table for specs in (COLUMNS,SCHEMA4_COLUMNS,LEGACY_COLUMNS) for table,columns in specs.items() if table in TABLES and set(header) == set(columns)))
+                matches = list(dict.fromkeys(table for specs in (COLUMNS,SCHEMA5_COLUMNS,SCHEMA4_COLUMNS,LEGACY_COLUMNS) for table,columns in specs.items() if table in TABLES and set(header) == set(columns)))
                 if len(matches) != 1:
                     raise DataError(422,_header_error(f"{filename} / {sheet.title}",header))
                 rows = []
@@ -408,6 +411,21 @@ def _parse_xlsx(batch: ExchangeBatch, filename: str, data: bytes) -> None:
 
 
 def _normalize_legacy_batch(batch: ExchangeBatch) -> None:
+    from .catalog_schema_v11 import is_current, project_values
+    if all(modern_values(item.table,row) for item in batch.tables for row in item.rows):
+        for item in batch.tables:
+            for row in item.rows:
+                if not is_current(item.table,row):
+                    versions=batch.relation_tables.setdefault("catalog_field_archive",[])
+                    source_schema=str(batch.manifest["schema_version"]) if batch.manifest else "5"
+                    if not any(a["table_key"]==item.table and a["record_id"]==record_id(item.table,row) and a["source_schema"]==source_schema for a in versions):versions.append({"table_key":item.table,"record_id":record_id(item.table,row),"source_schema":source_schema,"values_json":_json(row)})
+                    batch.filenames.setdefault("catalog_field_archive","历史字段归档（自动迁移）")
+                    archives=batch.relation_tables.setdefault("legacy_values",[])
+                    if not any(a["table_key"]==item.table and a["record_id"]==record_id(item.table,row) for a in archives):
+                        archives.append({"table_key":item.table,"record_id":record_id(item.table,row),"values_json":_json(row)})
+                    batch.filenames.setdefault("legacy_values","旧版字段归档（自动迁移）")
+            item.rows=[project_values(item.table,row) for row in item.rows]
+        return
     if not any(not modern_values(item.table,row) for item in batch.tables for row in item.rows):
         return
     if any(modern_values(item.table,row) for item in batch.tables for row in item.rows):
@@ -423,8 +441,15 @@ def _normalize_legacy_batch(batch: ExchangeBatch) -> None:
             for item in batch.tables:
                 item.rows = [record["values"] for record in store._all(connection,item.table)]
             archives = [dict(row) for row in connection.execute("SELECT * FROM legacy_values ORDER BY table_key,record_id")]
+            versions = [dict(row) for row in connection.execute("SELECT * FROM catalog_field_archive ORDER BY table_key,record_id,source_schema")]
+            for item in batch.tables:
+                for source in connection.execute("SELECT record_id,values_json FROM legacy_values WHERE table_key=?",(item.table,)):
+                    versions.append({"table_key":item.table,"record_id":source[0],"source_schema":"3","values_json":source[1]})
         batch.relation_tables.pop("work_cliches",None)
         batch.relation_tables["legacy_values"] = archives
+        if versions:
+            batch.relation_tables["catalog_field_archive"] = versions
+            batch.filenames["catalog_field_archive"] = "历史字段归档（自动迁移）"
         batch.filenames["legacy_values"] = "旧版字段归档（自动迁移）"
         # Digests belonged to old views; preserve all raw payloads in the archive.
         batch.manifest = None
@@ -438,6 +463,12 @@ def _validate_complete(batch: ExchangeBatch) -> None:
             _error(batch,f"缺少必要{'工作表' if batch.format == 'xlsx' else '表/文件'}：{item['label']}（{item['filename']}）。请同时选择作品、角色、桥段三张表。")
     if batch.errors:
         return
+    if batch.manifest:
+        for table,rows in {**{item.table:item.rows for item in batch.tables},**batch.relation_tables}.items():
+            info=batch.manifest["tables"][table]
+            original_view=[{column:row[column] for column in info["columns"]} for row in rows]
+            if info.get("sha256") != _digest(original_view) or info.get("rows") != len(rows):
+                batch.warnings.append(f"{batch.filenames[table]} 与导出时不同，可能经过编辑；请核对预览中的关联。")
     try:
         _normalize_legacy_batch(batch)
     except DataError as error:
@@ -493,12 +524,6 @@ def _validate_complete(batch: ExchangeBatch) -> None:
             if not isinstance(json.loads(row["values_json"]),dict): raise ValueError()
         except (ValueError,TypeError):
             _error(batch,"旧版字段归档 values_json 必须为 JSON 对象")
-    if batch.manifest:
-        for table,rows in {**{item.table:item.rows for item in batch.tables},**batch.relation_tables}.items():
-            info = batch.manifest["tables"][table]
-            original_view = [{column:row[column] for column in info["columns"]} for row in rows]
-            if info.get("sha256") != _digest(original_view) or info.get("rows") != len(rows):
-                batch.warnings.append(f"{batch.filenames[table]} 与导出时不同，可能经过编辑；请核对预览中的关联。")
 
 
 def parse_library_files(files: list[tuple[str, bytes]]) -> ExchangeBatch:
@@ -540,7 +565,7 @@ def parse_library_files(files: list[tuple[str, bytes]]) -> ExchangeBatch:
 def _relation_snapshot(connection: sqlite3.Connection) -> str:
     relations = {}
     names = {row[0] for row in connection.execute("SELECT name FROM sqlite_schema WHERE type='table'")}
-    for table in ("work_cliches", "material_relations", "library_links", "legacy_values"):
+    for table in ("work_cliches", "material_relations", "library_links", "legacy_values", "character_contexts", "catalog_field_archive"):
         if table in names:
             relations[table] = [dict(row) for row in connection.execute(f'SELECT * FROM "{table}" ORDER BY 1,2')]
     return hashlib.sha256(_json(relations).encode("utf-8")).hexdigest()
@@ -577,6 +602,27 @@ def _apply(store: DataStore, connection: sqlite3.Connection, batch: ExchangeBatc
         previous = connection.execute("SELECT values_json FROM legacy_values WHERE table_key=? AND record_id=?",(row["table_key"],row["record_id"])).fetchone()
         if previous is None or policy == "update":
             connection.execute("INSERT INTO legacy_values VALUES (?,?,?) ON CONFLICT(table_key,record_id) DO UPDATE SET values_json=excluded.values_json",(row["table_key"],row["record_id"],row["values_json"]))
+    for row in batch.relation_tables.get("catalog_field_archive",[]):
+        if row["table_key"] not in TABLES:raise DataError(422,"历史归档数据表无效")
+        store._row(connection,row["table_key"],row["record_id"])
+        if not isinstance(json.loads(row["values_json"]),dict):raise DataError(422,"历史字段归档必须为 JSON 对象")
+        previous=connection.execute("SELECT 1 FROM catalog_field_archive WHERE table_key=? AND record_id=? AND source_schema=?",(row["table_key"],row["record_id"],row["source_schema"])).fetchone()
+        if previous is None or policy=="update":connection.execute("INSERT OR REPLACE INTO catalog_field_archive VALUES(?,?,?,?)",(row["table_key"],row["record_id"],row["source_schema"],row["values_json"]))
+    for row in batch.relation_tables.get("character_contexts",[]):
+        for table,key in (("characters","character_id"),("works","work_id")):
+            store._row(connection,table,row[key])
+        from .character_contract import normalize_character
+        normalized=normalize_character(json.loads(row["character_json"]))
+        if normalized["id"]!=row["extracted_character_id"]: raise DataError(422,"人物阶段状态的提取 ID 不一致")
+        previous=connection.execute("SELECT * FROM character_contexts WHERE character_id=? AND work_id=?",(row["character_id"],row["work_id"])).fetchone()
+        document_id=row["document_id"] or None
+        if previous is not None and previous["document_id"]:
+            if previous["extracted_character_id"]!=row["extracted_character_id"] or document_id and document_id!=previous["document_id"]:
+                raise DataError(409,"导入的人物来源与已有正文绑定不同，请先在人物资料中重新绑定来源")
+            document_id=previous["document_id"]
+        same=previous is not None and previous["document_id"]==document_id and previous["extracted_character_id"]==row["extracted_character_id"] and json.loads(previous["character_json"])==normalized
+        if not same and (previous is None or policy=="update"):
+            connection.execute("INSERT INTO character_contexts VALUES(?,?,?,?,?,?) ON CONFLICT(character_id,work_id) DO UPDATE SET document_id=excluded.document_id,extracted_character_id=excluded.extracted_character_id,character_json=excluded.character_json,revision=excluded.revision",(row["character_id"],row["work_id"],document_id,row["extracted_character_id"],_json(normalized),previous["revision"]+1 if previous else 1))
     return {**result, **relation_counts}
 
 
@@ -597,6 +643,10 @@ def preview_library_import(store: DataStore, batch: ExchangeBatch) -> dict[str, 
             for table, rows in batch.relation_tables.items():
                 if table == "material_relations":
                     existing = sum(source.execute("SELECT 1 FROM material_relations WHERE id=?", (row["id"],)).fetchone() is not None for row in rows)
+                elif table == "catalog_field_archive":
+                    existing = sum(source.execute("SELECT 1 FROM catalog_field_archive WHERE table_key=? AND record_id=? AND source_schema=?",(row["table_key"],row["record_id"],row["source_schema"])).fetchone() is not None for row in rows)
+                elif table == "character_contexts":
+                    existing = sum(source.execute("SELECT 1 FROM character_contexts WHERE character_id=? AND work_id=?",(row["character_id"],row["work_id"])).fetchone() is not None for row in rows)
                 elif table == "legacy_values":
                     existing = sum(source.execute("SELECT 1 FROM legacy_values WHERE table_key=? AND record_id=?",(row["table_key"],row["record_id"])).fetchone() is not None for row in rows)
                 else:
@@ -637,9 +687,18 @@ def commit_library_import(store: DataStore, batch: ExchangeBatch, policy: str = 
 def _collect(store: DataStore) -> tuple[dict[str, list[dict[str, str]]], dict[str, Any]]:
     with store.connect() as connection:
         connection.execute("BEGIN")
-        rows = {table: [item["values"] for item in store._all(connection, table)] for table in TABLES}
+        from .catalog_schema_v11 import project_values
+        rows = {table: [item.get("catalog_values",project_values(table,item["values"])) for item in store._all(connection, table)] for table in TABLES}
+        rows["catalog_field_archive"] = [dict(row) for row in connection.execute("SELECT * FROM catalog_field_archive ORDER BY table_key,record_id,source_schema")]
+        if not rows["catalog_field_archive"]:rows.pop("catalog_field_archive")
+        rows["character_contexts"] = [{column:str(row[column] or '') for column in COLUMNS["character_contexts"]} for row in connection.execute("SELECT * FROM character_contexts ORDER BY character_id,work_id")]
+        if not rows["character_contexts"]: rows.pop("character_contexts")
         rows["material_relations"] = [{column: str(row[column]) for column in MATERIAL_RELATION_COLUMNS} for row in connection.execute("SELECT * FROM material_relations ORDER BY id")]
         rows["legacy_values"] = [dict(row) for row in connection.execute("SELECT * FROM legacy_values ORDER BY table_key,record_id")]
+        for table in TABLES:
+            for item in store._all(connection,table):
+                if set(item["values"]) != set(COLUMNS[table]) and not any(a["table_key"]==table and a["record_id"]==item["id"] for a in rows["legacy_values"]):
+                    rows["legacy_values"].append({"table_key":table,"record_id":item["id"],"values_json":_json(item["values"])})
         if not rows["material_relations"]: rows.pop("material_relations")
         if not rows["legacy_values"]: rows.pop("legacy_values")
     total_text_bytes = 0

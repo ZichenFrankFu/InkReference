@@ -26,15 +26,17 @@ BROWSER_HINT = r".\scripts\open.ps1 -Browser"
 
 LOADING_HTML = """<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>InkReference</title>
-<style>html,body{height:100%;margin:0}body{display:grid;place-items:center;background:#f4f2ec;
-color:#243934;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Microsoft YaHei UI',sans-serif}.card{width:min(440px,74vw);
-padding:48px;border-radius:24px;background:#fffdfa;box-shadow:0 16px 64px #233c3210}
-.mark{display:grid;place-items:center;width:48px;height:48px;border-radius:14px;background:#275d50;
-color:white;font:700 28px Georgia,serif}.name{font-size:13px;letter-spacing:2px;color:#668078;margin:24px 0 10px}
-h1{font-size:25px;font-weight:600;line-height:1.5;margin:0 0 12px}p{font-size:14px;line-height:1.8;color:#78867e}
-.track{overflow:hidden;height:5px;border-radius:4px;background:#e6ece5;margin-top:30px}
-.bar{width:35%;height:100%;background:#759576;border-radius:4px;animation:move 1.5s ease-in-out infinite}
+<style>html,body{height:100%;margin:0}body{display:grid;place-items:center;background:#f5f7fd;
+color:#202b43;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Microsoft YaHei UI',sans-serif}.card{width:min(440px,74vw);
+padding:48px;border-radius:24px;background:#fff;box-shadow:0 16px 64px #18357210}
+.mark{display:grid;place-items:center;width:48px;height:48px;border-radius:14px;background:#3268e8;
+color:white;font:700 28px Georgia,serif}.name{font-size:13px;letter-spacing:2px;color:#66738d;margin:24px 0 10px}
+h1{font-size:25px;font-weight:600;line-height:1.5;margin:0 0 12px}p{font-size:14px;line-height:1.8;color:#73809a}
+.track{overflow:hidden;height:5px;border-radius:4px;background:#e5ecfc;margin-top:30px}
+.bar{width:35%;height:100%;background:#3268e8;border-radius:4px;animation:move 1.5s ease-in-out infinite,breathe 1.5s ease-in-out infinite}
 @keyframes move{0%{transform:translateX(-110%)}100%{transform:translateX(390%)}}
+@keyframes breathe{0%,100%{opacity:.5}50%{opacity:1}}
+@media(prefers-color-scheme:dark){body{background:#111827;color:#e6edff}.card{background:#192237;box-shadow:0 16px 64px #07101f50}.name,p{color:#98a8c6}.track{background:#273552}.bar,.mark{background:#6892ff}}
 @media(prefers-reduced-motion:reduce){.bar{animation:none;margin-left:32%}}</style></head>
 <body><main class="card"><div class="mark">I</div><div class="name">INKREFERENCE</div>
 <h1>正在打开素材库</h1><p>正在启动本地服务</p>
@@ -178,7 +180,7 @@ def run_desktop(server, listener, url: str) -> int:
     try:
         window = webview.create_window(
             "InkReference", html=LOADING_HTML, width=1440, height=920,
-            min_size=(1024, 680), background_color="#f4f2ec", text_select=True,
+            min_size=(1024, 680), background_color="#f5f7fd", text_select=True,
         )
         window.events.closed += on_closed
         worker = threading.Thread(target=serve, name="inkreference-http", daemon=True)

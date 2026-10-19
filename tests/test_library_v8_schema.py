@@ -9,7 +9,7 @@ import pytest
 from openpyxl import Workbook
 
 from inkreference.csvio import export_legacy_zip, parse_files, preview_import, commit_import
-from inkreference.database import DataError, DataStore, TABLES, validate_values
+from inkreference.database import DataError, DataStore, TABLES, SCHEMA5_COLUMNS, validate_values
 from inkreference.library_exchange import parse_library_files, preview_library_import, commit_library_import, export_library
 
 
@@ -19,8 +19,9 @@ def j(value):
 
 def table_bytes(table, rows):
     stream = io.StringIO(newline="")
-    writer = csv.DictWriter(stream,fieldnames=TABLES[table]["columns"])
-    writer.writeheader(); writer.writerows([validate_values(table,row) for row in rows])
+    columns=SCHEMA5_COLUMNS[table]
+    writer = csv.DictWriter(stream,fieldnames=columns)
+    writer.writeheader(); writer.writerows([validate_values(table,{column:row.get(column,"[]" if column in {"别名","关联作品","关联角色","关联cliché"} else "") for column in columns}) for row in rows])
     return stream.getvalue().encode("utf-8-sig")
 
 
@@ -60,7 +61,7 @@ def test_three_table_exact_roundtrip_multiverse_metadata(tmp_path,fmt):
     assert json.loads(character["values"]["关联作品"])[1]["人物设定"]["开场身份"] == "学生"
     if fmt == "csv":
         with zipfile.ZipFile(io.BytesIO(data)) as archive:
-            assert set(archive.namelist()) == {"works.csv","characters.csv","cliches.csv","manifest.json"}
+            assert set(archive.namelist()) == {"works.csv","characters.csv","cliches.csv","legacy_values.csv","catalog_field_archive.csv","manifest.json"}
     rev = character["revision"]
     assert not preview_library_import(target,batch)["errors"]
     assert commit_library_import(target,batch,"update")["skipped"] == 5
@@ -81,7 +82,10 @@ def test_edit_seen_relation_metadata_and_delete_work_keeps_shared_character(tmp_
     person = store.get_record("characters","P1")
     assert json.loads(person["values"]["关联作品"]) == [{"作品ID":"W2","人物设定":{"开场身份":"学生","后续能力":"第一章"},"自定义":{"章节":1}}]
     assert all(item.get("作品ID") != "W1" for item in json.loads(person["values"]["关联cliché"]))
-    assert store.get_record("cliches","C1")["values"]["命中热度合计"] == "7"
+    assert "命中热度合计" not in store.get_record("cliches","C1")["values"]
+    with store.connect() as db:
+        archived=json.loads(db.execute("SELECT values_json FROM catalog_field_archive WHERE table_key='cliches' AND record_id='C1' AND source_schema='5'").fetchone()[0])
+    assert archived["命中热度合计"] == "7"
     with store.connect() as connection:
         assert not connection.execute("PRAGMA foreign_key_check").fetchall()
 

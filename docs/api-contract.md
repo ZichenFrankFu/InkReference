@@ -52,7 +52,7 @@ Local diagnostics record request route/method/status/duration and exception type
 ## Common types
 - `Record`: `{id: string, values: Record<string,string>, revision: number}`.
 - `TableMeta`: `{key: string, label: string, id_field: string, columns: string[], count: number}`.
-- `GET /api/meta`: `{tables: TableMeta[], version: string, schema_version:5}`.
+- `GET /api/meta`: `{tables: TableMeta[], version: string, schema_version:6}`.
 - `GET /api/stats`: `{works: number, characters: number, cliches: number, work_cliches: number}`.
 - `GET /api/health`: `{status: "ok", version: string}`.
 
@@ -81,13 +81,13 @@ Revision checks and tombstones prevent stale edits and ID-reuse conflicts. Assoc
 
 ## Complete material-library exchange
 
-DB, CSV and XLSX carry the same catalog dataset. Format version 1 / exchange schema version 5 uses the three core tables `works,characters,cliches`; optional `material_relations` and `legacy_values` tables are included only when they contain data. The app's internal SQLite migration version is also 5 but is a separately managed contract. Schema 3 and 4 portable packages remain importable through migration; schema 4's two absent cliche classifications become empty strings. Original schema-specific columns and hashes are checked before the normalized current view is compared or written.
+DB, CSV and XLSX carry the same catalog dataset. Format version 1 / exchange schema version 6 uses the three core tables `works,characters,cliches`; optional `material_relations`, `legacy_values`, `catalog_field_archive` and `character_contexts` tables are included only when they contain data. The app's internal SQLite migration version is also 6 but is a separately managed contract. Schema 3, 4 and 5 portable packages remain importable through migration; schema 4's two absent cliche classifications become empty strings. Original schema-specific columns and hashes are checked before the normalized current view is compared or written.
 
 Modern core columns are exposed by `/api/meta` and `/api/library/formats`. Works use `作品ID`, characters use `人物ID`, cliches use a separate `clichéID`. Association columns hold JSON arrays of IDs or structured objects; object fields and relationship content are preserved. `library_links` and `work_cliches` are derived indexes/compatibility views and are not required extra files in a new package. Optional `material_relations` columns are `id,source_table,source_id,target_table,target_id,relation_type,description,metadata_json`; `legacy_values` columns are `table_key,record_id,values_json` and retain the visible pre-migration field snapshots, including legacy relationship fields rendered from their authoritative relation table. Modern edits do not rewrite that migration snapshot.
 
 | Endpoint | Contract |
 |---|---|
-| `GET /api/library/formats` | `{default:"db",schema_version:5,tables,formats,legacy_csv,guidance}`. Each table declaration includes its exact columns, suggested filename and `required` flag; only the three core tables are always required. |
+| `GET /api/library/formats` | `{default:"db",schema_version:6,tables,formats,legacy_csv,guidance}`. Each table declaration includes its exact columns, suggested filename and `required` flag; only the three core tables are always required. |
 | `POST /api/library/import/preview` | Multipart `files`. Accepts one portable `.db` / `.sqlite` / `.sqlite3`, a complete CSV ZIP, the three raw modern CSVs together, a complete set of exported CSVs plus manifest, one `.xlsx`, or a complete legacy v8 triplet. Raw CSV classification uses exact headers rather than filenames. Returns `{batch_id,tables,errors,warnings,stats,format,schema_version,bundle_id,legacy,required_tables,guidance}`. Required entries identify `table,label,filename,present`; errors disable commit. |
 | `POST /api/library/import/commit` | `{batch_id,policy:"skip"\|"update"\|"error"}` → `{imported,updated,skipped,relations_imported,relations_updated,relations_skipped,stats}`. One transaction covers every material, declared relationship and retained auxiliary row. Material revisions and relation snapshots must still match preview, otherwise 409. |
 | `GET /api/library/export?format=db\|csv\|xlsx` | Defaults to DB. Downloads `InkReference-library.db`, `InkReference-library-csv.zip`, or `InkReference-library.xlsx`; all three contain the same core/actually-present auxiliary tables and manifest. |
@@ -255,7 +255,7 @@ Volume range numbers are **one-based ordinals in the immutable real chapter list
 
 ## Rich reference analysis and section review
 
-`GET /documents/{id}/reference` returns `{document_id,revision,structure_type,sections,updated_at,commits}`. The initial analysis revision is 0. `structure_type` is `narrative` or `setting_collection`. Object sections are `plot,style,rhythm,opening,era_background`; array sections are `characters,settings,setting_features,raw_entries`. New fixed tasks use content Schema 2 described below; legacy nested `epochs → periods → events`, chapter-tagged character facts and setting updates remain readable without destructive conversion. `raw_entries` have `{title,content}`. Ratio metrics and chapter information density are numbers in `[0,1]`.
+`GET /documents/{id}/reference` returns `{document_id,revision,structure_type,sections,updated_at,commits}`. The initial analysis revision is 0. `structure_type` is `narrative` or `setting_collection`. Object sections are `plot,style,rhythm,opening,era_background`; array sections are `characters,settings,setting_features,raw_entries`. New fixed tasks use content Schema 3 described below; legacy nested `epochs → periods → events`, chapter-tagged character facts and setting updates remain readable without destructive conversion. `raw_entries` have `{title,content}`. Ratio metrics and chapter information density are numbers in `[0,1]`.
 
 | Endpoint | Request and behavior |
 |---|---|
@@ -275,7 +275,7 @@ Volume range numbers are **one-based ordinals in the immutable real chapter list
 
 The GUI uses summary-only global task lists and selected-work summaries; historical deep links fetch their own summary. Full candidates are loaded only for the selected task/explicit segment view or the selected approved legacy-source run, not for every historical task. V2 full-book analysis reads persisted sections/projection without candidate hydration.
 
-The HTTP default workflow/Skill is `default@2.0.0` / `unified-reference@2.0.0`. A manual job uses `{document_id,version_id,workflow_id:"default",workflow_version:"2.0.0",manual:true,start:false}` without a profile. The runner completes the full selected source range in `plot → characters → settings → language` stage order; each source chunk is covered once within each stage. Manual prompts/pastes use the same stage contracts, without automatic provider requests. Provider jobs require fixed default/stage model snapshots and endpoint/model consent checks. `expected_stage_fingerprints` maps each remote overridden stage to its selected profile target fingerprint; a missing confirmation is 428 and a changed target is 409, before creating the job or sending text. A single `remote_consent:true` covers the full displayed target set. Start/resume checks each actual stage target against its snapshot before invocation; endpoint/model edits cannot redirect an existing job. Historical `1.0.0` and `1.1.0` declarations and snapshots remain immutable and explicitly addressable.
+The HTTP default workflow/Skill is `default@3.0.0` / `unified-reference@3.0.0`. A manual job uses `{document_id,version_id,workflow_id:"default",workflow_version:"3.0.0",manual:true,start:false}` without a profile. The runner completes the full selected source range in `plot → characters → settings → language` stage order; each source chunk is covered once within each stage. Manual prompts/pastes use the same stage contracts, without automatic provider requests. Provider jobs require fixed default/stage model snapshots and endpoint/model consent checks. `expected_stage_fingerprints` maps each remote overridden stage to its selected profile target fingerprint; a missing confirmation is 428 and a changed target is 409, before creating the job or sending text. A single `remote_consent:true` covers the full displayed target set. Start/resume checks each actual stage target against its snapshot before invocation; endpoint/model edits cannot redirect an existing job. Historical `1.0.0`, `1.1.0` and `2.0.0` declarations and snapshots remain immutable and explicitly addressable.
 
 The 1.1 output retains `summary,characters,events,cliches` and adds optional `reference:{plot,characters,settings,style,rhythm,opening,setting_features}`. The schema's authoritative declarations remain in `/skills/unified-reference/versions/1.1.0`; old `1.0.0` definitions remain immutable. Model-derived rich character/setting/event/feature facts need contiguous, nonempty original `evidence`. A native upstream-shaped human paste may instead contain `events,characters,settings,style` directly and is kept as an explicitly reviewed reference candidate; it does not silently create v8 material facts lacking evidence. Supplied evidence must still be exact. Core v8 material approval (`/jobs/{id}/approve`) and work-level section approval (`/chunks/{id}/commit`) remain separate operations.
 
@@ -298,9 +298,87 @@ Routes are relative to `/api/studio`. Document metadata adds `book_title,author,
 
 Dates retain supplied year/month/day precision; unknown earliest update is null and is never filled with import time. Explicit source frontmatter can supply book title, author and first-update date; user-supplied metadata takes precedence. Files are recoverable current-version projections, not an external editing API. SQLite commits before atomic manifest publication; failed publication is rebuildable. Full project backups omit this redundant projection and reconstruct it in the independent restored directory. Originals, retained text versions and approved facts stay authoritative.
 
-## Fixed analysis contract, content Schema 2
+## Catalog Schema 6 and shared characters
 
-This content version is independent of main-library schema 5 and exchange format 1. Canonical definitions are in `chronicle_schema.py`; `canonical_stage_schema(stage)` rejects missing/unknown fields, invalid enum/type and unresolved references. Stage Skills use `contract_version:2` and the canonical output schema unchanged. Prompt content can be customized; output fields cannot. Workflow versions preserve `fixed_pipeline:true` and all fixed nodes enabled. Stage options are `stage_prompts`, `stage_settings[stage]{max_output_tokens,budget_tokens}`, `stage_skills[stage]{id,version}` and optional `stage_models[stage]:profile_id`. An absent/cleared model override inherits the task model. Creation resolves immutable default/stage model snapshots and `stage_model_fingerprints`; manual tasks use the manual profile without invoking overrides. `reuse_candidates` is a boolean, default true. The default fixed definition uses `chunk_chars:4000,max_input_tokens:64000,max_output_tokens:6000,budget_tokens:800000`.
+Current core columns are exactly `catalog_schema_v11.COLUMNS`. Works replace `两句话概括` with `剧情梗概`, add `讨论热度` and `商业规模`, and retain `热度权重` for legacy compatibility. Characters expose `人物ID,角色名,别名,角色定位,性格基调,视觉元素设计,初始状态,阶段状态,关联作品,关联cliché`; aliases and states are JSON strings in portable tables. Character identity and snapshots use the same Schema-3 `character_contract.py` business contract as reference extraction. Cross-work snapshots are isolated by `(character_id,work_id)` rather than copied between works based on name. The first import/binding is explicit; bound reference edits and catalog context edits synchronize transactionally with independent revision checks.
+
+Cliches expose `clichéID,cliché内容,cliché评分,关联作品,关联角色,人设塑造,剧情机制`. The score is computed as `100 * sum(heat of unique matched works) / sum(heat of all unique catalog works)`. `heat` is the mean of discussion and market components; a component can be a finite 1–10 number or `{min,max,source_ids?,rationale?}` JSON with 1 <= min <= max <= 10, using its midpoint. Missing components use 1; a valid old single heat remains a compatibility fallback. Record responses include `computed:{cliche_score,matched_work_count,total_work_count,missing_heat_count,formula}`. These implementation counts explain the formula; the GUI presents the score rather than the removed prevalence/hit metrics. This is catalog-weighted prevalence, not a measured global-web probability. Character–cliche maps maintain reverse links without duplicate related cards.
+
+Raw v8 and portable schemas 3/4/5 remain importable. Original headers and schema-specific digests are validated before migration. `legacy_values` preserves the original v8 snapshot; `catalog_field_archive` preserves later removed schema-4/5 fields without overwriting that first archive. Schema-6 exports include optional archives/character contexts when present; omitted optional tables do not imply lost required main tables. User edits do not recreate removed fields as current columns.
+
+### Character identity/context bridge
+
+| Endpoint | Request / response |
+|---|---|
+| `GET /api/library/revision` | `{revision:string}` catalog snapshot hash for cross-table operations. |
+| `GET /api/library/characters/{id}/contexts` | `{character_id,catalog_revision,contexts:[{character_id,work_id,document_id,extracted_character_id,revision,character,reference_revision,characters,events,source_available,missing_source}]}`; selectable relationship/event targets come from the bound reference. |
+| `PUT /api/library/characters/{id}/contexts/{work_id}` | `{character,expected_revision,expected_catalog_revision,expected_reference_revision?}`; validates the shared character contract and updates bound reference/context atomically. |
+| `GET /api/studio/documents/{id}/reference/characters/catalog` | `{catalog_revision,links:[{extracted_character_id,character_id,work_id}]}`. |
+| `POST /api/studio/documents/{id}/reference/characters/{extracted_id}/catalog` | `{character_id?,expected_reference_revision,expected_catalog_revision}`; explicitly creates/imports or binds an existing catalog identity. A colliding existing ID requires an explicit reuse target. |
+| `POST /api/studio/documents/{id}/reference/preview` | `{sections,source_version_id?}` → `{sections}` as a Schema-3 projected copy; reads referenced source versions but writes no fact/history revision. |
+
+All update bodies reject extra fields, apply revision checks and preserve per-work contexts. Import first requires the document's explicit linked work ID. The full-text parser's absolute IDs and source proof remain available internally; UI simplification never removes the source audit. Portable catalogs retain original document/extracted IDs and exact character JSON even when the source document is absent. Such contexts report `source_available:false,missing_source:true`; reads do not create empty reference states, and offline context edits update catalog snapshots without modifying a nonexistent source. A present source with a mismatched work/character binding returns 409 and requires explicit rebinding. Full linked-source migration uses a complete project backup.
+
+## Current fixed analysis contract, content Schema 3
+
+Main-library schema 6, portable format 1 and analysis content schema 3 are independent contracts. `canonical_stage_schema(stage,version=3)` is the default; provider schemas require internal source proof. Skills carry `contract_version:3` and cannot alter the canonical output shape. Uploaded JSON/Markdown/ZIP may customize prompt content, and `/skills/upload?contract_version=3` rejects a mismatched contract before saving. Each stage override must match the main Skill's contract. Explicit v2 Skills/prompts remain byte-for-byte compatible with their earlier stage contracts and cannot be mixed into a v3 run.
+
+| Stage | Required result sections |
+|---|---|
+| `plot` | `{plot:{schema_version:3,logline,events,plotlines}}` |
+| `characters` | `{characters:[CharacterV3]}` |
+| `settings` | `{settings:[SettingV3]}` |
+| `language` | `{style:StyleV3,rhythm:RhythmV3,opening:OpeningV3,era_background:EraV3}` |
+
+| Record | Business fields |
+|---|---|
+| Event | `id,name,theme,description,narrative_progress,story_time,participants,setting_ids,causes,results,plotline_ids,volume`; flat events, no epochs/periods containers |
+| Character | `schema_version:3,id,name,aliases,role_tag,temperament,visual_design,initial_state,snapshots` |
+| Initial state | `gender:null|男|女|特殊,age,identity,ability,personality,appearance,relationships,narrative_progress,story_time` |
+| Character snapshot | `id,narrative_range:{start,end:null|number},story_time,event_ids,identity,ability,personality,appearance,visual_design,relationships` |
+| Relationship | `{character_id,relationship}`; target ID must resolve |
+| Setting | `schema_version:3,id,title,category,content,earlier_setting_id:null|ID,narrative_progress,story_time,snapshots` |
+| Setting snapshot | `id,narrative_range,story_time,event_ids,content`; appended setting ancestry must resolve and be acyclic |
+| Era item | `id,kind:meme|real_world_event,title,content,approximate_time,appearances` |
+| Era appearance | `narrative_progress,story_time,event_ids,character_ids,context,usage:dialogue|thought|narration|reference` |
+
+Temperament is one value from `强大,智谋,利他,共情,利己,执念,反差,宿命`, or empty when unsupported. All narrative progress values use 0–100. A state's end may be null while ongoing; an end before its start is invalid. Story time is a free-form explicit source string or null, without an exposed sort key. Provider facts additionally require internal `{revealed_at:{chapter,offset},source_version_id,evidence}`; local chunk offsets become absolute source offsets, source IDs are bound to the fixed version and exact continuous quotes are verified. The runner derives narrative progress from exact source position: parsed chapter ordinal / chapter count, otherwise non-whitespace body-character position / total. Provider guesses are not authoritative. Human business records may omit source proof; they retain manual origin and are never disguised as model-proven source facts.
+
+`GET /documents/{id}/reference/projection?schema_version=3&progress=0..100` returns a read-only as-of view; the legacy `chapter=N` scope remains supported. Full projection includes `plot.views.{story,narrative}`, event-derived book/volume outlines and current snapshots. Narrative order follows progress plus source offset; explicit comparable calendar dates reorder in story view, while unknown/relative dates retain their narrative slots. No dates are invented. Projection-only fields must not be persisted as canonical records. Legacy source sections are adapted for compatible reading with preserved originals, not re-extracted by a hidden model call.
+
+The v3 default is `chunk_chars:100000,max_input_tokens:128000,max_output_tokens:12000,budget_tokens:800000`. Actual chunks remain bounded by every selected stage model, its output reserve, complete schema/system prompt and bounded entity memory. Saved volume boundaries limit chapter groups; over-budget volumes split by whole chapters, then long chapters by paragraphs without truncation or source overlap. `snapshots.contract_version`, `document.volumes`, `document.progress_chapters`, `document.body_characters` and `snapshots.chunk_groups[{chunk_id,start,end,volume,start_chapter,end_chapter,body_characters_before}]` make the coarse display groups reproducible. Every stage covers all fixed source chunks; larger groups reduce repeated prompt overhead without promising a universal token-saving ratio. Cache hashes explicitly include contract version; v2 and v3 cannot share cache entries.
+
+Language retains writer-facing deterministic sentence/paragraph/punctuation metrics separately from semantic style and plot judgments. Era frequency derives approved appearances, not search popularity; only meme dialogue/thought counts toward per-character play frequency, with zero-use characters included in the average. No reliable approximate time means an empty value. The UI omits the old end-date, precision and verification-status fields. Real-world origin/date correctness still requires review.
+
+## Reviewed web research and semantic deduplication
+
+Routes below are relative to `/api/studio/research`. Services initialize lazily. This is a separate source-research flow for catalog metadata, never a replacement for uploaded text cleaning/extraction.
+
+| Endpoint | Request / behavior |
+|---|---|
+| `GET /settings` | Search provider config plus `key_available,target_fingerprint`; no API key returned. |
+| `PUT /settings` | `{provider:tavily|brave|searxng,endpoint?,credential_mode:session|vault|environment,key_env?,api_key?}`; credentials reuse the OS/session/environment boundary. |
+| `GET /targets?model_profile_id=...&embedding_profile_id=...&embedding_model=...` | Fixed model, embedding and search endpoints/models and fingerprints for the single start confirmation. |
+| `POST /jobs` | `{title,author,model_profile_id,embedding_profile_id,embedding_model?,message?,target_work_id?,remote_consent,expected_fingerprints,start?}`; name/author required, `start` defaults true. Fingerprints must match model/embedding/search targets; missing consent returns 428, changed target 409. |
+| `GET /jobs` | At most 100 lightweight history summaries, no source/draft/vector hydration. |
+| `GET /jobs/{id}` | Revision, status, stage, messages, sources, draft, semantic matches, progress, work matches, catalog revision and usage; detail loads only on demand. |
+| `POST /jobs/{id}/chat` | `{message,expected_revision}`; appends a request and reruns draft/matching from retained sources. |
+| `PUT /jobs/{id}/draft` | `{draft,expected_revision}`; validates manual edits and reruns semantic matching before approval. |
+| `POST /jobs/{id}/start` or `/resume` | Continues explicit work from retained successful stages, checking fixed targets. |
+| `POST /jobs/{id}/cancel` | Requests cancellation; completed responses remain reusable. |
+| `POST /jobs/{id}/approve` | `{expected_revision,expected_catalog_revision,decisions:{work_id?,allow_new_edition?,characters,cliches}}`; atomic catalog update, idempotent by job ID. |
+
+The real LangGraph is `search → fetch → draft → dedup → review`. Tavily/Brave use their search API credentials; SearXNG requires JSON search support. Remote search endpoints use HTTPS, with explicit loopback HTTP allowed for local SearXNG. Up to ten pages are fetched independently with size/redirect/public-network restrictions, script stripping and bounded excerpts. A source's read status proves retrieval, not semantic truth. Identity confirmation must be backed by successfully read sources containing both the work title and author. Same title/author already in the library requires an explicit update target or independently confirmed edition, not automatic title merging.
+
+The draft holds `identity,work,characters,cliches,warnings`. Job details also return `character_matches`: same-work normalized name/alias matches support explicit reuse decisions; no cross-work character is silently merged. It includes at most the protagonist, one source-supported popular supporting character and three cliche candidates. Each entry cites retained source IDs; unsupported global top rankings are warnings, not claims of verified popularity. Work discussion and commercial scores are 1–10 min/max ranges with source IDs and a rationale, or null when evidence is insufficient. Users edit and approve before any catalog write; full texts and narrative-extraction results are untouched.
+
+Embeddings are real OpenAI-compatible `/embeddings` or Ollama `/api/embed` calls using a selected saved connection and optional embedding-model override. Invalid/missing vectors fail instead of falling back to lexical similarity. The bounded cache keys vectors by content hash plus endpoint/model fingerprint (at most 50000 rows); exact cosine search returns the top five existing candidates. Similarity >=0.90 recommends reuse, >=0.78 requires comparison, otherwise suggests new. These are configurable-code heuristics, not validated semantic-identity guarantees. Every candidate requires `{action:reuse|new,id?}` in the character/cliche decision maps; similar new cliches require `acknowledge_similar:true`, and two >=0.90 similar in-draft cliches cannot both be newly inserted. Reuse adds work/character maps instead of duplicating the existing cliche.
+
+The catalog revision is rechecked inside its transaction; a changed library requires rematching. Chat and embedding requests share actual/estimated token accounting, including retries and interrupted unknown usage. Vector/cache reuse does not fabricate provider usage. Search-service billing is separate from LLM tokens. No real paid search, commercial LLM or embedding provider was exercised by the synthetic transport tests; no accuracy, full-web ranking or universal deduplication guarantee follows from them.
+
+## Historical fixed analysis contract, content Schema 2
+
+This frozen contract applies only to explicitly selected `2.0.0` workflows/Skills; new tasks use Schema 3 above. It was introduced with main-library schema 5 and exchange format 1. Canonical definitions are in `chronicle_schema.py`; `canonical_stage_schema(stage,version=2)` rejects missing/unknown fields, invalid enum/type and unresolved references. Stage Skills use `contract_version:2` and the canonical output schema unchanged. Prompt content can be customized; output fields cannot. Workflow versions preserve `fixed_pipeline:true` and all fixed nodes enabled. Stage options are `stage_prompts`, `stage_settings[stage]{max_output_tokens,budget_tokens}`, `stage_skills[stage]{id,version}` and optional `stage_models[stage]:profile_id`. An absent/cleared model override inherits the task model. Creation resolves immutable default/stage model snapshots and `stage_model_fingerprints`; manual tasks use the manual profile without invoking overrides. `reuse_candidates` is a boolean, default true. The historical v2 fixed definition uses `chunk_chars:4000,max_input_tokens:64000,max_output_tokens:6000,budget_tokens:800000`.
 
 | Stage | Required result sections |
 |---|---|

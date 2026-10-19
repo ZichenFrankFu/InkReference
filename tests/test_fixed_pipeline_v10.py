@@ -43,15 +43,15 @@ class Models:
             value = self.fail(call, len(self.calls))
             if isinstance(value, Exception): raise value
             if value is not None: return {"content": json.dumps(value), "usage": {"input_tokens": 12, "output_tokens": 8}}
-        result = empty(canonical_stage_schema(stage))
+        result = empty(canonical_stage_schema(stage, version=2))
         if stage == "plot":
-            event = empty(canonical_stage_schema(stage)["properties"]["plot"]["properties"]["events"]["items"])
+            event = empty(canonical_stage_schema(stage, version=2)["properties"]["plot"]["properties"]["events"]["items"])
             event.update(id="event-" + kw["chunk_id"].split("::")[0], name="传信", description="甲传信。", evidence=text[:5])
             event["revealed_at"]["offset"] = 0
             result["plot"]["events"] = [event]
             result["plot"]["logline"] = "甲传信。"
         if stage == "characters":
-            item = empty(canonical_stage_schema(stage)["properties"]["characters"]["items"])
+            item = empty(canonical_stage_schema(stage, version=2)["properties"]["characters"]["items"])
             item.update(id="character-jia", name="甲", intro="甲传信。", evidence=text[:5])
             item["revealed_at"]["offset"] = 0
             result["characters"] = [item]
@@ -152,7 +152,7 @@ def test_manual_fixed_stages_use_same_contract_and_require_sequence(tmp_path):
         for candidate in manual["candidates"]:
             prompt = runner.chunk_prompt(manual["id"], candidate["chunk_id"])
             assert prompt["stage"] == stage
-            manual = runner.paste_chunk(manual["id"], candidate["chunk_id"], json.dumps(empty(canonical_stage_schema(stage))), manual["revision"])
+            manual = runner.paste_chunk(manual["id"], candidate["chunk_id"], json.dumps(empty(canonical_stage_schema(stage, version=2))), manual["revision"])
     assert manual["status"] == "needs_review"
     assert not models.calls
 
@@ -202,8 +202,8 @@ def test_each_call_accounting_fits_context_and_override_output_limit(tmp_path):
 def test_unresolved_entity_reference_is_rejected_before_any_review(tmp_path):
     def bad(call, n):
         if call["stage"] == "plot":
-            result = empty(canonical_stage_schema("plot"))
-            item = empty(canonical_stage_schema("plot")["properties"]["plot"]["properties"]["events"]["items"])
+            result = empty(canonical_stage_schema("plot", version=2))
+            item = empty(canonical_stage_schema("plot", version=2)["properties"]["plot"]["properties"]["events"]["items"])
             item.update(id="event-bad", name="传信", evidence=call["text"][:5], participants=["nonexistent-character"])
             result["plot"]["events"] = [item]
             return result
@@ -317,7 +317,7 @@ def test_default_manual_task_fits_actual_conservative_estimator(tmp_path):
     runner = WorkflowRunner(tmp_path)
     document = runner.documents.upload("synthetic.txt", "第1章 来信\n甲把信交给乙。".encode())
     run = runner.create_run(document["id"], manual=True)
-    assert run["workflow_version"] == "2.0.0"
+    assert run["workflow_version"] == "3.0.0"
     assert 100 <= run["snapshots"]["context_limits"]["language"] <= 6000
     assert run["total"] >= 1
 

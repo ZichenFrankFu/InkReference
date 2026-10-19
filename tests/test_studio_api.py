@@ -219,11 +219,11 @@ def test_mocked_job_review_and_approve_integrates_with_csv_library(client):
     stats = client.get("/api/stats").json()
     assert stats == {"works": 1, "characters": 1, "cliches": 1, "work_cliches": 1}
     works = client.get("/api/records/works").json()["items"]
-    assert works[0]["values"]["两句话概括"] == "人工审核后的剧情梗概。"
+    assert works[0]["values"]["剧情梗概"] == "人工审核后的剧情梗概。"
     exported = client.get("/api/export/works")
     assert exported.status_code == 200
     exported_work = next(csv.DictReader(io.StringIO(exported.content.decode("utf-8-sig"), newline="")))
-    assert exported_work["两句话概括"] == "人工审核后的剧情梗概。"
+    assert exported_work["剧情梗概"] == "人工审核后的剧情梗概。"
     again = client.post(PREFIX + f"/jobs/{run_id}/approve", json={"expected_revision": approved.json()["revision"]})
     assert again.status_code in {200, 409}
     assert client.get("/api/stats").json() == stats

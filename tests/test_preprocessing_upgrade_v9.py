@@ -69,7 +69,7 @@ def test_character_and_cliche_filter_query_contracts(tmp_path):
     with TestClient(create_app(tmp_path / "api", tmp_path / "dist"), base_url="http://127.0.0.1") as client:
         store = client.app.state.runtime.store
         for number, role in ((1, "主角"), (2, "配角")):
-            store.create_record("characters", {"人物ID": f"P{number}", "角色": f"人物{number}", "角色定位": role})
+            store.create_record("characters", {"人物ID": f"P{number}", "角色名": f"人物{number}", "角色定位": role})
         for number, trait, mechanism in ((1, "强大", "信息反转"), (2, "共情", "信息反转"), (3, "强大", "代价交换")):
             store.create_record("cliches", {"clichéID": f"C{number}", "cliché内容": f"桥段{number}", "人设塑造": trait, "剧情机制": mechanism})
         people = client.get("/api/records/characters?role=" + "主角")

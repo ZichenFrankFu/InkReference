@@ -63,7 +63,13 @@ def _outline(events: list[dict]) -> str:
     return "\n".join(f"{item.get('name', '')}：{item.get('description', '')}".rstrip("：") for item in events)
 
 
-def project_sections(sections: dict, chapter: int | None = None, *, volumes: list[dict] | None = None) -> dict:
+def project_sections(sections: dict, chapter: int | None = None, *, volumes: list[dict] | None = None,
+                     target_version: int | None = None, source_versions: dict | None = None,
+                     progress: float | None = None, legacy_source_version_id: str | None = None) -> dict:
+    if target_version == 3 or (target_version is None and any(
+        isinstance(value, dict) and value.get("schema_version") == 3 or isinstance(value, list) and any(isinstance(item, dict) and item.get("schema_version") == 3 for item in value)
+        for value in sections.values())):
+        return _project_v3(sections, chapter, volumes=volumes, source_versions=source_versions, progress=progress, legacy_source_version_id=legacy_source_version_id)
     if chapter is not None and (type(chapter) is not int or chapter < 1):
         from .database import DataError
         raise DataError(422, "章节需为正整数")
@@ -239,6 +245,138 @@ def project_sections(sections: dict, chapter: int | None = None, *, volumes: lis
             occurrences = [hit for hit in objects(item.get("occurrences")) if _visible(hit, chapter, strict=True)]
             if occurrences or chapter is None: items.append({**item, "occurrences": occurrences})
         era["items"] = items
+        coverage = result.get("style", {}).get("deterministic_statistics", {}).get("coverage", {}).get("characters", 0)
+        era["statistics"] = era_statistics(era, people, character_count=coverage)
+    return result
+
+
+def _project_v3(sections: dict, chapter: int | None = None, *, volumes=None, source_versions=None, progress=None, legacy_source_version_id=None) -> dict:
+    from .chronicle_schema import adapt_v2_section, normalize_v3_section
+    from .progress import finite_progress, ordered_story_events, narrative_progress, prepare_progress_sources
+    from .database import DataError
+    if chapter is not None and (type(chapter) is not int or chapter < 1): raise DataError(422, "章节需为正整数")
+    if progress is not None and not finite_progress(progress): raise DataError(422, "叙事进度需为0–100的数值")
+    sources = prepare_progress_sources(source_versions)
+    if progress is None and chapter is not None:
+        cutoffs = [narrative_progress(source, {"chapter": chapter, "offset": None}) for source in sources.values()]
+        cutoffs = [item for item in cutoffs if item is not None]
+        if cutoffs: progress = max(cutoffs)
+    # Preserve legacy chapter filtering when no immutable source is available.
+    base = sections if chapter is None or sources else project_sections(sections, chapter, volumes=volumes, target_version=2)
+    result = copy.deepcopy(base)
+    legacy_source = sources.get(legacy_source_version_id) if legacy_source_version_id is not None else next(iter(sources.values())) if len(sources) == 1 else None
+    def locate_legacy(node, modern=False):
+        if isinstance(node, dict):
+            modern = modern or node.get("schema_version") == 3
+            if not modern and "narrative_progress" not in node:
+                anchor = node.get("revealed_at")
+                if not isinstance(anchor, dict):
+                    number = chapter_number(node.get("first_chapter", node.get("chapter")))
+                    anchor = {"chapter": number, "offset": None} if number else None
+                source = sources.get(node.get("source_version_id")) if node.get("source_version_id") else legacy_source
+                point = narrative_progress(source, anchor) if source and anchor else None
+                if point is not None: node["narrative_progress"] = point
+            for child in node.values(): locate_legacy(child, modern)
+        elif isinstance(node, list):
+            for child in node: locate_legacy(child, modern)
+    locate_legacy(result)
+    for name in ("plot", "characters", "settings", "style", "rhythm", "opening", "era_background"):
+        if name in result:
+            result[name] = normalize_v3_section(name, result[name], source_versions=sources)
+    def visible(node):
+        point = node.get("narrative_progress")
+        if point is None and isinstance(node.get("narrative_range"), dict): point = node["narrative_range"].get("start")
+        return progress is None or finite_progress(point) and point <= progress
+    plot = result.setdefault("plot", {"schema_version": 3, "logline": "", "events": [], "plotlines": []})
+    events = [event for event in objects(plot.get("events")) if visible(event)]
+    event_ids = {event.get("id") for event in events}
+    lines = []
+    for line in objects(plot.get("plotlines")):
+        stages = [stage for stage in objects(line.get("stages")) if visible(stage)]
+        if progress is not None and not stages: continue
+        for stage in stages: stage["event_ids"] = [eid for eid in stage.get("event_ids", []) if eid in event_ids]
+        lines.append({**line, "stages": stages, "current_status": stages[-1].get("status", "open") if stages else "open"})
+    line_ids = {line.get("id") for line in lines}
+    index = {event["id"]: event for event in events if event.get("id")}
+    for event in events:
+        for key in ("causes", "results"): event[key] = [identity for identity in event.get(key, []) if identity in event_ids]
+        event["plotline_ids"] = [identity for identity in event.get("plotline_ids", []) if identity in line_ids]
+        for cause in event.get("causes", []): index[cause]["results"] = list(dict.fromkeys([*index[cause].get("results", []), event["id"]]))
+        for effect in event.get("results", []): index[effect]["causes"] = list(dict.fromkeys([*index[effect].get("causes", []), event["id"]]))
+    people = []
+    for original in objects(result.get("characters")):
+        initial = original.get("initial_state", {})
+        if not visible(initial): continue
+        person = copy.deepcopy(original)
+        snapshots = [item for item in objects(person.get("snapshots")) if visible(item)]
+        snapshots.sort(key=lambda item: (item.get("narrative_range", {}).get("start", 0), (item.get("revealed_at") or {}).get("offset") or 0, item.get("id", "")))
+        for snapshot in snapshots:
+            snapshot["event_ids"] = [eid for eid in snapshot.get("event_ids", []) if eid in event_ids]
+            snapshot["events"] = [copy.deepcopy(index[eid]) for eid in snapshot["event_ids"]]
+        person["snapshots"] = snapshots
+        active = [item for item in snapshots if progress is None or item["narrative_range"].get("end") is None or progress <= item["narrative_range"]["end"]]
+        person["current_snapshot"] = copy.deepcopy(active[-1]) if active else None
+        people.append(person)
+        for snapshot in snapshots:
+            for eid in snapshot["event_ids"]: index[eid]["participants"] = list(dict.fromkeys([*index[eid].get("participants", []), person["id"]]))
+    settings = []
+    for original in objects(result.get("settings")):
+        if not visible(original): continue
+        setting = copy.deepcopy(original)
+        snapshots = [item for item in objects(setting.get("snapshots")) if visible(item)]
+        snapshots.sort(key=lambda item: (item.get("narrative_range", {}).get("start", 0), (item.get("revealed_at") or {}).get("offset") or 0, item.get("id", "")))
+        for snapshot in snapshots:
+            snapshot["event_ids"] = [eid for eid in snapshot.get("event_ids", []) if eid in event_ids]
+            for eid in snapshot["event_ids"]: index[eid]["setting_ids"] = list(dict.fromkeys([*index[eid].get("setting_ids", []), setting["id"]]))
+        setting["snapshots"] = snapshots
+        active = [item for item in snapshots if progress is None or item["narrative_range"].get("end") is None or progress <= item["narrative_range"]["end"]]
+        setting["current_snapshot"] = copy.deepcopy(active[-1]) if active else None
+        settings.append(setting)
+    result["characters"], result["settings"] = people, settings
+    character_ids = {person["id"] for person in people}
+    setting_ids = {setting["id"] for setting in settings}
+    if progress is not None:
+        for person in people:
+            for fact in [person.get("initial_state", {}), *person.get("snapshots", [])]:
+                fact["relationships"] = [item for item in fact.get("relationships", []) if item.get("character_id") in character_ids]
+        for event in events:
+            event["participants"] = [cid for cid in event.get("participants", []) if cid in character_ids]
+            event["setting_ids"] = [sid for sid in event.get("setting_ids", []) if sid in setting_ids]
+        for setting in settings:
+            if setting.get("earlier_setting_id") not in setting_ids: setting["earlier_setting_id"] = None
+    narrative = sorted(events, key=lambda item: (item.get("narrative_progress", 0), (item.get("revealed_at") or {}).get("offset") or 0, item.get("id", "")))
+    plot["events"], plot["plotlines"] = events, lines
+    plot["views"] = {"narrative": copy.deepcopy(narrative), "story": copy.deepcopy(ordered_story_events(events))}
+    grouped = {}
+    for event in narrative:
+        volume = event.get("volume") or "未分卷"
+        if volumes:
+            number = _disclosure(event)
+            for candidate in volumes:
+                start, end = candidate.get("start_chapter", candidate.get("start")), candidate.get("end_chapter", candidate.get("end"))
+                if number is not None and isinstance(start, int) and isinstance(end, int) and start <= number <= end:
+                    volume = candidate.get("title", "未分卷"); break
+        grouped.setdefault(volume, []).append(event)
+    plot["outlines"] = {"book": _outline(narrative), "volumes": [{"volume": key, "outline": _outline(items), "event_ids": [item["id"] for item in items]} for key, items in grouped.items()]}
+    if progress is not None:
+        plot["logline"] = _outline(narrative)
+        style = result.get("style", {})
+        result["style"] = {"schema_version": 3, "observations": [item for item in objects(style.get("observations")) if visible(item)],
+                           "narrative_composition": [item for item in objects(style.get("narrative_composition")) if visible(item)],
+                           "catchphrases": [{**item, "occurrences": [hit for hit in objects(item.get("occurrences")) if visible(hit)]} for item in objects(style.get("catchphrases"))]}
+        rhythm = result.get("rhythm", {})
+        result["rhythm"] = {"schema_version": 3, "chapter_analysis": [item for item in objects(rhythm.get("chapter_analysis")) if visible(item)]}
+        opening = result.get("opening", {})
+        result["opening"] = {"schema_version": 3, "observations": [item for item in objects(opening.get("observations")) if visible(item)]}
+        for field in ("metadata", "raw_entries", "setting_features"): result.pop(field, None)
+    era = result.get("era_background", {})
+    if isinstance(era, dict):
+        era["items"] = [{**item, "appearances": [hit for hit in objects(item.get("appearances")) if visible(hit)]} for item in objects(era.get("items")) if progress is None or any(visible(hit) for hit in objects(item.get("appearances")))]
+        if progress is not None:
+            for item in era["items"]:
+                for hit in item["appearances"]:
+                    hit["event_ids"] = [eid for eid in hit.get("event_ids", []) if eid in event_ids]
+                    hit["character_ids"] = [cid for cid in hit.get("character_ids", []) if cid in character_ids]
         coverage = result.get("style", {}).get("deterministic_statistics", {}).get("coverage", {}).get("characters", 0)
         era["statistics"] = era_statistics(era, people, character_count=coverage)
     return result

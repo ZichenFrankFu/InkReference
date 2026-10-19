@@ -149,14 +149,18 @@ class CatalogLinks:
         return {"work_id": work_id, "title": work["values"].get("作品", ""), "revision": work["revision"], "documents": documents,
                 "counts": {"documents": len(documents), "analyses": sum(item["analysis"] is not None for item in documents)}}
 
-    def analysis(self, work_id: str, document_id: str, chapter: int | None = None) -> dict:
+    def analysis(self, work_id: str, document_id: str, chapter: int | None = None, *, progress: float | None = None, schema_version: int | None = None) -> dict:
         self.store.get_record("works", work_id)
         link = self.get(document_id)
         if link["work_id"] != work_id:
             raise DataError(409, "此文本未关联当前作品")
         state = self.reference().get(document_id)
-        projection = reference_projection(state["sections"], chapter)
-        if chapter is not None:
+        if progress is not None or schema_version is not None:
+            projected=self.reference().project(document_id, chapter, progress=progress, target_version=schema_version)
+            projection=projected["sections"]
+        else:
+            projection = reference_projection(state["sections"], chapter)
+        if chapter is not None or progress is not None:
             state = {**state, "sections": projection}
         return {"work_id": work_id, "document_id": document_id, "latest_version_id": link["latest_version_id"],
-                "reference": state, "projection": projection, "chapter": chapter}
+                "reference": state, "projection": projection, "chapter": chapter, "progress":progress}

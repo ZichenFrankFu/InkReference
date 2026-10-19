@@ -10,12 +10,15 @@ import contextlib
 import json
 import re
 import sqlite3
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 from uuid import uuid4
 
 from . import __version__
+from . import catalog_schema_v11 as catalog_schema
+import hashlib
 
 VERSION = __version__
 WORK_COLUMNS = ["作品ID", "作品", "类别", "作者", "发布日期", "版本与原作关系", "用户是否完整体验过", "两句话概括", "剧情补充说明", "热度", "典型桥段（剧透）"]
@@ -34,6 +37,10 @@ CLICHE_PLOT_MECHANISMS = ("信息反转", "机械降神", "顿悟突破", "代�
 CLICHE_TAGS = {"人设塑造": CLICHE_CHARACTER_TRAITS, "剧情机制": CLICHE_PLOT_MECHANISMS}
 LIBRARY_CLICHE_COLUMNS = [*SCHEMA4_CLICHE_COLUMNS, *CLICHE_TAGS]
 SCHEMA4_COLUMNS = {"works": LIBRARY_WORK_COLUMNS, "characters": LIBRARY_CHARACTER_COLUMNS, "cliches": SCHEMA4_CLICHE_COLUMNS}
+SCHEMA5_COLUMNS = {"works": list(LIBRARY_WORK_COLUMNS), "characters": list(LIBRARY_CHARACTER_COLUMNS), "cliches": list(LIBRARY_CLICHE_COLUMNS)}
+LIBRARY_WORK_COLUMNS = catalog_schema.WORK_COLUMNS
+LIBRARY_CHARACTER_COLUMNS = catalog_schema.CHARACTER_COLUMNS
+LIBRARY_CLICHE_COLUMNS = catalog_schema.CLICHE_COLUMNS
 TABLES = {
     "works": {"label": "作品", "id_field": "作品ID", "columns": LIBRARY_WORK_COLUMNS},
     "characters": {"label": "人物", "id_field": "人物ID", "columns": LIBRARY_CHARACTER_COLUMNS},
@@ -101,18 +108,39 @@ def validate_values(table: str, values: dict[str, str], *, partial: bool = False
     require_table(table)
     if not isinstance(values, dict):
         raise DataError(422, "字段必须为对象")
+    if table == "works" and "两句话概括" in values and "剧情梗概" in values:
+        values = {k:v for k,v in values.items() if k != "两句话概括"}
     if table == "works" and "看过" in values:
         values = {**values, "用户是否完整体验过": values["看过"]}
         del values["看过"]
     modern = modern_values(table, values)
-    columns = TABLES[table]["columns"] if modern else LEGACY_TABLES[table]["columns"]
+    columns = TABLES[table]["columns"] if catalog_schema.is_current(table,values) or (modern and not (set(values) - set(TABLES[table]["columns"]))) else SCHEMA5_COLUMNS[table] if modern else LEGACY_TABLES[table]["columns"]
     unknown = set(values) - set(columns)
     if unknown:
         raise DataError(422, f"未知字段：{'、'.join(sorted(unknown))}")
     if any(not isinstance(value, str) for value in values.values()):
         raise DataError(422, "所有 CSV 字段必须为字符串")
-    normalized = dict(values) if partial else {column: values.get(column, "[]" if column in ASSOCIATIONS or column == "别名" else "") for column in columns}
+    normalized = dict(values) if partial else {column: values.get(column, catalog_schema.JSON_DEFAULTS.get(column, "")) for column in columns}
     if modern:
+        if catalog_schema.is_current(table, normalized):
+            if table == "works":
+                for field in ("讨论热度", "商业规模"):
+                    if normalized.get(field) and catalog_schema.heat_component(normalized[field]) is None:
+                        raise DataError(422, f"{field} 必须为 1–10 分，或包含 min/max 的 1–10 分范围")
+            if table == "characters":
+                if normalized.get("性格基调", "") not in ("", *CLICHE_CHARACTER_TRAITS):
+                    raise DataError(422, "性格基调仅可选择一个标签")
+                for field,kind in (("初始状态",dict),("阶段状态",list)):
+                    try: parsed=json.loads(normalized.get(field,catalog_schema.JSON_DEFAULTS[field]))
+                    except (TypeError, ValueError) as exc: raise DataError(422,f"{field} 必须为 JSON") from exc
+                    if not isinstance(parsed,kind): raise DataError(422,f"{field} 格式错误")
+                try: aliases=json.loads(normalized.get("别名","[]"))
+                except (TypeError, ValueError) as exc:raise DataError(422,"别名必须为 JSON 数组") from exc
+                from .character_contract import normalize_character
+                canonical=normalize_character({"schema_version":3,"id":normalized.get("人物ID",values.get("人物ID","")),"name":normalized.get("角色名",values.get("角色名","")),"aliases":aliases,"role_tag":normalized.get("角色定位",""),"temperament":normalized.get("性格基调",""),"visual_design":normalized.get("视觉元素设计",""),"initial_state":json.loads(normalized.get("初始状态","{}")),"snapshots":json.loads(normalized.get("阶段状态","[]"))})
+                normalized["初始状态"]=_json(canonical["initial_state"])
+                normalized["阶段状态"]=_json(canonical["snapshots"])
+
         if table == "cliches":
             for field, options in CLICHE_TAGS.items():
                 if field in normalized and normalized[field] not in ("", *options):
@@ -183,6 +211,8 @@ class _ClosingConnection(sqlite3.Connection):
 class DataStore:
     def __init__(self, db_path: str | Path):
         self.db_path = str(db_path)
+        self.write_lock = threading.RLock()
+        self.character_sync = None
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         self._migrate()
 
@@ -195,22 +225,25 @@ class DataStore:
 
     @contextlib.contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
-        connection = self.connect()
-        try:
-            connection.execute("BEGIN IMMEDIATE")
-            yield connection
-            connection.commit()
-        except Exception:
-            connection.rollback()
-            raise
-        finally:
-            connection.close()
+        # Acquired before either attached SQLite database takes a write lock.
+        # Runtime shares this RLock with reference writes to keep one lock order.
+        with self.write_lock:
+            connection = self.connect()
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                yield connection
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+            finally:
+                connection.close()
 
     def _migrate(self) -> None:
         with self.transaction() as connection:
             connection.execute("CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)")
             current = connection.execute("SELECT COALESCE(MAX(version), 0) FROM schema_migrations").fetchone()[0]
-            if current > 5:
+            if current > 6:
                 raise DataError(409, "数据库版本高于当前应用，请使用更新的应用")
             applied = {row[0] for row in connection.execute("SELECT version FROM schema_migrations")}
             if 1 not in applied:
@@ -300,6 +333,28 @@ class DataStore:
                         connection.execute("UPDATE cliches SET values_json=? WHERE id=?", (_json(values), row["id"]))
                 connection.execute("INSERT INTO schema_migrations VALUES (5, ?)", (datetime.now(timezone.utc).isoformat(),))
 
+            connection.execute("CREATE TABLE IF NOT EXISTS catalog_field_archive (table_key TEXT NOT NULL,record_id TEXT NOT NULL,source_schema TEXT NOT NULL,values_json TEXT NOT NULL,PRIMARY KEY(table_key,record_id,source_schema))")
+            if 6 not in applied:
+                self._upgrade_catalog_rows(connection)
+                connection.execute("CREATE TABLE IF NOT EXISTS catalog_research_applies (job_id TEXT PRIMARY KEY,payload_hash TEXT NOT NULL,result_json TEXT NOT NULL)")
+                connection.execute("CREATE TABLE IF NOT EXISTS character_contexts (character_id TEXT NOT NULL,work_id TEXT NOT NULL,document_id TEXT,extracted_character_id TEXT NOT NULL,character_json TEXT NOT NULL,revision INTEGER NOT NULL DEFAULT 1,PRIMARY KEY(character_id,work_id),UNIQUE(work_id,extracted_character_id))")
+                connection.execute("INSERT INTO schema_migrations VALUES (6, ?)", (datetime.now(timezone.utc).isoformat(),))
+
+            for table in TABLES:
+                connection.execute(f"CREATE TRIGGER IF NOT EXISTS {table}_delete_catalog_archives AFTER DELETE ON {table} BEGIN DELETE FROM catalog_field_archive WHERE table_key='{table}' AND record_id=OLD.id; END")
+            connection.execute("CREATE TRIGGER IF NOT EXISTS characters_delete_contexts AFTER DELETE ON characters BEGIN DELETE FROM character_contexts WHERE character_id=OLD.id; END")
+            connection.execute("CREATE TRIGGER IF NOT EXISTS works_delete_contexts AFTER DELETE ON works BEGIN DELETE FROM character_contexts WHERE work_id=OLD.id; END")
+
+    def _upgrade_catalog_rows(self, connection: sqlite3.Connection) -> None:
+        for table in TABLES:
+            for row in connection.execute(f"SELECT id,values_json FROM {table}").fetchall():
+                values=json.loads(row["values_json"])
+                if catalog_schema.is_current(table,values): continue
+                connection.execute("INSERT OR IGNORE INTO legacy_values VALUES (?,?,?)",(table,row["id"],_json(values)))
+                connection.execute("INSERT OR REPLACE INTO catalog_field_archive VALUES (?,?,?,?)",(table,row["id"],"5" if modern_values(table,values) else "3",_json(values)))
+                connection.execute(f"UPDATE {table} SET values_json=? WHERE id=?",(_json(catalog_schema.project_values(table,values)),row["id"]))
+        self._rebuild_library_links(connection)
+
     def _stats(self, connection: sqlite3.Connection) -> dict[str, int]:
         return {table: connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] for table in (*TABLES, "work_cliches")}
 
@@ -310,7 +365,7 @@ class DataStore:
 
     def meta(self) -> dict[str, Any]:
         counts = self.stats()
-        return {"tables": [{"key": table, **spec, "count": counts[table]} for table, spec in TABLES.items()], "version": VERSION, "schema_version": 5}
+        return {"tables": [{"key": table, **spec, "count": counts[table]} for table, spec in TABLES.items()], "version": VERSION, "schema_version": 6}
 
     def _row(self, connection: sqlite3.Connection, table: str, identifier: str) -> sqlite3.Row:
         require_table(table)
@@ -322,7 +377,7 @@ class DataStore:
     def _render(self, connection: sqlite3.Connection, table: str, row: sqlite3.Row) -> dict[str, Any]:
         values = json.loads(row["values_json"])
         if modern_values(table, values):
-            return {"id": row["id"], "values": values, "revision": row["revision"]}
+            return self._catalog_record(connection,table,row,values)
         if table == "works":
             relations = {relation["cliche_id"]: relation for relation in connection.execute("SELECT * FROM work_cliches WHERE work_id = ? ORDER BY work_position,cliche_id", (row["id"],))}
             output: list[str] = []
@@ -354,7 +409,39 @@ class DataStore:
                     label += f" ⟦ID:{work['id']}⟧"
                 appearances.append(label)
             values["出现作品"] = "；".join(appearances)
-        return {"id": row["id"], "values": values, "revision": row["revision"]}
+        return self._catalog_record(connection,table,row,values)
+
+    def _catalog_record(self, connection: sqlite3.Connection, table: str, row: sqlite3.Row, values: dict[str,str]) -> dict[str,Any]:
+        display=catalog_schema.project_values(table,values)
+        if not modern_values(table,values):
+            if table=="works":
+                display["关联角色"]=_json([r[0] for r in connection.execute("SELECT id FROM characters WHERE work_id=? ORDER BY sort_order,id",(row["id"],))])
+                display["关联cliché"]=_json([r[0] for r in connection.execute("SELECT cliche_id FROM work_cliches WHERE work_id=? ORDER BY work_position,cliche_id",(row["id"],))])
+            elif table=="characters":display["关联作品"]=_json([{"作品ID":row["work_id"]}] if row["work_id"] else [])
+            else:
+                display["clichéID"]=row["id"]
+                display["cliché内容"]=re.sub(r"^C\d+[｜|：:]?", "", values.get("cliché内容", ""), count=1)
+                display["关联作品"]=_json([{"作品ID":r["work_id"],"关联内容":r["detail"]} for r in connection.execute("SELECT * FROM work_cliches WHERE cliche_id=? ORDER BY cliche_position,work_id",(row["id"],))])
+        result={"id":row["id"],"values":values,"catalog_values":display,"revision":row["revision"]}
+        if table=="works":
+            weight,missing=catalog_schema.work_heat(display)
+            result["computed"]={"heat":round(weight,4),"missing_heat":missing}
+        elif table=="cliches":
+            marker=connection.total_changes
+            cached=getattr(connection,"_catalog_score_context",None)
+            if cached is None or cached[0]!=marker:
+                works={r["id"]:catalog_schema.work_heat(json.loads(r["values_json"])) for r in connection.execute("SELECT id,values_json FROM works")}
+                by_cliche={}
+                for edge in connection.execute("SELECT work_id,cliche_id FROM work_cliches"):by_cliche.setdefault(edge["cliche_id"],set()).add(edge["work_id"])
+                cached=(marker,works,by_cliche,sum(item[0] for item in works.values()),sum(item[1] for item in works.values()))
+                if isinstance(connection,_ClosingConnection):connection._catalog_score_context=cached
+            _,works,by_cliche,denominator,missing_count=cached
+            matched=by_cliche.get(row["id"],set())
+            score=round(100*sum(works[i][0] for i in matched if i in works)/denominator,4) if denominator else 0.0
+            display["cliché评分"]=str(score)
+            if catalog_schema.is_current(table,values): result["values"]={**values,"cliché评分":str(score)}
+            result["computed"]={"cliche_score":score,"matched_work_count":len(matched),"total_work_count":len(works),"missing_heat_count":missing_count,"formula":catalog_schema.SCORE_FORMULA}
+        return result
 
     def get_record(self, table: str, identifier: str) -> dict[str, Any]:
         with self.connect() as connection:
@@ -400,11 +487,13 @@ class DataStore:
                     raise DataError(422,"work_ids 必须为作品编号列表")
                 clauses.append("r.id IN (SELECT value FROM json_each(?))");parameters.append(_json(list(value)))
                 continue
-            field = {"category":"类别","seen":"用户是否完整体验过","看过":"用户是否完整体验过","role":"角色定位","character_trait":"人设塑造","plot_mechanism":"剧情机制"}.get(key,key)
+            field = {"category":"类别","seen":"用户是否完整体验过","看过":"用户是否完整体验过","role":"角色定位","character_trait":"性格基调" if table=="characters" else "人设塑造","plot_mechanism":"剧情机制"}.get(key,key)
             if field not in TABLES[table]["columns"]:
                 raise DataError(422,f"不支持的筛选字段：{key}")
             if not isinstance(value, str):
                 raise DataError(422,f"筛选字段 {key} 必须为字符串")
+            if field=="性格基调" and value not in ("",*CLICHE_CHARACTER_TRAITS):
+                raise DataError(422,"性格基调筛选值无效")
             if field in CLICHE_TAGS and value not in ("", *CLICHE_TAGS[field]):
                 raise DataError(422,f"{field} 筛选值无效")
             if field == "用户是否完整体验过" and value == "unknown":
@@ -417,16 +506,19 @@ class DataStore:
                 raise DataError(422,"排序字段无效")
             direction = "DESC" if sort_direction == "desc" else "ASC"
             if sort_by == "id": order = f"r.id {direction}"
+            elif table=="cliches" and sort_by=="cliché评分":
+                order=f"COALESCE((SELECT SUM(catalog_work_heat(w.values_json)) FROM works w JOIN work_cliches wc ON wc.work_id=w.id WHERE wc.cliche_id=r.id)/(SELECT SUM(catalog_work_heat(values_json)) FROM works),0) {direction},r.id"
             else:
                 # Field is selected from a fixed schema allowlist; bind its JSON path.
                 order = f"json_extract(r.values_json,?) COLLATE NOCASE {direction},r.id"
         where = " WHERE " + " AND ".join(clauses) if clauses else ""
         with self.connect() as connection:
             connection.create_function("casefold",1,lambda value:str(value).casefold(),deterministic=True)
+            connection.create_function("catalog_work_heat",1,lambda value:catalog_schema.work_heat(json.loads(value))[0],deterministic=True)
             connection.execute("BEGIN")
             total = connection.execute(f"SELECT COUNT(*) FROM {table} r{where}",parameters).fetchone()[0]
             rows_parameters = list(parameters)
-            if sort_by and sort_by != "id": rows_parameters.append('$."'+sort_by+'"')
+            if sort_by and sort_by != "id" and not (table=="cliches" and sort_by=="cliché评分"): rows_parameters.append('$."'+sort_by+'"')
             rows = connection.execute(f"SELECT r.* FROM {table} r{where} ORDER BY {order} LIMIT ? OFFSET ?",(*rows_parameters,limit,offset))
             items = [self._render(connection,table,row) for row in rows]
             categories = [row[0] for row in connection.execute("SELECT DISTINCT json_extract(values_json,'$.类别') category FROM works WHERE COALESCE(json_extract(values_json,'$.类别'),'') != '' ORDER BY category")]
@@ -777,13 +869,25 @@ class DataStore:
             current = self._render(connection, table, self._row(connection, table, identifier))["values"]
             # Validate in the record's own schema; shared fields cannot imply a
             # schema switch when editing an old compatibility record.
+            if catalog_schema.is_current(table,current):
+                values=dict(values)
+                if table=="works" and "两句话概括" in values: values["剧情梗概"]=values.pop("两句话概括")
+                if table=="characters" and "角色" in values: values["角色名"]=values.pop("角色")
+                if table=="cliches": values.pop("cliché评分",None)
+            if not catalog_schema.is_current(table,current) and any(k in values for k in ({"works":{"剧情梗概","讨论热度","商业规模"},"characters":{"角色名","性格基调","视觉元素设计","初始状态","阶段状态"},"cliches":{"cliché评分"}}[table])):
+                connection.execute("INSERT OR IGNORE INTO legacy_values VALUES (?,?,?)",(table,identifier,_json(current)))
+                current=catalog_schema.project_values(table,current)
             candidate = {**current, **values}
+            if table=="cliches" and catalog_schema.is_current(table,candidate):candidate["cliché评分"]=""
             merged = validate_values(table, candidate)
             patch = dict(values)
             if table == "works" and "看过" in patch:
                 patch["用户是否完整体验过"] = patch.pop("看过")
             if modern_values(table, current):
                 self._update_raw(connection, table, identifier, merged, expected_revision)
+                sync=getattr(self,"character_sync",None)
+                if table=="characters" and sync is not None and any(current.get(k)!=merged.get(k) for k in ("角色名","别名","角色定位","性格基调","视觉元素设计")):
+                    sync(connection,identifier,merged)
                 association_changed = any(current.get(field) != merged.get(field) for field in ASSOCIATIONS)
                 title_changed = table == "works" and current.get("作品") != merged.get("作品")
                 if association_changed or title_changed:
@@ -855,7 +959,7 @@ class DataStore:
                 if modern_values(table, old):
                     continue
                 connection.execute("INSERT OR IGNORE INTO legacy_values VALUES (?,?,?)", (table,row["id"],_json(old)))
-                new = {column: old.get(column, "[]" if column in ASSOCIATIONS or column == "别名" else "") for column in TABLES[table]["columns"]}
+                new = catalog_schema.project_values(table, old)
                 if table == "works":
                     new["热度权重"] = old.get("热度", "")
                     new["关联角色"] = _json([r[0] for r in connection.execute("SELECT id FROM characters WHERE work_id=? ORDER BY sort_order,id", (row["id"],))])
@@ -867,6 +971,7 @@ class DataStore:
                     new["cliché内容"] = re.sub(r"^C\d+[｜|：:]?", "", old.get("cliché内容", ""), count=1)
                     new["cliché程度（%）"] = old.get("cliché程度", "")
                     new["关联作品"] = _json([{"作品ID":r["work_id"],"关联内容":r["detail"]} for r in connection.execute("SELECT * FROM work_cliches WHERE cliche_id=? ORDER BY cliche_position,work_id", (row["id"],))])
+                new = catalog_schema.project_values(table,new)
                 connection.execute(f"UPDATE {table} SET values_json=? WHERE id=?", (_json(new),row["id"]))
 
     def _library_rows(self, connection: sqlite3.Connection) -> dict[str, dict[str, dict[str, str]]]:
@@ -1028,7 +1133,7 @@ class DataStore:
             payload = json.loads(link["payload_json"])
             meta = payload if isinstance(payload,dict) else {}
             description = str(meta.get("关联内容",meta.get("关联方式","")))
-            label = description or ("登场人物" if {table,target_table} == {"works","characters"} else "使用桥段" if "cliches" in {table,target_table} else "关联作品")
+            label = description or ("登场人物" if {table,target_table} == {"works","characters"} else "关联桥段" if "cliches" in {table,target_table} else "关联作品")
             relation = {"id":f"library:{link['source_table']}:{link['source_id']}:{link['field']}:{link['position']}","type":link["field"],"label":label,"description":description,"metadata":meta,"direction":"outgoing" if outgoing else "incoming","source":"library_links","relation_type":link["field"]}
             key = target_table,target_id
             if key not in targets:
@@ -1037,7 +1142,10 @@ class DataStore:
                 targets[key] = item
                 result[target_table].append(item)
             # Reverse arrays describe the same edge; prefer the rich payload.
-            if any(r["description"] == description and r["metadata"] == meta for r in targets[key]["relationships"]):
+            def meaning(metadata):
+                ignored={TABLES[table]["id_field"],TABLES[target_table]["id_field"]}
+                return {k:v for k,v in metadata.items() if k not in ignored}
+            if any(r["description"] == description and meaning(r["metadata"]) == meaning(meta) for r in targets[key]["relationships"]):
                 continue
             targets[key]["relationships"].append(relation)
             targets[key]["relationship"] = max(targets[key]["relationships"],key=lambda r:len(r["description"])+len(_json(r["metadata"])))
@@ -1054,3 +1162,123 @@ class DataStore:
             targets[key]["relationships"].append(relation); targets[key]["relationship"] = relation
             result["edges"].append({**edge,"direction":relation["direction"],"label":relation["label"]})
         return result
+
+    def _catalog_revision(self, connection: sqlite3.Connection) -> str:
+        payload={table:[(r['id'],r['revision'],r['values_json']) for r in connection.execute(f'SELECT id,revision,values_json FROM {table} ORDER BY id')] for table in TABLES}
+        payload['archives']=[tuple(r) for r in connection.execute('SELECT * FROM catalog_field_archive ORDER BY table_key,record_id,source_schema')]
+        payload['contexts']=[tuple(r) for r in connection.execute('SELECT character_id,work_id,revision,character_json FROM character_contexts ORDER BY character_id,work_id')]
+        payload['relations']=[tuple(r) for r in connection.execute('SELECT source_table,source_id,target_table,target_id,relation_type,revision FROM material_relations ORDER BY id')]
+        return hashlib.sha256(_json(payload).encode()).hexdigest()
+
+    def catalog_snapshot(self) -> dict[str,Any]:
+        with self.connect() as connection:
+            connection.execute('BEGIN')
+            return {'revision':self._catalog_revision(connection),**{table:self._all(connection,table) for table in TABLES}}
+
+    def apply_research(self, draft: dict[str,Any], decisions: dict[str,Any], expected_catalog_revision: str, job_id: str) -> dict[str,Any]:
+        """User-reviewed metadata only; all material tables and reverse maps commit once."""
+        from .character_contract import normalize_character
+        if not isinstance(draft,dict) or not isinstance(decisions,dict) or not isinstance(job_id,str) or not job_id:
+            raise DataError(422,'入库数据格式错误')
+        fingerprint=hashlib.sha256(_json({'draft':draft,'decisions':decisions}).encode()).hexdigest()
+        with self.transaction() as connection:
+            previous=connection.execute('SELECT * FROM catalog_research_applies WHERE job_id=?',(job_id,)).fetchone()
+            if previous:
+                if previous['payload_hash']!=fingerprint:raise DataError(409,'此研究任务已经入库，不能用不同内容重复确认')
+                return json.loads(previous['result_json'])
+            if self._catalog_revision(connection)!=expected_catalog_revision:raise DataError(409,'数据库在研究期间发生变化，请刷新候选并重新确认')
+            source=draft.get('work',{})
+            if not isinstance(source,dict):raise DataError(422,'缺少作品信息')
+            work_id=decisions.get('work_id')
+            if work_id:
+                before=catalog_schema.project_values('works',self._render(connection,'works',self._row(connection,'works',work_id))['values'])
+                def identity(v):return re.sub(r'\s+','',str(v)).casefold()
+                if identity(before['作品'])!=identity(source.get('title',source.get('作品',''))) or identity(before['作者'])!=identity(source.get('author',source.get('作者',''))):
+                    raise DataError(409,'候选作品的书名或作者与选定作品不一致，请重新选择作品')
+            else:
+                work_id='W-'+uuid4().hex;before=catalog_schema.project_values('works',{'作品ID':work_id})
+            work={**before,'作品ID':work_id}
+            mapping={'title':'作品','author':'作者','category':'类别','publication_date':'发布日期','synopsis':'剧情梗概','discussion_heat':'讨论热度','market_scale':'商业规模'}
+            for src,dest in mapping.items():
+                if src in source:
+                    item=source[src];work[dest]=_json(item) if isinstance(item,dict) else str(item or '')
+            if not work['作品'].strip() or not work['作者'].strip():raise DataError(422,'书名和作者不能为空')
+            work=validate_values('works',work)
+            exists=connection.execute('SELECT revision FROM works WHERE id=?',(work_id,)).fetchone()
+            if exists:self._update_raw(connection,'works',work_id,work,exists[0])
+            else:self._insert_raw(connection,'works',work)
+            character_ids={};cliche_ids={}
+            for index,item in enumerate(draft.get('characters',[])):
+                candidate_id=str(item.get('candidate_id',item.get('id',f'character-{index}')))
+                decision=decisions.get('characters',{}).get(candidate_id,{})
+                if decision.get('action') not in {'new','reuse'}:raise DataError(422,f'请确认人物 {candidate_id} 的新建或复用决定')
+                cid=decision.get('id') if decision['action']=='reuse' else 'CH-'+uuid4().hex
+                if decision['action']=='new':
+                    def normal_name(v):return re.sub(r'\s+','',str(v)).casefold()
+                    names={normal_name(v) for v in [item.get('name',''),*item.get('aliases',[])] if str(v).strip()}
+                    for existing_character in connection.execute('SELECT id,work_id,values_json FROM characters'):
+                        previous_values=catalog_schema.project_values('characters',json.loads(existing_character['values_json']))
+                        linked=existing_character['work_id']==work_id or any(self._association_id(link,'作品ID','关联作品')==work_id for link in association_items(previous_values['关联作品'],'关联作品'))
+                        if not linked:continue
+                        previous_names={normal_name(v) for v in [previous_values['角色名'],*json.loads(previous_values['别名'])] if str(v).strip()}
+                        if names & previous_names:raise DataError(422,f"人物 {item.get('name','')} 已关联当前作品（{existing_character['id']}），请选择复用该人物")
+                if decision['action']=='reuse':
+                    record=self._row(connection,'characters',cid);values=catalog_schema.project_values('characters',json.loads(record['values_json']))
+                else:values=catalog_schema.project_values('characters',{'人物ID':cid})
+                canonical=normalize_character({'schema_version':3,'id':cid,'name':item.get('name',''),'aliases':item.get('aliases',[]),'role_tag':item.get('role',item.get('role_tag','')),'temperament':item.get('temperament',''),'visual_design':item.get('visual_design',''),'initial_state':item.get('initial_state',{}),'snapshots':item.get('states',item.get('snapshots',[]))})
+                # Stable identity and all per-work changes are saved in work context.
+                if decision['action']=='new':
+                    values.update({'人物ID':cid,'角色名':canonical['name'],'别名':_json(canonical['aliases']),'角色定位':canonical['role_tag'],'性格基调':canonical['temperament'],'视觉元素设计':canonical['visual_design'],'初始状态':_json(canonical['initial_state']),'阶段状态':_json(canonical['snapshots'])})
+                    self._insert_raw(connection,'characters',validate_values('characters',values))
+                if decision['action']=='reuse':
+                    static_fields={'角色名':'name','角色定位':'role_tag','性格基调':'temperament','视觉元素设计':'visual_design'}
+                    merged=dict(values)
+                    for field,business in static_fields.items():
+                        if canonical[business]:merged[field]=canonical[business]
+                    merged['别名']=_json(list(dict.fromkeys([*json.loads(values['别名']),*canonical['aliases']])))
+                    if merged!=values:
+                        self._write_library_values(connection,'characters',cid,merged)
+                        sync=getattr(self,'character_sync',None)
+                        if sync is not None:sync(connection,cid,merged)
+                    values=merged
+                context=connection.execute('SELECT * FROM character_contexts WHERE character_id=? AND work_id=?',(cid,work_id)).fetchone()
+                if context:
+                    # Web research cannot erase text-derived timelines, change a
+                    # source binding, or replace evidence with an empty web draft.
+                    preserved=json.loads(context['character_json'])
+                    for field,business in {'角色名':'name','角色定位':'role_tag','性格基调':'temperament','视觉元素设计':'visual_design'}.items():
+                        if values.get(field):preserved[business]=values[field]
+                    preserved['aliases']=list(dict.fromkeys([*preserved.get('aliases',[]),*json.loads(values['别名'])]))
+                    if preserved!=json.loads(context['character_json']):connection.execute('UPDATE character_contexts SET character_json=?,revision=revision+1 WHERE character_id=? AND work_id=?',(_json(preserved),cid,work_id))
+                else:
+                    connection.execute('INSERT INTO character_contexts(character_id,work_id,document_id,extracted_character_id,character_json,revision) VALUES(?,?,NULL,?,?,1)',(cid,work_id,cid,_json(canonical)))
+                self._append_catalog_link(connection,'characters',cid,'关联作品',{'作品ID':work_id})
+                character_ids[candidate_id]=cid
+            for index,item in enumerate(draft.get('cliches',[])):
+                candidate_id=str(item.get('candidate_id',item.get('id',f'cliche-{index}')))
+                decision=decisions.get('cliches',{}).get(candidate_id,{})
+                if decision.get('action') not in {'reuse','new'}:raise DataError(422,f'请确认桥段 {candidate_id} 的新建或复用决定')
+                cid=decision.get('id') if decision['action']=='reuse' else 'C-'+uuid4().hex
+                if decision['action']=='reuse':self._row(connection,'cliches',cid)
+                else:
+                    values=catalog_schema.project_values('cliches',{'clichéID':cid,'cliché内容':str(item.get('content','')),'人设塑造':str(item.get('character_trait','')),'剧情机制':str(item.get('plot_mechanism',''))})
+                    if not values['cliché内容'].strip():raise DataError(422,'桥段内容不能为空')
+                    self._insert_raw(connection,'cliches',validate_values('cliches',values))
+                self._append_catalog_link(connection,'cliches',cid,'关联作品',{'作品ID':work_id,'关联内容':str(item.get('description',''))})
+                for candidate_character in item.get('character_ids',[]):
+                    character_id=character_ids.get(candidate_character)
+                    if not character_id:raise DataError(422,f'桥段 {candidate_id} 引用了未确认的人物 {candidate_character}')
+                    self._append_catalog_link(connection,'cliches',cid,'关联角色',{'人物ID':character_id,'作品ID':work_id})
+                cliche_ids[candidate_id]=cid
+            self._rebuild_library_links(connection)
+            result={'work_id':work_id,'characters':character_ids,'cliches':cliche_ids,'catalog_revision':self._catalog_revision(connection),'job_id':job_id}
+            connection.execute('INSERT INTO catalog_research_applies VALUES(?,?,?)',(job_id,fingerprint,_json(result)))
+            return result
+
+    def _append_catalog_link(self, connection: sqlite3.Connection, table: str, identifier: str, field: str, payload: Any) -> None:
+        row=self._row(connection,table,identifier);before=json.loads(row['values_json']);after=catalog_schema.project_values(table,before)
+        target_id_field=ASSOCIATIONS[field][1];target=self._association_id(payload,target_id_field,field)
+        items=association_items(after[field],field)
+        context=payload.get('作品ID','') if isinstance(payload,dict) and {table,ASSOCIATIONS[field][0]}=={'characters','cliches'} else None
+        if any(self._association_id(item,target_id_field,field)==target and (context is None or (item.get('作品ID','') if isinstance(item,dict) else '')==context) for item in items):return
+        after[field]=_json([*items,payload]);self._write_library_values(connection,table,identifier,after);self._sync_modern_views(connection,table,identifier,before,after)

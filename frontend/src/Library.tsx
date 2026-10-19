@@ -3,6 +3,7 @@ import {
   Suspense,
   useCallback,
   useEffect,
+  useId,
   useRef,
   useState,
 } from "react";
@@ -51,6 +52,8 @@ import {
   type TableMeta,
 } from "./api";
 import "./library.css";
+import CharacterSnapshots, { characterTemperaments } from "./CharacterSnapshots";
+import { record, records, stringList, stringValue, type ReferenceRecord } from "./reference-types";
 import { Busy, Modal, PageTitle } from "./ui";
 const WorkReference = lazy(() => import("./WorkReference"));
 
@@ -88,23 +91,47 @@ const emptyStats: Stats = {
 const nf = new Intl.NumberFormat("zh-CN");
 const labelFor = (key: string) =>
   TABLES.find((t) => t.key === key)?.label || ({ work_cliches: "作品桥段表", material_relations: "素材关系" } as Record<string, string>)[key] || key;
-const titleOf = (item: Item, table: TableKey) =>
-  item.values[
-    table === "works" ? "作品" : table === "characters" ? "角色" : "cliché内容"
-  ] || item.id;
+type CatalogItem = Item & { catalog_values?: Record<string, string>; computed?: { cliche_score?: number | null; missing_heat_count?: number; formula?: string } };
+const valuesOf = (item: Item) => (item as CatalogItem).catalog_values || item.values;
+const titleOf = (item: Item, table: TableKey) => {
+  const values = valuesOf(item);
+  return values[table === "works" ? "作品" : table === "characters" ? "角色名" : "cliché内容"] || (table === "characters" ? values["角色"] : "") || item.id;
+};
+const canonicalColumns: Record<TableKey, string[]> = {
+  works: ["作品ID", "作品", "类别", "作者", "发布日期", "用户是否完整体验过", "剧情梗概", "讨论热度", "商业规模", "热度权重", "关联作品", "关联角色", "关联cliché"],
+  characters: ["人物ID", "角色名", "别名", "角色定位", "性格基调", "视觉元素设计", "初始状态", "阶段状态", "关联作品", "关联cliché"],
+  cliches: ["clichéID", "cliché内容", "cliché评分", "人设塑造", "剧情机制", "关联作品", "关联角色"],
+};
+const normalizeItem = (item: Item): Item => ({ ...item, values: valuesOf(item) });
+const scoreOf = (item: Item) => { const raw = (item as CatalogItem).computed?.cliche_score ?? valuesOf(item)["cliché评分"]; return raw !== null && raw !== undefined && raw !== "" && Number.isFinite(Number(raw)) ? Number(raw).toFixed(1) : "—"; };
+function jsonValue(value: string | undefined, fallback: unknown): unknown { try { return value ? JSON.parse(value) : fallback; } catch { return fallback; } }
+function characterFromValues(values: Record<string, string>): ReferenceRecord { return { schema_version: 3, id: values["人物ID"] || "", name: values["角色名"] || values["角色"] || "", aliases: jsonValue(values["别名"], []), role_tag: values["角色定位"] || "", temperament: values["性格基调"] || "", visual_design: values["视觉元素设计"] || "", initial_state: jsonValue(values["初始状态"], { gender: null, age: "", identity: "", ability: "", personality: "", appearance: "", relationships: [], narrative_progress: 0, story_time: null }), snapshots: jsonValue(values["阶段状态"], []) }; }
+function valuesFromCharacter(values: Record<string, string>, character: ReferenceRecord): Record<string, string> { return { ...values, "角色名": stringValue(character.name), "别名": JSON.stringify(Array.isArray(character.aliases) ? character.aliases : stringList(character.aliases)), "角色定位": stringValue(character.role_tag), "性格基调": stringValue(character.temperament), "视觉元素设计": stringValue(character.visual_design), "初始状态": JSON.stringify(record(character.initial_state)), "阶段状态": JSON.stringify(records(character.snapshots)) }; }
 const isLong = (column: string) =>
-  /概括|说明|内容|出现作品|桥段|能力|性格|身份|关系/.test(column);
+  /概括|梗概|说明|内容|出现作品|桥段|能力|性格|身份|关系/.test(column);
 const errorMessage = (e: unknown) =>
   e instanceof Error ? e.message : "操作未完成，请稍后重试。";
 const encoded = (v: string) => encodeURIComponent(v);
-const fieldLabel = (field: string) => ({ "用户是否完整体验过": "看过", "cliché程度（%）": "常见程度（%）", "关联cliché": "关联桥段", "cliché内容": "桥段内容", "clichéID": "桥段 ID" } as Record<string, string>)[field] || field;
-const hiddenColumns = new Set(["版本与原作关系", "剧情补充说明", "典型桥段（剧透）", "经典桥段（剧透）"]);
+const fieldLabel = (field: string) => ({ "用户是否完整体验过": "看过", "关联cliché": "关联桥段", "cliché内容": "桥段内容", "clichéID": "桥段 ID", "cliché评分": "Cliché 评分", "人物ID": "人物 ID", "两句话概括": "剧情梗概", "热度权重": "综合热度" } as Record<string, string>)[field] || field;
+const hiddenColumns = new Set(["版本与原作关系", "剧情补充说明", "典型桥段（剧透）", "经典桥段（剧透）", "两句话概括", "cliché程度（%）", "cliché程度", "命中作品数", "命中热度合计"]);
 const seenKey = "用户是否完整体验过";
 const clicheTypes = [
   { key: "人设塑造", options: ["强大", "智谋", "利他", "共情", "利己", "执念", "反差", "宿命"] },
   { key: "剧情机制", options: ["信息反转", "机械降神", "顿悟突破", "代价交换"] },
 ] as const;
 const isRelationColumn = (column: string) => /^关联/.test(column);
+function HeatRangeField({ id, label, value, onChange }: { id: string; label: string; value: string; onChange: (value: string) => void }) {
+  const parsed = jsonValue(value, null);
+  const metadata = record(parsed);
+  const lower = Object.keys(metadata).length ? metadata.min : value;
+  const upper = Object.keys(metadata).length ? metadata.max : value;
+  const update = (key: "min" | "max", next: string) => {
+    const min = key === "min" ? next : lower, max = key === "max" ? next : upper;
+    if (String(min ?? "") === "" && String(max ?? "") === "") onChange("");
+    else onChange(JSON.stringify({ ...metadata, min: String(min ?? "") === "" ? null : Number(min), max: String(max ?? "") === "" ? null : Number(max) }));
+  };
+  return <div className="catalog-heat-input"><input id={id} type="number" min="1" max="10" step="0.1" aria-label={`${label}下限`} value={stringValue(lower)} onChange={event => update("min", event.target.value)} /><span>—</span><input type="number" min="1" max="10" step="0.1" aria-label={`${label}上限`} value={stringValue(upper)} onChange={event => update("max", event.target.value)} /><span>/ 10</span></div>;
+}
 function ClicheTypeTags({ values }: { values: Record<string, string> }) {
   return <span className="cliche-type-tags">{clicheTypes.map(group => values[group.key] ? <span key={group.key} className={`cliche-type-tag ${group.key === "剧情机制" ? "mechanism" : ""}`}>{group.key}·{values[group.key]}</span> : null)}</span>;
 }
@@ -142,11 +169,22 @@ function AssociationField({ column, value, table, onChange }: { column: string; 
   const objectEntries = isWorks;
   const idKey = isWorks ? "作品ID" : column === "关联角色" ? "人物ID" : "clichéID";
   const semanticKey = table === "cliches" ? "关联内容" : "关联方式";
+  const target: TableKey = isWorks ? "works" : column === "关联角色" ? "characters" : "cliches";
+  const choiceId = useId();
+  const [open, setOpen] = useState(false), [query, setQuery] = useState("");
+  const [choices, setChoices] = useState<Item[]>([]), [loadingChoices, setLoadingChoices] = useState(false);
+  const [choiceError, setChoiceError] = useState("");
+  useEffect(() => {
+    if (!open) return;
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => { setLoadingChoices(true); setChoiceError(""); void request<Page>(`/records/${target}?${new URLSearchParams({ q: query, limit: "100" })}`, { signal: controller.signal }).then(page => { if (!controller.signal.aborted) setChoices(page.items); }).catch(cause => { if (!controller.signal.aborted) setChoiceError(errorMessage(cause)); }).finally(() => { if (!controller.signal.aborted) setLoadingChoices(false); }); }, query ? 250 : 0);
+    return () => { controller.abort(); window.clearTimeout(timer); };
+  }, [open, target, query]);
   const update = (index: number, next: unknown) => onChange(JSON.stringify(items?.map((item, i) => i === index ? next : item) || []));
-  return <details className="association-field"><summary><span>{fieldLabel(column)}</span><span className="association-count">{items?.length ?? "JSON"}</span><ChevronRight size={15} /></summary><div className="association-editor">
+  return <details className="association-field" onToggle={event => setOpen(event.currentTarget.open)}><summary><span>{fieldLabel(column)}</span><span className="association-count">{items?.length ?? "JSON"}</span><ChevronRight size={15} /></summary><div className="association-editor"><datalist id={choiceId}>{choices.map(choice => <option key={choice.id} value={choice.id}>{titleOf(choice, target)}</option>)}</datalist>{loadingChoices && <Busy label="正在查找关联素材" compact />}{choiceError && <div className="notice error" role="alert">{choiceError}</div>}
     {items === null ? <textarea aria-label={fieldLabel(column)} rows={5} value={value} onChange={e => onChange(e.target.value)} /> : <>
       {items.map((entry, index) => { const obj = entry && typeof entry === "object" && !Array.isArray(entry) ? entry as Record<string, unknown> : null; return <div className="association-row" key={index}>
-        <div className="association-row-heading"><input aria-label={`${fieldLabel(column)} ${index + 1} ID`} placeholder={idKey} value={String(obj?.[idKey] ?? entry ?? "")} onChange={e => update(index, obj ? { ...obj, [idKey]: e.target.value } : objectEntries ? { [idKey]: e.target.value } : e.target.value)} /><button type="button" className="icon-button danger" aria-label={`删除第 ${index + 1} 项关联`} onClick={() => onChange(JSON.stringify(items.filter((_, i) => i !== index)))}><X size={15} /></button></div>
+        <div className="association-row-heading"><input aria-label={`${fieldLabel(column)} ${index + 1} ID`} list={choiceId} placeholder={idKey} value={String(obj?.[idKey] ?? entry ?? "")} onChange={e => { setQuery(e.target.value); update(index, obj ? { ...obj, [idKey]: e.target.value } : objectEntries ? { [idKey]: e.target.value } : e.target.value); }} /><button type="button" className="icon-button danger" aria-label={`删除第 ${index + 1} 项关联`} onClick={() => onChange(JSON.stringify(items.filter((_, i) => i !== index)))}><X size={15} /></button></div>
         {isWorks && <input aria-label={`${fieldLabel(column)} ${index + 1} ${semanticKey}`} placeholder={semanticKey} value={String(obj?.[semanticKey] ?? "")} onChange={e => update(index, { ...(obj || { [idKey]: String(entry || "") }), [semanticKey]: e.target.value })} />}
         {obj && Object.keys(obj).some(key => ![idKey, semanticKey].includes(key)) && <AttributeFields value={Object.fromEntries(Object.entries(obj).filter(([key]) => ![idKey, semanticKey].includes(key)))} onChange={extra => update(index, { [idKey]: obj[idKey], ...(obj[semanticKey] !== undefined ? { [semanticKey]: obj[semanticKey] } : {}), ...extra })} />}
 
@@ -231,7 +269,7 @@ function ImportDialog({
       <section className="exchange-schema-tables" aria-label="必要数据表">
         {(formats?.tables?.filter(t => ["works", "characters", "cliches"].includes(t.table)) || [
           { table: "works", label: "作品", filename: "作品.csv", columns: ["作品ID", "作品", "关联作品"] },
-          { table: "characters", label: "角色", filename: "角色.csv", columns: ["人物ID", "角色", "关联作品"] },
+          { table: "characters", label: "角色", filename: "角色.csv", columns: ["人物ID", "角色名", "关联作品"] },
           { table: "cliches", label: "桥段", filename: "cliche.csv", columns: ["clichéID", "cliché内容", "关联作品"] },
         ]).map(t => <div key={t.table}><CheckCircle2 size={16} /><span><strong>{t.label}</strong><small>{t.columns.slice(0, 3).join(" · ")}</small></span><code>{t.filename}</code></div>)}
       </section>
@@ -289,6 +327,8 @@ function ExportDialog({ onClose, notify }: { onClose: () => void; notify: (messa
 }
 
 type Selection = { table: TableKey; id?: string };
+type CharacterContext = { character_id: string; work_id: string; document_id: string; extracted_character_id: string; revision: number; reference_revision: number | null; character: ReferenceRecord; characters: ReferenceRecord[]; events: ReferenceRecord[] };
+type CharacterContexts = { character_id: string; catalog_revision: string; contexts: CharacterContext[] };
 function DetailPanel({
   selection,
   meta,
@@ -311,6 +351,11 @@ function DetailPanel({
   const { table, id } = selection;
   const [item, setItem] = useState<Item | null>(null);
   const [draft, setDraft] = useState<Record<string, string>>({});
+  const [baseline, setBaseline] = useState<Record<string, string>>({});
+  const [characterContexts, setCharacterContexts] = useState<CharacterContexts | null>(null);
+  const [contextWorkId, setContextWorkId] = useState("");
+  const [characterChoices, setCharacterChoices] = useState<ReferenceRecord[]>([]);
+  const characterContext = characterContexts?.contexts.find(context => context.work_id === contextWorkId);
   const [relations, setRelations] = useState<Relations>({
     works: [],
     characters: [],
@@ -330,7 +375,7 @@ function DetailPanel({
     ? titleOf(item, table)
     : `新增${TABLES.find((t) => t.key === table)?.singular}`;
   const dirty = id
-    ? JSON.stringify(draft) !== JSON.stringify(item?.values || {})
+    ? JSON.stringify(draft) !== JSON.stringify(baseline)
     : Object.values(draft).some(Boolean);
   const load = useCallback(async () => {
     setLoading(!!id);
@@ -339,16 +384,25 @@ function DetailPanel({
     if (!id) {
       setItem(null);
       setDraft({});
+      setBaseline({});
+      setCharacterContexts(null);
+      setContextWorkId("");
       setRelations({ works: [], characters: [], cliches: [] });
       return;
     }
     try {
-      const [record, links] = await Promise.all([
+      const [record, links, contexts] = await Promise.all([
         request<Item>(`/records/${table}/${encoded(id)}`),
         request<Relations>(`/records/${table}/${encoded(id)}/relations`),
+        table === "characters" ? request<CharacterContexts>(`/library/characters/${encoded(id)}/contexts`) : Promise.resolve(null),
       ]);
-      setItem(record);
-      setDraft(record.values);
+      setItem(normalizeItem(record));
+      const context = contexts?.contexts[0];
+      const next = context ? valuesFromCharacter(valuesOf(record), context.character) : valuesOf(record);
+      setDraft(next);
+      setBaseline(next);
+      setContextWorkId(context?.work_id || "");
+      setCharacterContexts(contexts);
       setRelations(links);
     } catch (e) {
       setError(errorMessage(e));
@@ -365,25 +419,52 @@ function DetailPanel({
   useEffect(() => {
     onDirty(dirty);
   }, [dirty, onDirty]);
+  useEffect(() => {
+    if (table !== "characters") return;
+    const controller = new AbortController();
+    void request<Page>("/records/characters?limit=200", { signal: controller.signal }).then(page => { if (!controller.signal.aborted) setCharacterChoices(page.items.map(item => ({ id: item.id, name: titleOf(item, "characters") }))); }).catch(() => undefined);
+    return () => controller.abort();
+  }, [table, id, refreshRecord]);
+  const searchCharacters = useCallback(async (query: string) => {
+    const page = await request<Page>(`/records/characters?${new URLSearchParams({ q: query, limit: "100" })}`);
+    return page.items.map(character => ({ id: character.id, name: titleOf(character, "characters") }));
+  }, []);
+  const chooseCharacterContext = (workId: string) => {
+    if (dirty && !window.confirm("有未保存的修改，是否放弃？")) return;
+    const context = characterContexts?.contexts.find(candidate => candidate.work_id === workId);
+    const next = context ? valuesFromCharacter(item?.values || {}, context.character) : item?.values || {};
+    setContextWorkId(workId); setDraft(next); setBaseline(next); setEditingRelations(false); setError(""); setConflict(false);
+  };
   const save = async (event: React.FormEvent) => {
     event.preventDefault();
     setSaving(true);
     setError("");
     setConflict(false);
     try {
+      if (table === "characters" && id && characterContext) {
+        await request(`/library/characters/${encoded(id)}/contexts/${encoded(characterContext.work_id)}`, { method: "PUT", ...jsonBody({ character: { ...characterContext.character, ...characterFromValues(draft), id: characterContext.extracted_character_id }, expected_revision: characterContext.revision, expected_catalog_revision: characterContexts?.catalog_revision, expected_reference_revision: characterContext.reference_revision }) });
+        const [updated, contexts] = await Promise.all([request<Item>(`/records/characters/${encoded(id)}`), request<CharacterContexts>(`/library/characters/${encoded(id)}/contexts`)]);
+        const current = contexts.contexts.find(context => context.work_id === contextWorkId);
+        const next = current ? valuesFromCharacter(valuesOf(updated), current.character) : valuesOf(updated);
+        setItem(normalizeItem(updated)); setCharacterContexts(contexts); setDraft(next); setBaseline(next); onDirty(false); onSaved(updated);
+        window.dispatchEvent(new Event("inkreference:reference-refresh"));
+        return;
+      }
       const record = await request<Item>(
         id ? `/records/${table}/${encoded(id)}` : `/records/${table}`,
         {
           method: id ? "PATCH" : "POST",
           ...jsonBody(
             id
-              ? { values: draft, expected_revision: item?.revision }
-              : { values: draft },
+              ? { values: Object.fromEntries(Object.entries(draft).filter(([key]) => !["热度权重", "cliché评分", ...(table === "characters" && characterContexts?.contexts.length ? ["初始状态", "阶段状态"] : [])].includes(key))), expected_revision: item?.revision }
+              : { values: Object.fromEntries(Object.entries(draft).filter(([key]) => !["热度权重", "cliché评分", ...(table === "characters" && characterContexts?.contexts.length ? ["初始状态", "阶段状态"] : [])].includes(key))) },
           ),
         },
       );
-      setItem(record);
-      setDraft(record.values);
+      setItem(normalizeItem(record));
+      setDraft(valuesOf(record));
+      setBaseline(valuesOf(record));
+      if (table === "characters" && characterContexts?.contexts.length) setCharacterContexts(await request<CharacterContexts>(`/library/characters/${encoded(record.id)}/contexts`));
       onDirty(false);
       onSaved(record);
       const links = await request<Relations>(
@@ -420,9 +501,7 @@ function DetailPanel({
       setDeleteBusy(false);
     }
   };
-  const columns = [
-    ...new Set([...(meta?.columns || []), ...Object.keys(draft)].filter(column => !hiddenColumns.has(column))),
-  ];
+  const columns = canonicalColumns[table].filter(column => !hiddenColumns.has(column));
   return (
     <aside className="detail-panel" aria-label={`${labelFor(table)}详情`}>
       {(loading || saving) && <Busy label={saving ? "正在保存素材" : "正在读取素材"} />}
@@ -430,9 +509,7 @@ function DetailPanel({
         <div>
           <span className="eyebrow">{id ? "素材详情" : "创建素材"}</span>
           <h2 title={title}>{title}</h2>
-          <span className="record-id">
-            {item?.id || "新记录"}
-          </span>
+          <span className="record-id">{item?.id || "新记录"}</span>
         </div>
         <button className="icon-button" onClick={onClose} aria-label="收起详情">
           <PanelRightClose size={20} />
@@ -489,12 +566,12 @@ function DetailPanel({
                 )}
           <form id="library-record-form" className="detail-scroll" hidden={tab !== "details"} onSubmit={(e) => void save(e)}>
                 {table === "cliches" && <ClicheTypeFields values={draft} onChange={(key, value) => setDraft(d => ({ ...d, [key]: value }))} />}
-                {columns.filter(column => !isRelationColumn(column) && !(table === "cliches" && clicheTypes.some(group => group.key === column))).map((column) => {
-                  const immutable = !!id && column === meta?.id_field;
+                {table === "characters" ? <>{!!characterContexts?.contexts.length && <label className="catalog-character-context"><span>作品状态</span><select aria-label="人物作品状态" value={contextWorkId} onChange={event => chooseCharacterContext(event.target.value)}><option value="">人物资料</option>{characterContexts.contexts.map(context => <option key={context.work_id} value={context.work_id}>{relations.works.find(work => work.id === context.work_id)?.values["作品"] || context.work_id}</option>)}</select></label>}<div className="field"><label htmlFor="catalog-character-id">人物 ID</label><input id="catalog-character-id" value={draft["人物ID"] || ""} readOnly={!!id} onChange={event => setDraft(current => ({ ...current, "人物ID": event.target.value }))} /></div><CharacterSnapshots value={characterFromValues(draft)} characters={characterContext?.characters || characterChoices} events={characterContext?.events || []} identityOnly={!!characterContexts?.contexts.length && !contextWorkId} onCharacterSearch={characterContext ? undefined : searchCharacters} onChange={character => setDraft(current => valuesFromCharacter(current, character))} /></> : columns.filter(column => !isRelationColumn(column) && !(table === "cliches" && clicheTypes.some(group => group.key === column))).map((column) => {
+                  const immutable = (!!id && column === meta?.id_field) || ["cliché评分", "热度权重"].includes(column);
                   const fieldId = `field-${column}`;
                   return <div className={`field ${isLong(column) ? "field-long" : ""}`} key={column}>
                     <label htmlFor={fieldId}>{fieldLabel(column)}{immutable && <span aria-hidden="true">ID</span>}</label>
-                    {column === seenKey ? <select id={fieldId} value={draft[column] || ""} onChange={e => setDraft(d => ({ ...d, [column]: e.target.value }))}>
+                    {column === "cliché评分" ? <div className="catalog-score" title={item ? (item as CatalogItem).computed?.formula : undefined}><strong>{item ? scoreOf(item) : "—"}</strong><span>/ 100</span>{!!(item as CatalogItem | null)?.computed?.missing_heat_count && <CircleAlert size={15} className="catalog-score-warning" aria-label="关联作品热度待补充" />}</div> : ["讨论热度", "商业规模"].includes(column) ? <HeatRangeField id={fieldId} label={fieldLabel(column)} value={draft[column] || ""} onChange={value => setDraft(current => ({ ...current, [column]: value }))} /> : column === seenKey ? <select id={fieldId} value={draft[column] || ""} onChange={e => setDraft(d => ({ ...d, [column]: e.target.value }))}>
                       <option value={!["是", "否"].includes(draft[column] || "") ? draft[column] || "" : ""}>未记录</option><option value="是">是</option><option value="否">否</option>
                     </select> : isLong(column) ? <textarea id={fieldId} rows={3} value={draft[column] || ""} onChange={e => setDraft(d => ({ ...d, [column]: e.target.value }))} readOnly={immutable} /> : <input id={fieldId} value={draft[column] || ""} onChange={e => setDraft(d => ({ ...d, [column]: e.target.value }))} readOnly={immutable} />}
                   </div>;
@@ -503,7 +580,7 @@ function DetailPanel({
           </form>
           {tab === "reference" && id && <Suspense fallback={<div className="panel-loading"><Busy label="正在读取作品分析" /></div>}><WorkReference workId={id} /></Suspense>}
           <div className="detail-scroll relations-list" hidden={tab !== "relations"}>
-            <div className="relations-toolbar"><h3>关联</h3>{id && <button type="button" className="button secondary" aria-pressed={editingRelations} onClick={() => setEditingRelations(value => !value)}>{editingRelations ? <BookOpen size={14} /> : <Pencil size={14} />}{editingRelations ? "查看关联" : "编辑关联"}</button>}</div>
+            <div className="relations-toolbar"><h3>关联</h3>{id && !contextWorkId && <button type="button" className="button secondary" aria-pressed={editingRelations} onClick={() => setEditingRelations(value => !value)}>{editingRelations ? <BookOpen size={14} /> : <Pencil size={14} />}{editingRelations ? "查看关联" : "编辑关联"}</button>}</div>
             {editingRelations ? <div className="relations-editor">{columns.filter(isRelationColumn).map(column => <AssociationField key={column} column={column} value={draft[column] || ""} table={table} onChange={value => setDraft(d => ({ ...d, [column]: value }))} />)}</div> : relationGroups.map((group) => (
                 <section key={group.key}>
                   <h3>
@@ -527,7 +604,7 @@ function DetailPanel({
                           </small>
                           <span className="relation-semantics">
                             {(link.relationships?.length ? link.relationships : link.relationship ? [link.relationship] : []).map((relationship, index) => <span className="relation-meaning" key={`${relationship.id}-${index}`}>
-                              <span className="relation-type">{relationship.label || relationship.type || "关联"}</span>
+                              <span className="relation-type">{relationship.label === "使用桥段" ? "剧情关联" : relationship.label || relationship.type || "关联"}</span>
                               {relationship.description && relationship.description !== relationship.label && <span className="relation-description">{relationship.description}</span>}
                               {relationMetadata((relationship as typeof relationship & { metadata?: unknown }).metadata).map(([label, value]) => <span className="relation-attribute" key={label}><small>{label}</small>{value}</span>)}
                             </span>)}
@@ -650,10 +727,10 @@ function RecordTable({ table, items, selectedId, onSelect, onToggleSeen, seenBus
   table: TableKey; items: Item[]; selectedId?: string; onSelect: (item: Item) => void;
   onToggleSeen: (item: Item) => void; seenBusy: string;
 }) {
-  const headings = table === "works" ? ["作品", "类别", "作者", "年份", "看过"] : table === "characters" ? ["角色", "角色定位", "开场身份", "关联作品"] : ["桥段内容", "程度", "关联作品"];
+  const headings = table === "works" ? ["作品", "类别", "作者", "年份", "看过"] : table === "characters" ? ["角色", "角色定位", "性格基调", "关联作品"] : ["桥段内容", "Cliché 评分"];
   return <div className="record-table-wrap"><table className={`record-table table-${table}`}><thead><tr>{headings.map((heading, i) => <th key={heading} className={table === "works" && (i === 2 || i === 3) ? "optional-column" : ""}>{heading}</th>)}<th className="row-action"><span className="visually-hidden">操作</span></th></tr></thead><tbody>{items.map(item => <tr key={item.id} className={item.id === selectedId ? "selected" : ""}>
     <td><button className={`record-title ${table === "cliches" ? "cliche-title" : ""}`} onClick={() => onSelect(item)}><span><strong>{titleOf(item, table)}</strong><small>{item.id}</small>{table === "cliches" && <ClicheTypeTags values={item.values} />}</span></button></td>
-    {table === "works" ? <><td><span className="tag">{item.values["类别"] || "—"}</span></td><td className="optional-column">{item.values["作者"] || "—"}</td><td className="optional-column date-cell">{item.values["发布日期"] || "—"}</td><td><button className={`seen-toggle ${item.values[seenKey] === "是" ? "seen" : ""} ${!["是", "否"].includes(item.values[seenKey]) ? "unknown" : ""}`} onClick={() => onToggleSeen(item)} disabled={seenBusy === item.id} aria-busy={seenBusy === item.id} aria-label={`${titleOf(item, table)} 看过：${["是", "否"].includes(item.values[seenKey]) ? item.values[seenKey] : "未记录"}`} aria-pressed={item.values[seenKey] === "是"}>{seenBusy === item.id ? <LoaderCircle size={13} className="spin" /> : item.values[seenKey] === "是" ? <Check size={13} /> : null}{["是", "否"].includes(item.values[seenKey]) ? item.values[seenKey] : "—"}</button></td></> : table === "characters" ? <><td><span className="tag neutral">{item.values["角色定位"] || "—"}</span></td><td><span className="cell-truncate" title={item.values["开场身份"]}>{item.values["开场身份"] || "—"}</span></td><td><span className="link-count"><Link2 size={13} />{linkedCount(item.values["关联作品"] || "[]")}</span></td></> : <><td className="date-cell">{item.values["cliché程度（%）"] || item.values["cliché程度"] ? `${item.values["cliché程度（%）"] || item.values["cliché程度"]}%` : "—"}</td><td><span className="link-count"><Link2 size={13} />{item.values["命中作品数"] || linkedCount(item.values["关联作品"] || "[]")}</span></td></>}
+    {table === "works" ? <><td><span className="tag">{item.values["类别"] || "—"}</span></td><td className="optional-column">{item.values["作者"] || "—"}</td><td className="optional-column date-cell">{item.values["发布日期"] || "—"}</td><td><button className={`seen-toggle ${item.values[seenKey] === "是" ? "seen" : ""} ${!["是", "否"].includes(item.values[seenKey]) ? "unknown" : ""}`} onClick={() => onToggleSeen(item)} disabled={seenBusy === item.id} aria-busy={seenBusy === item.id} aria-label={`${titleOf(item, table)} 看过：${["是", "否"].includes(item.values[seenKey]) ? item.values[seenKey] : "未记录"}`} aria-pressed={item.values[seenKey] === "是"}>{seenBusy === item.id ? <LoaderCircle size={13} className="spin" /> : item.values[seenKey] === "是" ? <Check size={13} /> : null}{["是", "否"].includes(item.values[seenKey]) ? item.values[seenKey] : "—"}</button></td></> : table === "characters" ? <><td><span className="tag neutral">{item.values["角色定位"] || "—"}</span></td><td><span className="cell-truncate" title={item.values["性格基调"]}>{item.values["性格基调"] || "—"}</span></td><td><span className="link-count"><Link2 size={13} />{linkedCount(item.values["关联作品"] || "[]")}</span></td></> : <><td className="date-cell"><span className="cliche-score-cell">{scoreOf(item)}</span></td></>}
     <td className="row-action"><button className="icon-button" aria-label={`查看${titleOf(item, table)}`} onClick={() => onSelect(item)}><ChevronRight size={17} /></button></td>
   </tr>)}</tbody></table></div>;
 }
@@ -752,7 +829,7 @@ export default function Library() {
       if (hasAnalysis) params.set("has_analysis", hasAnalysis);
     }
     if (table !== "works" && workId) params.set("work_id", workId);
-    if (table === "characters" && role) params.set("role", role);
+    if (table === "characters") { if (role) params.set("role", role); if (characterTrait) params.set("character_trait", characterTrait); }
     if (table === "cliches") {
       if (characterTrait) params.set("character_trait", characterTrait);
       if (plotMechanism) params.set("plot_mechanism", plotMechanism);
@@ -761,7 +838,7 @@ export default function Library() {
     request<LibraryPage>(`/records/${table}?${params}`, { signal: controller.signal })
       .then((data) => {
         if (!controller.signal.aborted) {
-          setPage(data);
+          setPage({ ...data, items: data.items.map(normalizeItem) });
           if (data.facets) setFacets(data.facets);
           if (offset > 0 && !data.items.length && data.total > 0)
             setOffset(Math.floor((data.total - 1) / limit) * limit);
@@ -862,8 +939,8 @@ export default function Library() {
     if (seenBusy || (selection?.table === "works" && selection.id === item.id && dirty)) return;
     setSeenBusy(item.id); setLoadError("");
     try {
-      const updated = await request<Item>(`/records/works/${encoded(item.id)}`, { method: "PATCH", ...jsonBody({ values: { ...item.values, [seenKey]: item.values[seenKey] === "是" ? "否" : "是" }, expected_revision: item.revision }) });
-      setPage(current => ({ ...current, items: current.items.map(row => row.id === updated.id ? updated : row) }));
+      const updated = await request<Item>(`/records/works/${encoded(item.id)}`, { method: "PATCH", ...jsonBody({ values: { [seenKey]: item.values[seenKey] === "是" ? "否" : "是" }, expected_revision: item.revision }) });
+      setPage(current => ({ ...current, items: current.items.map(row => row.id === updated.id ? normalizeItem(updated) : row) }));
       if (selection?.table === "works" && selection.id === item.id) setDetailRefresh(value => value + 1);
       if (seen) reload();
     } catch (e) { notify(errorMessage(e)); } finally { setSeenBusy(""); }
@@ -873,14 +950,14 @@ export default function Library() {
       {(loading || seenBusy) && <Busy label={seenBusy ? "正在保存看过状态" : "正在读取素材库"} />}
       <div className="library-main">
         <main id="main-content" className="main-content" tabIndex={-1}>
-          <PageTitle title={config.label} action={
+          <PageTitle title={config.label} action={<div className="library-heading-actions"><button className="button secondary" onClick={() => window.dispatchEvent(new CustomEvent("inkreference:navigate", { detail: { section: "research", ...(selection?.table === "works" && selection.id ? { workId: selection.id } : {}), table } }))}><Sparkles size={15} />AI 更新</button>
             <button
               className="button primary heading-create"
               onClick={() => chooseRecord(table)}
             >
               <Plus size={17} />
               新增{config.singular}
-            </button>
+            </button></div>
           } />
           <div className="stats-grid" aria-label="素材数量统计">
             {TABLES.map((t) => (
@@ -958,12 +1035,12 @@ export default function Library() {
                 <label><Sparkles size={13} /><select aria-label="筛选分析" value={hasAnalysis} onChange={e => { setHasAnalysis(e.target.value); setOffset(0); }}><option value="">分析</option><option value="true">有分析</option><option value="false">无分析</option></select></label>
               </>}
               {table !== "works" && <label className="database-work-filter"><span>作品</span><select aria-label="筛选关联作品" value={workId} onChange={e => { setWorkId(e.target.value); setOffset(0); }}><option value="">全部作品</option>{facets.works?.map(work => <option key={work.id} value={work.id}>{work.title} · {work.id}</option>)}</select></label>}
-              {table === "characters" && <label><span>定位</span><select aria-label="筛选角色定位" value={role} onChange={e => { setRole(e.target.value); setOffset(0); }}><option value="">全部定位</option>{facets.roles?.map(value => <option key={value}>{value}</option>)}</select></label>}
+              {table === "characters" && <><label><span>基调</span><select aria-label="筛选性格基调" value={characterTrait} onChange={event => { setCharacterTrait(event.target.value); setOffset(0); }}><option value="">全部基调</option>{characterTemperaments.map(value => <option key={value}>{value}</option>)}</select></label><label><span>定位</span><select aria-label="筛选角色定位" value={role} onChange={e => { setRole(e.target.value); setOffset(0); }}><option value="">全部定位</option>{facets.roles?.map(value => <option key={value}>{value}</option>)}</select></label></>}
               {table === "cliches" && <>
                 <label><span>人设塑造</span><select aria-label="筛选人设塑造" value={characterTrait} onChange={e => { setCharacterTrait(e.target.value); setOffset(0); }}><option value="">全部</option>{clicheTypes[0].options.map(value => <option key={value}>{value}</option>)}</select></label>
                 <label><span>剧情机制</span><select aria-label="筛选剧情机制" value={plotMechanism} onChange={e => { setPlotMechanism(e.target.value); setOffset(0); }}><option value="">全部</option>{clicheTypes[1].options.map(value => <option key={value}>{value}</option>)}</select></label>
               </>}
-              <label className="database-sort"><ArrowDownUp size={13} /><select aria-label="排序" value={sortBy} onChange={e => { setSortBy(e.target.value); setOffset(0); }}><option value="">默认排序</option><option value={table === "works" ? "作品" : table === "characters" ? "角色" : "cliché内容"}>名称</option>{table === "works" && <option value="发布日期">年份</option>}</select></label>
+              <label className="database-sort"><ArrowDownUp size={13} /><select aria-label="排序" value={sortBy} onChange={e => { setSortBy(e.target.value); setOffset(0); }}><option value="">默认排序</option><option value={table === "works" ? "作品" : table === "characters" ? "角色名" : "cliché内容"}>名称</option>{table === "works" && <option value="发布日期">年份</option>}</select></label>
               {filterActive && <button className="text-button" onClick={resetFilters}><X size={13} />清除</button>}
             </div>
             {debouncedQuery && (

@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ArrowRight, BookOpen, CheckCircle2, Download, FileSearch, History, Layers3, MessageSquare, RefreshCw, Search, Sparkles, Upload, X, Play } from "lucide-react";
+import { ArrowRight, BookOpen, CheckCircle2, Download, FileSearch, History, Layers3, MessageSquare, RefreshCw, Search, SlidersHorizontal, Sparkles, Upload, X, Play } from "lucide-react";
 import { Busy, Empty, Modal, Notice, dateLabel, messageOf } from "./ui";
-import { normalizeList, send, studio, type DocumentMeta, type List, type ModelProfile, type Run, type RunSummary, type TextVersion } from "./studio";
-import { download } from "./api";
+import { normalizeList, send, studio, type DocumentMeta, type List, type ModelProfile, type Run, type RunSummary } from "./studio";
+import { download, request, type Item, type Page } from "./api";
 import { isRemoteModel, modelEndpoint } from "./model-security";
 import { CollectionEditor, FactsEditor, PlotEditor, PromptPanel, ReferenceField } from "./ReferenceEditors";
 import { ChronicleEntities, ChroniclePlot, EraBackgroundEditor, LanguageAnalysisEditor } from "./ChronicleEditors";
-import { record, records, sectionCount, stringValue, type ReferenceChunkRange, type ReferenceRecord, type ReferenceSection, type ReferenceState } from "./reference-types";
+import { record, records, sectionCount, stringValue, type ReferenceRecord, type ReferenceSection, type ReferenceState } from "./reference-types";
 import "./reference-analysis.css";
 
 type Navigation = (id: "library" | "documents" | "reference" | "jobs" | "workflows" | "models" | "backup") => void;
@@ -34,10 +34,17 @@ export default function ReferenceAnalysis({ docs, runs, loading, navigate, onRef
   const [chapter, setChapter] = useState("");
   const [chapterFilter, setChapterFilter] = useState("");
   const [projection, setProjection] = useState<ReferenceState | null>(null);
+  const [catalogCharacter, setCatalogCharacter] = useState<ReferenceRecord | null>(null);
+  const [catalogCharacters, setCatalogCharacters] = useState<Item[]>([]);
+  const [catalogCharacterQuery, setCatalogCharacterQuery] = useState("");
+  const [catalogCharacterChoice, setCatalogCharacterChoice] = useState("__new__");
+  const [catalogRevision, setCatalogRevision] = useState("");
+  const [catalogBound, setCatalogBound] = useState("");
+  const [catalogSearching, setCatalogSearching] = useState(false);
+  const [scopeOpen, setScopeOpen] = useState(false);
   const [metadataOpen, setMetadataOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [history, setHistory] = useState<{ revision: number; updated_at: string }[]>([]);
-  const [chunkRanges, setChunkRanges] = useState<ReferenceChunkRange[]>([]);
   const [detailRuns, setDetailRuns] = useState<Run[]>([]);
   const requestId = useRef(0);
   const attemptedInitial = useRef(new Set<string>());
@@ -48,17 +55,16 @@ export default function ReferenceAnalysis({ docs, runs, loading, navigate, onRef
   const selected = docs.find(d => d.id === documentId);
   const collection = state?.structure_type === "setting_collection";
   const tabs = collection ? settingTabs : narrativeTabs;
-  const shownState = projection || (!chapterFilter ? state : null);
+  const shownState = projection;
   const shown = shownState?.sections;
   const readOnly = !!chapterFilter;
-  const legacyRanges = !!state && ["plot", "characters", "settings"].includes(tab) && (tab === "plot" ? Number(record(state.sections.plot).schema_version) !== 2 : !records(state.sections[tab as ReferenceSection]).some(item => item.schema_version === 2));
   const segmentStyles = tab === "features" && featureView === "segment" && !chapterFilter;
-  const detailIds = state && (legacyRanges || segmentStyles) ? [...new Set(state.commits.filter(commit => segmentStyles ? commit.section === "style" : commit.section === tab || tab === "characters" && commit.section === "plot").map(commit => commit.run_id))].sort() : [];
+  const detailIds = state && segmentStyles ? [...new Set(state.commits.filter(commit => commit.section === "style").map(commit => commit.run_id))].sort() : [];
   const detailKey = detailIds.join(":");
   const detailRevisionKey = runs.filter(run => run.document_id === documentId && detailIds.includes(run.id)).map(run => `${run.id}:${run.revision}`).join(":");
   useEffect(() => {
     const controller = new AbortController();
-    setDetailRuns([]); setChunkRanges([]); setBusy(current => current === "sources" ? "" : current);
+    setDetailRuns([]); setBusy(current => current === "sources" ? "" : current);
     if (!documentId || !detailKey) return;
     setBusy("sources");
     void Promise.all(detailKey.split(":").map(id => studio<Run>(`/jobs/${encodeURIComponent(id)}`, { signal: controller.signal }))).then(items => {
@@ -69,7 +75,7 @@ export default function ReferenceAnalysis({ docs, runs, loading, navigate, onRef
   const select = useCallback(async (id: string, discard = false, focusTab?: string) => {
     if (dirtyRef.current && !discard) { setPending({ documentId: id, tab: focusTab }); return; }
     const ticket = ++requestId.current; setBusy("load"); setError(""); setMessage("");
-    try { const next = await studio<ReferenceState>(`/documents/${id}/reference`); if (ticket !== requestId.current) return; setDocumentId(id); setState(next); setDetailRuns([]); setChunkRanges([]); setProjection(null); setChapter(""); setChapterFilter(""); setDirty(false); const available = next.structure_type === "setting_collection" ? settingTabs : narrativeTabs; setTab(focusTab && available.some(([key]) => key === focusTab) ? focusTab : next.structure_type === "setting_collection" ? "raw_entries" : "plot"); }
+    try { const next = await studio<ReferenceState>(`/documents/${id}/reference`); if (ticket !== requestId.current) return; setDocumentId(id); setState(next); setDetailRuns([]); setProjection(null); setChapter(""); setChapterFilter(""); setDirty(false); const available = next.structure_type === "setting_collection" ? settingTabs : narrativeTabs; setTab(focusTab && available.some(([key]) => key === focusTab) ? focusTab : next.structure_type === "setting_collection" ? "raw_entries" : "plot"); }
     catch (e) { if (ticket === requestId.current) setError(messageOf(e)); }
     finally { if (ticket === requestId.current) setBusy(""); }
   }, []);
@@ -88,32 +94,6 @@ export default function ReferenceAnalysis({ docs, runs, loading, navigate, onRef
     window.addEventListener("inkreference:catalog-focus", open);
     return () => window.removeEventListener("inkreference:catalog-focus", open);
   }, [docs, documentId, select]);
-  const versionIds = [...new Set(detailRuns.map(run => run.version_id))].join(":");
-  useEffect(() => {
-    if (!documentId || !legacyRanges || !detailRuns.length) return; let active = true; setChunkRanges([]);
-    void Promise.all([...new Set(detailRuns.map(run => run.version_id))].map(async id => {
-      const [v, plan] = await Promise.all([studio<TextVersion>(`/documents/${documentId}/versions/${id}?include_text=false`), studio<{ volumes: ReferenceRecord[] }>(`/documents/${documentId}/versions/${id}/volumes`)]);
-      return { id, version: v, volumes: plan.volumes };
-    })).then(versions => {
-      if (!active) return; const ranges: ReferenceChunkRange[] = [];
-      for (const run of detailRuns) {
-        const v = versions.find(v => v.id === run.version_id); if (!v) continue;
-        run.candidates.forEach((candidate, i) => {
-          const c = candidate as typeof candidate & { start?: number; end?: number };
-          const hits = v.version.chapters.map((ch, index) => ({ ...ch, index: index + 1 })).filter(ch => Number(ch.end ?? ch.end_offset ?? 0) > Number(c.start || 0) && Number(ch.start ?? ch.start_offset ?? 0) < Number(c.end || 0));
-          if (!hits.length) return;
-          const first = hits[0].index, last = hits.at(-1)!.index;
-          if (ranges.some(r => r.startChapter === first && r.endChapter === last)) return;
-          const volume = v.volumes.find(vol => first >= Number(vol.start_chapter) && first <= Number(vol.end_chapter));
-          ranges.push({ key: `${run.id}:${c.chunk_id}`, title: `${stringValue(volume?.title) || "全书"} · 第 ${i + 1} 段（第 ${first}–${last} 章）`, startChapter: first, endChapter: last });
-        });
-      }
-      setChunkRanges(ranges);
-    }).catch(e => { if (active) setError(messageOf(e)); });
-    return () => { active = false; };
-  // Chunk boundaries and source versions are immutable after a task is created.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [documentId, versionIds, detailKey, legacyRanges, detailRuns]);
   useEffect(() => { const before = (e: BeforeUnloadEvent) => { if (dirtyRef.current) e.preventDefault(); }; window.addEventListener("beforeunload", before); return () => window.removeEventListener("beforeunload", before); }, []);
   useEffect(() => { onDirtyChange(dirty); return () => onDirtyChange(false); }, [dirty, onDirtyChange]);
   const reload = useCallback(async () => {
@@ -152,34 +132,69 @@ export default function ReferenceAnalysis({ docs, runs, loading, navigate, onRef
   };
   const showHistory = async () => { setHistoryOpen(true); setBusy("history"); setError(""); try { const response = await studio<{ items: { revision: number; updated_at: string }[] }>(`/documents/${documentId}/reference/history`); setHistory(response.items); } catch (e) { setError(messageOf(e)); } finally { setBusy(""); } };
   const restore = async (revision: number) => { setBusy("restore"); setError(""); try { const next = await send<ReferenceState>(`/documents/${documentId}/reference/restore`, { target_revision: revision, expected_revision: stateRef.current?.revision }); setState(next); stateRef.current = next; setTab(next.structure_type === "setting_collection" ? "raw_entries" : "plot"); setHistoryOpen(false); setMessage("历史内容已恢复为新版本"); } catch (e) { setError(messageOf(e)); } finally { setBusy(""); } };
-  useEffect(() => { if (!documentId) { setProjection(null); return; } let active = true; setProjection(null); setBusy("projection"); void studio<ReferenceState>(`/documents/${documentId}/reference/projection${chapterFilter ? `?chapter=${encodeURIComponent(chapterFilter)}` : ""}`).then(next => { if (active) setProjection(next); }).catch(e => { if (active) setError(messageOf(e)); }).finally(() => { if (active) setBusy(""); }); return () => { active = false; }; }, [documentId, chapterFilter, state?.revision]);
+  useEffect(() => { if (!documentId) { setProjection(null); return; } let active = true; setProjection(null); setBusy("projection"); void studio<ReferenceState>(`/documents/${documentId}/reference/projection?schema_version=3${chapterFilter ? `&progress=${encodeURIComponent(chapterFilter)}` : ""}`).then(next => { if (active) setProjection(next); }).catch(e => { if (active) setError(messageOf(e)); }).finally(() => { if (active) setBusy(""); }); return () => { active = false; }; }, [documentId, chapterFilter, state?.revision]);
+  const openCatalogCharacter = async (character: ReferenceRecord) => {
+    if (!state || !selected) return;
+    setCatalogCharacter(character); setCatalogCharacters([]); setCatalogCharacterQuery(""); setCatalogCharacterChoice("__new__"); setCatalogBound(""); setCatalogRevision(""); setError("");
+    if (!selected.work_id) { setError("请先将文本关联到作品"); return; }
+    setBusy("catalog-character");
+    try {
+      const [links, related, matching] = await Promise.all([
+        studio<{ catalog_revision: string; links: { extracted_character_id: string; character_id: string }[] }>(`/documents/${documentId}/reference/characters/catalog`),
+        request<Page>(`/records/characters?${new URLSearchParams({ work_id: selected.work_id, limit: "100" })}`),
+        request<Page>(`/records/characters?${new URLSearchParams({ q: stringValue(character.name), limit: "100" })}`),
+      ]);
+      const bound = links.links.find(link => link.extracted_character_id === character.id)?.character_id || "";
+      const all = [...related.items, ...matching.items];
+      if (bound && !all.some(item => item.id === bound)) all.unshift(await request<Item>(`/records/characters/${encodeURIComponent(bound)}`));
+      const names = [stringValue(character.name), ...((Array.isArray(character.aliases) ? character.aliases : []) as string[])].map(name => name.normalize("NFKC").toLocaleLowerCase());
+      const choices = [...new Map(all.map(item => [item.id, item])).values()].sort((left, right) => Number(names.includes(right.values["角色名"]?.normalize("NFKC").toLocaleLowerCase())) - Number(names.includes(left.values["角色名"]?.normalize("NFKC").toLocaleLowerCase())));
+      setCatalogCharacters(choices); setCatalogRevision(links.catalog_revision); setCatalogBound(bound); setCatalogCharacterChoice(bound || "__new__");
+    } catch (error) { setError(messageOf(error)); } finally { setBusy(""); }
+  };
+  useEffect(() => {
+    if (!catalogCharacter || !catalogCharacterQuery.trim()) return;
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => { setCatalogSearching(true); void request<Page>(`/records/characters?${new URLSearchParams({ q: catalogCharacterQuery.trim(), limit: "100" })}`, { signal: controller.signal }).then(response => { if (!controller.signal.aborted) setCatalogCharacters(current => [...new Map([...current.filter(item => item.id === catalogCharacterChoice || item.id === catalogBound), ...response.items].map(item => [item.id, item])).values()]); }).catch(error => { if (!controller.signal.aborted) setError(messageOf(error)); }).finally(() => { if (!controller.signal.aborted) setCatalogSearching(false); }); }, 180);
+    return () => { controller.abort(); window.clearTimeout(timer); setCatalogSearching(false); };
+  }, [catalogCharacter, catalogCharacterQuery, catalogCharacterChoice, catalogBound]);
+  const importCatalogCharacter = async () => {
+    const current = stateRef.current; if (!current || !catalogCharacter) return;
+    setBusy("catalog-character-save"); setError("");
+    try { await send(`/documents/${current.document_id}/reference/characters/${encodeURIComponent(stringValue(catalogCharacter.id))}/catalog`, { character_id: catalogCharacterChoice === "__new__" ? undefined : catalogCharacterChoice, expected_reference_revision: current.revision, expected_catalog_revision: catalogRevision }); setCatalogCharacter(null); setMessage("角色已加入人物库"); window.dispatchEvent(new CustomEvent("inkreference:library-refresh")); window.dispatchEvent(new CustomEvent("inkreference:reference-refresh")); await onRefresh(); }
+    catch (error) { setError(messageOf(error)); } finally { setBusy(""); }
+  };
   const sectionDirty = useCallback((value: boolean) => setDirty(value), []);
   const styleChunks = detailRuns.flatMap(run => run.candidates.filter(c => state?.commits.some(k => k.run_id === run.id && k.chunk_id === c.chunk_id && k.section === "style")).map(c => ({ run, chunk: c, style: record(record(c.result).reference).style })));
   return <div className="reference-layout">
     <aside className="surface reference-index"><div className="surface-heading"><h2>参考作品库</h2><span>{docs.length}</span><button className="icon-button" aria-label="刷新参考作品库" onClick={() => void onRefresh().catch(e => setError(messageOf(e)))}><RefreshCw size={15} /></button></div><label className="index-search"><Search size={15} /><input aria-label="搜索参考作品" placeholder="搜索书名、作者或类型" value={query} onChange={e => setQuery(e.target.value)} />{query && <button className="icon-button" aria-label="清除搜索" onClick={() => setQuery("")}><X size={13} /></button>}</label>
+      <div className="reference-work-list">
       {loading && !docs.length ? <Busy label="正在读取作品" /> : docs.filter(d => `${d.title} ${d.catalog_author || d.author || ""} ${d.work_category || d.book_type || ""}`.normalize("NFKC").toLocaleLowerCase().includes(query.trim().normalize("NFKC").toLocaleLowerCase())).map(d => <button className={`reference-work-item ${documentId === d.id ? "active" : ""}`} key={d.id} onClick={() => void select(d.id)}><span className="reference-work-icon"><BookOpen size={19} /></span><span><strong>{d.title}</strong><small>{(Number(d.current_characters ?? d.source_characters ?? 0) / 10000).toFixed(1)} 万字<span>{d.work_category || d.book_type || "未分类"}</span></small></span>{documentId === d.id && <span className="reference-active-dot" />}</button>)}
       {!loading && docs.length > 0 && !docs.some(d => `${d.title} ${d.catalog_author || d.author || ""} ${d.work_category || d.book_type || ""}`.normalize("NFKC").toLocaleLowerCase().includes(query.trim().normalize("NFKC").toLocaleLowerCase())) && <div className="index-empty">未找到作品<button className="text-button" onClick={() => setQuery("")}>清除搜索</button></div>}
+      </div>
     </aside>
     <section className="surface reference-workspace" aria-busy={!!busy}>
       <div className={`reference-operation ${busy ? "visible" : ""}`} aria-hidden={!busy}>{busy && <Busy label={{ load: "正在读取作品分析", save: "正在保存修改", structure: "正在切换作品类型", import: "正在导入文本" }[busy] || "正在处理"} compact />}</div>
       {!state && <Notice error>{error}</Notice>}
       {!state || !selected ? <Empty icon={FileSearch} title="暂无参考作品" action={<button className="button primary" onClick={() => navigate("documents")}>导入作品<ArrowRight size={15} /></button>} /> : <>
-        <header className="reference-work-heading"><div><h2>{selected.title}</h2><div className="inline-meta"><span>{selected.work_category || selected.book_type || (collection ? "设定集" : "未分类")}</span><span>{(Number(selected.current_characters ?? selected.source_characters ?? 0) / 10000).toFixed(1)} 万字</span><span>{dateLabel(selected.created_at)}</span>{state.commits.length > 0 && <span>分析来源 {new Set(state.commits.map(c => c.source_version_id).filter(Boolean)).size || 1} 个正文版本</span>}</div></div><div className="inline-actions"><button className="button primary" disabled={dirty} onClick={() => { sessionStorage.setItem("inkreference.task-document", documentId); window.dispatchEvent(new CustomEvent("inkreference:task-document", { detail: { documentId } })); navigate("jobs"); }}><Play size={14} />分析任务</button>{selected.work_id && <button className="button secondary" disabled={!!busy || dirty} onClick={() => window.dispatchEvent(new CustomEvent("inkreference:navigate", { detail: { section: "library", workId: selected.work_id } }))}><BookOpen size={15} />作品词条</button>}<button className="icon-button" aria-label="作品笔记" disabled={!!busy || dirty} onClick={() => setMetadataOpen(true)}><MessageSquare size={17} /></button><button className="icon-button" aria-label="分析历史版本" disabled={!!busy || dirty} onClick={() => void showHistory()}><History size={17} /></button><button className="button secondary" disabled={!!busy || dirty} onClick={() => setStructureDialog(true)}><Layers3 size={15} />{collection ? "设定集" : "叙事作品"}</button></div></header>
-        {!collection && <form className="reference-chapter-scope" onSubmit={event => { event.preventDefault(); if (!dirty) setChapterFilter(chapter); }}><label>截至章节<input aria-label="分析截至章节" type="number" min="1" step="1" placeholder="全书" value={chapter} disabled={dirty} onChange={e => setChapter(e.target.value)} /></label><button className="button secondary" type="submit" disabled={dirty || !!busy}>查看</button>{chapterFilter && <button className="text-button" type="button" disabled={dirty} onClick={() => { setChapter(""); setChapterFilter(""); }}>全书</button>}</form>}
+        <header className="reference-work-heading"><div className="reference-heading-copy"><h2 className="reference-desktop-title">{selected.title}</h2><label className="reference-title-picker"><span>参考作品库</span><select aria-label="参考作品库" value={documentId} disabled={dirty} onChange={event => void select(event.target.value)}>{docs.map(doc => <option key={doc.id} value={doc.id}>{doc.title} · {(Number(doc.current_characters ?? doc.source_characters ?? 0) / 10000).toFixed(1)} 万字 · {doc.work_category || doc.book_type || "未分类"}</option>)}</select></label></div><div className="inline-actions"><button className={`icon-button ${scopeOpen || chapterFilter ? "active" : ""}`} aria-label="叙事进度筛选" title="叙事进度筛选" disabled={dirty} onClick={() => setScopeOpen(!scopeOpen)}><SlidersHorizontal size={16} /></button>{selected.work_id && <button className="icon-button" title="作品词条" aria-label="作品词条" disabled={!!busy || dirty} onClick={() => window.dispatchEvent(new CustomEvent("inkreference:navigate", { detail: { section: "library", workId: selected.work_id } }))}><BookOpen size={16} /></button>}<button className="icon-button" aria-label="作品笔记" title="作品笔记" disabled={!!busy || dirty} onClick={() => setMetadataOpen(true)}><MessageSquare size={16} /></button><button className="icon-button" aria-label="分析历史版本" title="分析历史版本" disabled={!!busy || dirty} onClick={() => void showHistory()}><History size={16} /></button><button className="icon-button" title={collection ? "切换设定集结构" : "切换叙事作品结构"} aria-label="作品结构" disabled={!!busy || dirty} onClick={() => setStructureDialog(true)}><Layers3 size={16} /></button><button className="button primary" disabled={dirty} onClick={() => { sessionStorage.setItem("inkreference.task-document", documentId); window.dispatchEvent(new CustomEvent("inkreference:task-document", { detail: { documentId } })); navigate("jobs"); }}><Play size={14} /><span className="reference-task-label">分析任务</span></button></div></header>
+        {!collection && scopeOpen && <form className="reference-progress-scope" onSubmit={event => { event.preventDefault(); if (!dirty) setChapterFilter(chapter); }}><label>叙事进度<input aria-label="分析截至叙事进度" type="number" min="0" max="100" step="0.1" placeholder="100" value={chapter} disabled={dirty} onChange={event => setChapter(event.target.value)} /><span>%</span></label><button className="button secondary" type="submit" disabled={dirty || !!busy}>查看</button>{chapterFilter && <button className="text-button" type="button" disabled={dirty} onClick={() => { setChapter(""); setChapterFilter(""); }}>全书</button>}</form>}
+        {chapterFilter && !scopeOpen && <div className="reference-active-scope"><span>截至 {chapterFilter}%</span><button className="icon-button" aria-label="查看全书" onClick={() => { setChapter(""); setChapterFilter(""); }}><X size={13} /></button></div>}
         <div className="reference-tabs" role="tablist" aria-label="参考数据库功能">{tabs.map(([key, label]) => <button role="tab" aria-selected={tab === key} className={tab === key ? "active" : ""} key={key} onClick={() => changeTab(key)}>{label}{["plot", "characters", "settings", "setting_features", "raw_entries"].includes(key) && <span>{sectionCount(shownState, key as ReferenceSection)}</span>}</button>)}</div>
         <div className="reference-notices"><Notice error={!!error} success={!error && !!message}>{error || message}</Notice></div>
         <div className="reference-tab-body" key={`${documentId}:${tab}`}>
-          {readOnly && !projection ? <Busy label="正在读取章节视图" /> : shown && <>
-          {tab === "plot" && (Number(record(shown.plot).schema_version) >= 2 || Array.isArray(record(shown.plot).events) ? <ChroniclePlot sourceVersionId={selected.latest_version_id || ""} value={shown.plot} rawValue={state.sections.plot} onSave={readOnly ? undefined : data => save("plot", data)} busy={!!busy} onDirty={sectionDirty} characters={records(shown.characters)} settings={records(shown.settings)} readOnly={readOnly} /> : <PlotEditor value={shown.plot} chunkRanges={chunkRanges} onSave={data => save("plot", data)} busy={!!busy || readOnly} onDirty={sectionDirty} summaryAction={!readOnly && <button className="button secondary" disabled={!!busy || dirty} onClick={() => setTransform({ kind: "summarize" })}><Sparkles size={14} />调整大纲粒度</button>} />)}
-          {(["characters", "settings"] as string[]).includes(tab) && (records(shown[tab as ReferenceSection]).some(item => Number(item.schema_version) >= 2 || Array.isArray(item.states)) || !records(shown[tab as ReferenceSection]).length ? <ChronicleEntities sourceVersionId={selected.latest_version_id || ""} kind={tab as "characters" | "settings"} value={shown[tab as ReferenceSection]} rawValue={state.sections[tab as ReferenceSection]} onSave={readOnly ? undefined : data => save(tab as ReferenceSection, data)} busy={!!busy} onDirty={sectionDirty} plot={shown.plot} characters={records(shown.characters)} settings={records(shown.settings)} readOnly={readOnly} /> : <CollectionEditor kind={tab as "characters" | "settings"} value={shown[tab as ReferenceSection]} onSave={items => save(tab as ReferenceSection, items)} busy={!!busy || readOnly} onDirty={sectionDirty} settingCollection={collection} chunkRanges={chunkRanges} plot={shown.plot} />)}
+          {!projection ? <Busy label={readOnly ? "正在读取叙事进度视图" : "正在读取作品分析"} /> : shown && <>
+          {tab === "plot" && <ChroniclePlot sourceVersionId={selected.latest_version_id || ""} value={shown.plot} rawValue={shown.plot} onSave={readOnly ? undefined : data => save("plot", data)} busy={!!busy} onDirty={sectionDirty} characters={records(shown.characters)} settings={records(shown.settings)} readOnly={readOnly} />}
+          {(["characters", "settings"] as string[]).includes(tab) && <ChronicleEntities sourceVersionId={selected.latest_version_id || ""} kind={tab as "characters" | "settings"} value={shown[tab as ReferenceSection]} rawValue={shown[tab as ReferenceSection]} onSave={readOnly ? undefined : data => save(tab as ReferenceSection, data)} busy={!!busy} onDirty={sectionDirty} plot={shown.plot} characters={records(shown.characters)} settings={records(shown.settings)} readOnly={readOnly} onCatalog={readOnly ? undefined : item => void openCatalogCharacter(item)} />}
           {tab === "setting_features" && <CollectionEditor kind="setting_features" value={shown.setting_features} onSave={items => save("setting_features", items)} busy={!!busy || readOnly} onDirty={sectionDirty} />}
-          {tab === "era_background" && <EraBackgroundEditor sourceVersionId={selected.latest_version_id || ""} value={shown.era_background} characters={records(shown.characters)} onSave={readOnly ? undefined : data => save("era_background", data)} busy={!!busy} onDirty={sectionDirty} />}
+          {tab === "era_background" && <EraBackgroundEditor sourceVersionId={selected.latest_version_id || ""} value={shown.era_background} plot={shown.plot} characters={records(shown.characters)} onSave={readOnly ? undefined : data => save("era_background", data)} busy={!!busy} onDirty={sectionDirty} />}
           {tab === "raw_entries" && <><div className="ref-raw-tools"><button className="button secondary" disabled={!!busy || dirty} onClick={() => setImportDialog(true)}><Upload size={14} />导入设定集 TXT</button><button className="button secondary" disabled={!!busy} onClick={() => void exportEntries()}><Download size={14} />导出设定集 TXT</button></div><CollectionEditor kind="raw_entries" value={state.sections.raw_entries} onSave={items => save("raw_entries", items)} busy={!!busy} onDirty={sectionDirty} settingCollection onExtra={(_, index) => <div className="ref-raw-entry-actions"><button className="text-button" disabled={!!busy || dirty} onClick={() => setTransform({ kind: "translate", entryIndex: index })}><Sparkles size={14} />翻译与预览</button></div>} /></>}
           {tab === "features" && <><div className="ref-collection-tools"><h3>语言分析</h3><div className="ref-segment-control"><button className={featureView === "book" ? "active" : ""} disabled={dirty} onClick={() => setFeatureView("book")}>全书视图</button><button className={featureView === "segment" ? "active" : ""} disabled={dirty || readOnly} onClick={() => setFeatureView("segment")}>分段视图</button></div></div>{featureView === "book" || readOnly ? <LanguageAnalysisEditor sourceVersionId={selected.latest_version_id || ""} value={shown.style} rhythm={shown.rhythm} opening={shown.opening} characters={records(shown.characters)} onSave={readOnly ? undefined : data => save("style", data)} onSaveRhythm={readOnly ? undefined : data => save("rhythm", data)} onSaveOpening={readOnly ? undefined : data => save("opening", data)} busy={!!busy} onDirty={sectionDirty} /> : <div className="ref-chunk-style-list">{styleChunks.map(({ run, chunk, style }) => <details key={`${run.id}:${chunk.chunk_id}`}><summary><span><FileSearch size={15} />{chunk.chunk_id}</span><span>{dateLabel(run.created_at)}</span><CheckCircle2 size={15} /></summary><LanguageAnalysisEditor value={style} /></details>)}{!styleChunks.length && <div className="ref-empty">暂无分段语言分析</div>}</div>}</>}
           </>}
         </div>
       </>}
     </section>
+    {catalogCharacter && <Modal title="加入角色库" busy={busy.startsWith("catalog-character")} onClose={() => setCatalogCharacter(null)}><div className="modal-body"><h3 className="catalog-character-name">{stringValue(catalogCharacter.name)}</h3><label className="studio-field"><span>搜索人物</span><input aria-label="搜索复用人物" value={catalogCharacterQuery} disabled={!!busy || !!catalogBound} onChange={event => setCatalogCharacterQuery(event.target.value)} /></label>{catalogSearching && <Busy label="正在搜索人物" compact />}<div className="catalog-character-options">{!catalogBound && <label><input type="radio" name="catalog-character" value="__new__" checked={catalogCharacterChoice === "__new__"} onChange={() => setCatalogCharacterChoice("__new__")} /><span><strong>新建人物</strong><small>{stringValue(catalogCharacter.name)} · {stringValue(catalogCharacter.id)}</small></span></label>}{catalogCharacters.map(item => <label key={item.id}><input type="radio" name="catalog-character" value={item.id} checked={catalogCharacterChoice === item.id} disabled={!!catalogBound && catalogBound !== item.id} onChange={() => setCatalogCharacterChoice(item.id)} /><span><strong>{item.values["角色名"] || item.id}</strong><small>{item.values["别名"] ? `${item.values["别名"]} · ` : ""}{item.id}</small></span>{catalogBound === item.id && <span className="ref-tag">已关联</span>}</label>)}</div><Notice error>{error}</Notice>{busy.startsWith("catalog-character") && <Busy label={busy.endsWith("save") ? "正在同步人物" : "正在读取角色库"} compact />}</div><div className="modal-footer"><button className="button secondary" disabled={!!busy} onClick={() => setCatalogCharacter(null)}>取消</button><button className="button primary" disabled={!!busy || !catalogRevision || !selected?.work_id} onClick={() => void importCatalogCharacter()}>{catalogBound ? "同步人物" : catalogCharacterChoice === "__new__" ? "新建并关联" : "复用并关联"}</button></div></Modal>}
     {metadataOpen && state && <MetadataDialog value={state.sections.metadata} busy={!!busy} onClose={() => setMetadataOpen(false)} onSave={async data => { await save("metadata", data); setMetadataOpen(false); }} />}
     {historyOpen && <Modal title="分析历史版本" onClose={() => setHistoryOpen(false)} busy={!!busy}><div className="modal-body"><Notice error>{error}</Notice>{busy && <Busy label={busy === "restore" ? "正在恢复分析版本" : "正在读取历史版本"} compact />}<div className="ref-history-list">{history.map(h => <div key={h.revision}><span><strong>版本 {h.revision}</strong><small>{dateLabel(h.updated_at)}</small></span><button className="button secondary" disabled={!!busy || h.revision === state?.revision} onClick={() => void restore(h.revision)}>{h.revision === state?.revision ? "当前版本" : "恢复为新版本"}</button></div>)}</div></div><div className="modal-footer"><button className="button secondary" disabled={!!busy} onClick={() => setHistoryOpen(false)}>关闭</button></div></Modal>}
     {pending && <Modal title="有未保存的修改" onClose={() => setPending(null)}><div className="modal-body"><p>当前编辑尚未保存。</p></div><div className="modal-footer"><button className="button secondary" onClick={() => setPending(null)}>继续编辑</button><button className="button danger" onClick={() => { const next = pending; setPending(null); setDirty(false); dirtyRef.current = false; if (next.documentId) void select(next.documentId, true, next.tab); else if (next.tab) setTab(next.tab); }}>放弃并切换</button></div></Modal>}

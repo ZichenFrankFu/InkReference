@@ -36,7 +36,7 @@ class NewRun(BaseModel):
     version_id: str = Field(min_length=1, max_length=200)
     profile_id: str | None = Field(default=None, min_length=1, max_length=100)
     workflow_id: str = "default"
-    workflow_version: str = "2.0.0"
+    workflow_version: str = "3.0.0"
     start: bool = True
     manual: bool = False
     remote_consent: bool = False
@@ -117,6 +117,12 @@ class ReferenceSection(ReferenceRevision):
     data: Any
 
 
+class ReferencePreview(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    sections: dict[str, Any] = Field(max_length=20)
+    source_version_id: str | None = Field(default=None, min_length=1, max_length=200)
+
+
 class BookMetadataUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     values: dict[str, Any]
@@ -169,13 +175,14 @@ class ReferenceImport(ReferenceRevision):
 
 class Studio:
     def __init__(self, runtime):
-        self.lock = threading.RLock()
+        self.lock = runtime.lock
         self.data_dir = runtime.data_dir
         self._runtime = runtime
         self.documents = DocumentStore(self.data_dir)
         self._volumes = self._reference = self._models = None
         self._skills = self._workflows = self._projects = self._runner = None
         self._conversions = self._ingestions = None
+        self._research = self._character_bridge = None
 
     def _service(self, name, factory):
         with self.lock:
@@ -192,7 +199,23 @@ class Studio:
 
     @property
     def reference(self):
-        return self._service("reference", lambda: ReferenceAnalysisStore(self.data_dir, documents=self.documents))
+        def create():
+            reference = ReferenceAnalysisStore(self.data_dir, documents=self.documents)
+            reference.write_lock = self.lock
+            reference.catalog_sync = lambda connection, document_id, sections: self.character_bridge.sync_bound_from_reference_connection(connection, document_id, sections)
+            return reference
+        return self._service("reference", create)
+
+    @property
+    def character_bridge(self):
+        from .character_bridge_v11 import CharacterBridge
+        return self._service("character_bridge", lambda: CharacterBridge(self._runtime.store, self.documents, lambda: self.reference))
+
+    @property
+    def research(self):
+        from .research import ResearchService
+        return self._service("research", lambda: ResearchService(self.data_dir, self.models,
+            catalog_snapshot=self._runtime.store.catalog_snapshot, catalog_commit=self._runtime.store.apply_research))
 
     @property
     def models(self):
@@ -241,9 +264,13 @@ class Studio:
             workers += self._ingestions.active_threads()
         if self._conversions is not None:
             workers += self._conversions.active_threads()
+        if self._research is not None:
+            workers += self._research.active_threads()
         return workers
 
     def require_idle(self):
+        if self._research is not None and self._research.has_active_runs():
+            raise DataError(409, "请先完成或暂停正在运行的 AI 更新，再导出项目。")
         if self._ingestions is not None and any(item["status"] in {"queued", "running"} for item in self.ingestions.list()):
             raise DataError(409, "请先完成或取消正在处理的全文上传，再导出项目。")
         if self.runner.has_active_runs():
@@ -567,8 +594,9 @@ def install_studio_routes(application, runtime):
         return runtime.studio.reference.get(document_id)
 
     @router.get("/documents/{document_id}/reference/projection")
-    def project_reference(document_id: str, chapter: Annotated[int | None, Query(ge=1)] = None):
-        from .analysis_projection import project_sections
+    def project_reference(document_id: str, chapter: Annotated[int | None, Query(ge=1)] = None,
+                          progress: Annotated[float | None, Query(ge=0, le=100)] = None,
+                          schema_version: Annotated[int | None, Query(ge=2, le=3)] = None):
         state = runtime.studio.reference.get(document_id)
         events = state["sections"].get("plot", {}).get("events", [])
         sources = {item.get("source_version_id") for item in events if isinstance(item, dict) and item.get("source_version_id")}
@@ -579,8 +607,31 @@ def install_studio_routes(application, runtime):
         if len(sources) == 1:
             version_id = next(iter(sources))
             volumes = runtime.studio.volumes.get(document_id, version_id)["volumes"]
-        return {**state, "sections": project_sections(state["sections"], chapter, volumes=volumes),
-                "projection": {"chapter": chapter, "schema_version": 2}}
+        return runtime.studio.reference.project(document_id, chapter, volumes=volumes,
+                                               target_version=schema_version, progress=progress)
+
+    @router.post("/documents/{document_id}/reference/preview")
+    def preview_reference(document_id: str, body: ReferencePreview):
+        from .analysis_projection import project_sections
+        from .reference_analysis import _bounded, _dump
+        runtime.studio.documents.get_document(document_id)
+        _bounded(body.sections)
+        _dump(body.sections)
+        sources = {}
+        identifiers = set()
+        def source_ids(value):
+            if isinstance(value, dict):
+                if isinstance(value.get("source_version_id"), str) and value["source_version_id"]:
+                    identifiers.add(value["source_version_id"])
+                for item in value.values(): source_ids(item)
+            elif isinstance(value, list):
+                for item in value: source_ids(item)
+        source_ids(body.sections)
+        if body.source_version_id:
+            identifiers.add(body.source_version_id)
+        for identifier in identifiers:
+            sources[identifier] = runtime.studio.documents.get_version(document_id, identifier)
+        return {"sections": project_sections(body.sections, target_version=3, source_versions=sources)}
 
     @router.post("/reference-collections", status_code=201)
     def new_collection(body: NewCollection):
@@ -751,7 +802,7 @@ def install_studio_routes(application, runtime):
             return runtime.studio.skills.save(body)
 
     @router.post("/skills/upload", status_code=201)
-    async def upload_skill(file: Annotated[UploadFile, File()], contract_version: Annotated[int | None, Query(ge=2, le=2)] = None):
+    async def upload_skill(file: Annotated[UploadFile, File()], contract_version: Annotated[int | None, Query(ge=2, le=3)] = None):
         raw = await _upload(file, 2 * 1024 * 1024)
         def save():
             with runtime.studio.lock:

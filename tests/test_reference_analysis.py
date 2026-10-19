@@ -52,7 +52,7 @@ def make_runner(tmp_path, *, manual=False):
 
 def test_rich_versions_do_not_redefine_legacy_builtin_identity(tmp_path):
     skills, workflows = SkillStore(tmp_path), WorkflowStore(tmp_path)
-    assert skills.get()["version"] == workflows.get()["version"] == "2.0.0"
+    assert skills.get()["version"] == workflows.get()["version"] == "3.0.0"
     assert skills.get("unified-reference", "1.1.0")["output_schema"] == RICH_BUILTIN_SKILL["output_schema"]
     assert skills.get("unified-reference", "1.0.0") == {**BUILTIN_SKILL, "builtin": True}
     assert workflows.get("default", "1.0.0") == {**DEFAULT_WORKFLOW, "builtin": True}

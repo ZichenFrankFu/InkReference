@@ -73,7 +73,9 @@ def test_complete_semantic_roundtrip_all_formats(tmp_path, populated, fmt):
     if fmt == "db":
         assert raw.startswith(b"SQLite format 3\x00")
     if fmt == "csv":
-        assert {name for name, _ in unpack_csv(raw)} == {f"{table}.csv" for table in COLUMNS} | {"manifest.json"}
+        names = {name for name, _ in unpack_csv(raw)}
+        assert names == {"works.csv","characters.csv","cliches.csv","material_relations.csv","legacy_values.csv","catalog_field_archive.csv","manifest.json"}
+        assert "character_contexts.csv" not in names
 
 
 @pytest.mark.parametrize("fmt", ["db", "csv", "xlsx"])
@@ -86,10 +88,10 @@ def test_empty_library_exports_keep_every_table(tmp_path, fmt):
 def test_literal_formula_dates_unknowns_newlines_and_non_bmp(tmp_path, populated, fmt):
     row = populated.get_record("works", "W950")
     text = '=SUM(A1:A2)\r\n𰻞emoji😀\n引号"，未知与【待确认】\r仅回车'
-    populated.update_record("works", row["id"], {"两句话概括": text, "发布日期": "2020-03", "热度权重": "00000012345678901234567890"}, row["revision"])
+    populated.update_record("works", row["id"], {"剧情梗概": text, "发布日期": "2020-03", "热度权重": "00000012345678901234567890"}, row["revision"])
     target, _ = roundtrip(tmp_path, populated, fmt)
     result = target.get_record("works", "W950")["values"]
-    assert result["两句话概括"] == text
+    assert result["剧情梗概"] == text
     assert result["发布日期"] == "2020-03"
     assert result["热度权重"] == "00000012345678901234567890"
 
@@ -97,9 +99,9 @@ def test_literal_formula_dates_unknowns_newlines_and_non_bmp(tmp_path, populated
 def test_xlsx_long_and_xml_control_text_are_lossless(tmp_path, populated):
     row = populated.get_record("works", "W950")
     text = ("长文本😀\n" * 10000) + "\x08不可见控制字符"
-    populated.update_record("works", row["id"], {"两句话概括": text}, row["revision"])
+    populated.update_record("works", row["id"], {"剧情梗概": text}, row["revision"])
     target, raw = roundtrip(tmp_path, populated, "xlsx")
-    assert target.get_record("works", "W950")["values"]["两句话概括"] == text
+    assert target.get_record("works", "W950")["values"]["剧情梗概"] == text
     book = load_workbook(io.BytesIO(raw), read_only=True)
     assert book["_long_text"].sheet_state == "hidden"
     assert book["_manifest"].sheet_state == "hidden"
@@ -108,7 +110,7 @@ def test_xlsx_long_and_xml_control_text_are_lossless(tmp_path, populated):
 
 def test_xlsx_formula_exported_as_text_and_import_formula_rejected(populated):
     row = populated.get_record("works", "W950")
-    populated.update_record("works", row["id"], {"两句话概括": "=1+1"}, row["revision"])
+    populated.update_record("works", row["id"], {"剧情梗概": "=1+1"}, row["revision"])
     raw = export_library(populated, "xlsx")
     book = load_workbook(io.BytesIO(raw))
     cell = book["works"]["G4"]
@@ -322,7 +324,8 @@ def test_xlsx_mixed_worksheet_bundle_detected(populated):
     first = load_workbook(io.BytesIO(export_library(populated, "xlsx")))
     second = load_workbook(io.BytesIO(export_library(populated, "xlsx")))
     # Copying another export's sheet carries a different explicit bundle ID.
-    first["characters"]["L2"] = second["characters"]["L2"].value
+    bundle_column = len(COLUMNS["characters"]) + 1
+    first["characters"].cell(2,bundle_column).value = second["characters"].cell(2,bundle_column).value
     output = io.BytesIO()
     first.save(output)
     errors = " ".join(parse_library_files([("mixed.xlsx", output.getvalue())]).errors)
@@ -332,9 +335,9 @@ def test_xlsx_mixed_worksheet_bundle_detected(populated):
 def test_xlsx_non_bmp_excel_utf16_cell_limit(tmp_path, populated):
     row = populated.get_record("works", "W950")
     text = "😀" * 20000
-    populated.update_record("works", row["id"], {"两句话概括": text}, row["revision"])
+    populated.update_record("works", row["id"], {"剧情梗概": text}, row["revision"])
     target, raw = roundtrip(tmp_path, populated, "xlsx")
-    assert target.get_record("works", "W950")["values"]["两句话概括"] == text
+    assert target.get_record("works", "W950")["values"]["剧情梗概"] == text
     book = load_workbook(io.BytesIO(raw), read_only=True)
     assert "_long_text" in book.sheetnames
     book.close()

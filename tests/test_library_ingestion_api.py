@@ -81,7 +81,7 @@ def test_library_http_roundtrip_all_tables_meaning_and_semantics(client, tmp_pat
     with TestClient(create_app(tmp_path / f"restored-{format}", tmp_path / "other-dist"), base_url="http://127.0.0.1") as target:
         batch = preview(target, [("files", (f"library.{extension}", exported.content, exported.headers["content-type"]))])
         assert batch["errors"] == [] and batch["warnings"] == []
-        assert {item["table"] for item in batch["required_tables"] if item["present"]} == set(COLUMNS)
+        assert {item["table"] for item in batch["required_tables"] if item["present"]} == set(COLUMNS)-{"character_contexts"}
         assert checked(target.get("/api/stats"))["works"] == 0  # preview is read only
         commit(target, batch)
         assert snapshot(target) == before

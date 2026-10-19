@@ -67,15 +67,18 @@ def era_statistics(era: dict, characters: list[dict], *, character_count: int = 
     seen, items, total = set(), [], 0
     for item in era.get("items", []):
         count = 0
-        for occurrence in item.get("occurrences", []):
+        for occurrence in item.get("appearances", item.get("occurrences", [])):
             anchor = occurrence.get("revealed_at", {})
             key = (item.get("id"), occurrence.get("source_version_id"), anchor.get("chapter"), anchor.get("offset"), occurrence.get("evidence"))
+            if not occurrence.get("source_version_id") and not occurrence.get("evidence"):
+                key = (*key, occurrence.get("narrative_progress"), occurrence.get("story_time"), occurrence.get("context"), occurrence.get("usage"), tuple(occurrence.get("character_ids", [])))
             if key in seen: continue
             seen.add(key)
             count += 1
-            cid = occurrence.get("character_id")
-            if item.get("kind") == "meme" and cid in all_ids and occurrence.get("usage") in {"dialogue", "thought"}:
-                counts[cid] += 1
+            cids = occurrence.get("character_ids", [occurrence.get("character_id")])
+            if item.get("kind") == "meme" and occurrence.get("usage") in {"dialogue", "thought"}:
+                for cid in set(cids):
+                    if cid in all_ids: counts[cid] += 1
         total += count
         items.append({"id": item.get("id"), "count": count,
                       "per_10000_chars": round(count * 10000 / character_count, 4) if character_count else None})
