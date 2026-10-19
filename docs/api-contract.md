@@ -10,6 +10,20 @@ The six operations are `catalog` (research and identity), `volumes`, `extraction
 
 All modes use their domain's validators, editable candidate and existing final transaction. Generating a reply, parsing pasted JSON, loading a manual template or selecting an A/B candidate does not approve reference facts or modify source files. Common JSON parsing rejects duplicate keys, non-finite numbers, excessive nesting/node counts, invalid Unicode and multiple result objects. Domain-specific size, identity, evidence, revision, source-hash and task checks remain authoritative. Historical contracts keep their independent parsers where compatibility requires them.
 
+### Reviewed prompt exchange
+
+Current automatic and semi-automatic GUI paths use a two-column prompt/reply modal. The left user prompt is editable and is the exact user message sent only after explicit submission; a fixed domain system message remains separate. The right reply is editable before domain validation. The legacy `summarize` adapter remains available through the API, while the current plot GUI no longer exposes 整理大纲. Manual entry retains domain templates.
+
+| Endpoint under `/api/studio/dynamic-functions` | Contract |
+|---|---|
+| `POST /{operation}/prepare` | `{payload,mode:"automatic"\|"semi",profile_id?}` → `{prepared_id,prompt,template,binding,source_digest,profile_id,model_fingerprint,system_prompt,domain_context}`. `model_profile_id` is an accepted alias. Preparation does not invoke a language model. Automatic research/volumes may search and independently read public sources. |
+| `POST /{operation}/execute` | `{prepared_id,prompt_override,model_profile_id?,remote_consent?,expected_model_fingerprint?}` → `{raw_reply,reply,content,call_id,usage,prompt,...}`. `prompt`/`profile_id` are aliases. Sends one request, pins the model target and stores a received reply before parsing. Context and output budgets are checked before submission. |
+| `POST /{operation}/preview` | `{prepared_id,reply}` → `{prepared_id,operation,preview,domain_result}`. Domain parsing checks source/session/revision bindings and writes no business fact or source file. |
+| `GET /preparations/{id}` | Reopen saved input, confirmed prompt, raw reply, status, summary and usage. |
+| `POST /preparations/{id}/control` | `{action:"pause"\|"resume"\|"terminate"\|"complete"}`. Resume opens the saved exchange without invoking a model; an in-flight request must finish first. Complete is used after successful domain confirmation. |
+
+Changing a source or model target invalidates preview/confirmation without discarding a received billable reply. Stopped preparations preserve replies. Final application uses the existing domain transaction and its revision/hash checks; there is no generic arbitrary-table apply endpoint. External pasted replies have unknown provider token usage.
+
 ## Local HTTP boundary
 
 The launcher accepts loopback interfaces only. Every request must use a loopback Host; API reads and writes reject foreign or `null` Origin values and browser `Sec-Fetch-Site: cross-site` requests. Frontend requests use the same origin by default. An explicitly configured loopback `INKREFERENCE_DEV_ORIGIN` is the development exception. API and HTML responses use `Cache-Control: no-store`; the production page has a self-only Content Security Policy, including `connect-src`, and no external scripts or telemetry.
@@ -67,7 +81,7 @@ Local diagnostics record route/method/status/duration, request/task/diagnostic I
 ## Common types
 - `Record`: `{id: string, values: Record<string,string>, revision: number}`.
 - `TableMeta`: `{key: string, label: string, id_field: string, columns: string[], count: number}`.
-- `GET /api/meta`: `{tables: TableMeta[], version: string, schema_version:6}`.
+- `GET /api/meta`: `{tables: TableMeta[], version: string, schema_version:7}`.
 - `GET /api/stats`: `{works: number, characters: number, cliches: number, work_cliches: number}`.
 - `GET /api/health`: `{status: "ok", version: string}`.
 
@@ -84,6 +98,12 @@ Only direct declared edges are shown. Sharing a work does not infer a new relati
 Cliches have two independent string fields appended in schema 5: `人设塑造` is one of `强大,智谋,利他,共情,利己,执念,反差,宿命`; `剧情机制` is one of `信息反转,机械降神,顿悟突破,代价交换`. Each field accepts exactly one value or the empty string. Lists, combined labels and unknown values return 422 on input. The GUI formats the two selected values as separate tags such as `人设塑造·强大` and `剧情机制·信息反转`; these composite labels are not stored values. Schema-4 records and inputs without the fields receive empty strings, without guessing classifications. Record details show associations only in their associations tab; their JSON remains present in the API and portable files.
 
 `cliché评分` is a derived current-library score. Incoming text, including an empty score, remains preserved in the raw `values_json`; ordinary reads and canonical portable DB/CSV/XLSX exports substitute the value calculated from current unique work associations and heat weights. Raw-input preservation and canonical-output stability are separate checks. All other non-derived values and order must match; a second canonical export/import round must be stable. This is not permission to rewrite arbitrary imported fields or to accept model-supplied score overrides.
+
+### Cross-library search and work state
+
+`GET /api/catalog/search?q=&offset=0&limit=50&work_id=&character_id=&cliche_id=&category=&genre=&style=&seen=&role=&character_trait=&plot_mechanism=&has_uploaded_text=&analysis_completed=&sort_by=&sort_direction=asc` returns `{q,groups:{works,characters,cliches},facets,scope}`. Each group is independently filtered/paginated as `{items,total,offset,limit}`. Items add `match:{direct,related:[{table,id,title,label,description}]}`. Search covers metadata and one explicit relationship hop, including an associated record's metadata; coappearance does not invent relationships. At most one association scope ID is accepted.
+
+The new `genre`/`style` filters match stored `作品题材`/`作品风格` strings. Existing unknown text remains preserved. `has_uploaded_text` means an explicitly linked text record exists. `analysis_completed` requires an approved fixed run covering the entire current source version, completed chunks in all four stages and all seven reviewed reference sections; partial or stale-version analysis does not qualify. The historical `has_text` and `has_analysis` filters keep their existing meanings. New work filters are also accepted by `GET /api/records/works` before pagination. Sorting accepts `discussion_heat` and `commercial_scale` (alias `market_scale`); known range midpoints precede unknown values in either direction.
 
 ### Typed material associations
 
@@ -104,7 +124,7 @@ Modern core columns are exposed by `/api/meta` and `/api/library/formats`. Works
 
 | Endpoint | Contract |
 |---|---|
-| `GET /api/library/formats` | `{default:"db",schema_version:6,tables,formats,legacy_csv,guidance}`. Each table declaration includes its exact columns, suggested filename and `required` flag; only the three core tables are always required. |
+| `GET /api/library/formats` | `{default:"db",schema_version:7,tables,formats,legacy_csv,guidance}`. Each table declaration includes its exact columns, suggested filename and `required` flag; only the three core tables are always required. |
 | `POST /api/library/import/preview` | Multipart `files`. Accepts one portable `.db` / `.sqlite` / `.sqlite3`, a complete CSV ZIP, the three raw modern CSVs together, a complete set of exported CSVs plus manifest, one `.xlsx`, or a complete legacy v8 triplet. Raw CSV classification uses exact headers rather than filenames. Returns `{batch_id,tables,errors,warnings,stats,format,schema_version,bundle_id,legacy,required_tables,guidance}`. Required entries identify `table,label,filename,present`; errors disable commit. |
 | `POST /api/library/import/commit` | `{batch_id,policy:"skip"\|"update"\|"error"}` → `{imported,updated,skipped,relations_imported,relations_updated,relations_skipped,stats}`. One transaction covers every material, declared relationship and retained auxiliary row. Material revisions and relation snapshots must still match preview, otherwise 409. |
 | `GET /api/library/export?format=db\|csv\|xlsx` | Defaults to DB. Downloads `InkReference-library.db`, `InkReference-library-csv.zip`, or `InkReference-library.xlsx`; all three contain the same core/actually-present auxiliary tables and manifest. |
@@ -319,6 +339,26 @@ Summary `data` is a flat content-4 plot. Automatic/semi results may edit event n
 
 The HTTP default workflow/Skill is `default@4.0.0` / `unified-reference@4.0.0`. A non-provider job uses `{document_id,version_id,workflow_id:"default",workflow_version:"4.0.0",manual:true,start:false}` without a profile. New UI requests additionally declare `interaction_mode:"semi"` for prompt/paste or `"manual"` for field-template entry; provider jobs declare `"automatic"`. The mode must agree with `manual`; human field templates require contract 4. Legacy calls that omit the new interaction mode retain their prior behavior. The runner completes the full selected source range in `plot → characters → settings → language` stage order; each source chunk is covered once within each stage. Both non-provider modes use the same stage contracts without automatic model requests; manual input still validates exact source/version bindings and references before preview and explicit section approval. Provider jobs require fixed default/stage model snapshots and endpoint/model consent checks. `expected_stage_fingerprints` maps each remote overridden stage to its selected profile target fingerprint; a missing confirmation is 428 and a changed target is 409, before creating the job or sending text. A single `remote_consent:true` covers the full displayed target set. Start/resume checks each actual stage target against its snapshot before invocation; endpoint/model edits cannot redirect an existing job. Historical `1.0.0`, `1.1.0`, `2.0.0` and `3.0.0` declarations and snapshots remain immutable and explicitly addressable.
 
+## Unified task center
+
+| Endpoint under `/api/studio` | Contract |
+|---|---|
+| `GET /tasks?q=&kind=&status=&offset=0&limit=30` | `{items,total,offset,limit,counts,kinds}`. Types: `extraction,embedding_download,research,volume_research,ingestion,conversion,repair,prompt_workbench`. SQL summary queries precede pagination; at most 100 rows per page. |
+| `GET /tasks/{kind}/{id}` | Metadata summary with source status, progress, model/profile, capabilities and navigation. No full text, prompt or raw reply in the list/detail summary. |
+| `POST /tasks/{kind}/{id}/{pause|resume|terminate}` | `{task,action?}`. Controls dispatch to the original domain. Model work resumes at prompt review; deterministic download/upload/conversion retries reuse their original input. No language-model inference is started by resume. |
+| `POST /jobs/{id}/reopen` | Reopen a paused, failed, cancelled or terminated extraction task for explicit prompt review. Preserve saved results and checkpoint; no model invocation. |
+
+Task rows include `capabilities:{pause,resume,terminate}` and `navigation:{section,action,id,...}`; the GUI follows the returned domain destination. Stopped deterministic tasks retry their original download/upload/conversion task with its pinned input; this does not call a language model. Legacy volume-research navigation restores original prompt/reply history; a separate explicit semi preparation starts with an empty reply and no model/search call. Already completed domain results are not relabelled as incomplete by a late stop request. Historical direct execution APIs retain their purpose; current GUI continuation uses reviewed prompt preparation.
+
+## Reviewed literal body replacement
+
+| Endpoint under `/api/studio/documents/{id}/replace` | Contract |
+|---|---|
+| `POST /preview` | `{base_version_id,search,replacement,scope:"chapter"\|"all",chapter_id?,body_only:true}` → `{preview_id,match_count,affected_chapter_count,chapters:[{chapter_id,title,match_count}],...}`. Literal Unicode matches affect body spans only. |
+| `POST /apply` | Same fields plus `preview_id` → 201 immutable version summary. Recomputes the exact operation and rejects changed inputs or a stale current source with 409. |
+
+Replacement preserves headings, the pinned chapter directory, untouched text, original uploads and prior retained versions. Missing-chapter placeholders are never materialized by replacement. No-match and identical search/replacement operations return 422 on apply.
+
 ## Storage inspection and explicit optimization
 
 Routes are relative to `/api/studio/storage`. Inspection is metadata-only and does not instantiate unused domain services or read source/result bodies. Normal local HTTP origin/Host rules apply.
@@ -328,7 +368,7 @@ Routes are relative to `/api/studio/storage`. Inspection is metadata-only and do
 | `GET /` | `{databases:[{name,bytes,wal_bytes,page_size,pages,free_pages,reusable_bytes,journal_mode,tables,missing_indexes,row_estimates,status,diagnostic_id?}],database_bytes,wal_bytes,disk_free_bytes,index_plan_version:1}`. Only existing known databases are opened read-only. Estimates come from existing optimizer statistics, not a business-row `COUNT(*)`. Unavailable files are reported without exposing absolute paths. |
 | `POST /optimize` | `{database:"all"\|"inkreference.sqlite3"\|"workbench.sqlite3"\|"skills.sqlite3"\|"workflow_definitions.sqlite3"\|"checkpoints.sqlite3"}` → `{items:[{name,status:"ready"\|"deferred"\|"error",added_indexes?,checkpoint?:{busy,log_pages,checkpointed_pages},diagnostic_id?,duration_ms}],destructive:false}`. Checks idle state first; active operations return 409. |
 
-Optimization has a bounded SQLite progress budget of approximately two seconds per database and a 500 ms busy timeout. It adds applicable missing indexes, runs `analysis_limit=400` / `optimize=0x10002`, then a passive WAL checkpoint. SQLite busy/locked/interrupted work returns deferred; corruption, permissions and other actual SQLite failures return error with a diagnostic ID. It never vacuums, deletes rows, prunes evidence, or changes the exchange/content schema. Index plan 1 has 11 catalog and 11 workbench specifications; lazily absent tables are skipped until they exist.
+Optimization has a bounded SQLite progress budget of approximately two seconds per database and a 500 ms busy timeout. It adds applicable missing indexes, runs `analysis_limit=400` / `optimize=0x10002`, then a passive WAL checkpoint. SQLite busy/locked/interrupted work returns deferred; corruption, permissions and other actual SQLite failures return error with a diagnostic ID. It never vacuums, deletes rows, prunes evidence, or changes the exchange/content schema. Index plan 1 has 13 catalog and 11 workbench specifications; lazily absent tables are skipped until they exist.
 
 The 1.1 output retains `summary,characters,events,cliches` and adds optional `reference:{plot,characters,settings,style,rhythm,opening,setting_features}`. The schema's authoritative declarations remain in `/skills/unified-reference/versions/1.1.0`; old `1.0.0` definitions remain immutable. Model-derived rich character/setting/event/feature facts need contiguous, nonempty original `evidence`. A native upstream-shaped human paste may instead contain `events,characters,settings,style` directly and is kept as an explicitly reviewed reference candidate; it does not silently create v8 material facts lacking evidence. Supplied evidence must still be exact. Core v8 material approval (`/jobs/{id}/approve`) and work-level section approval (`/chunks/{id}/commit`) remain separate operations.
 
@@ -351,13 +391,13 @@ Routes are relative to `/api/studio`. Document metadata adds `book_title,author,
 
 Dates retain supplied year/month/day precision; unknown earliest update is null and is never filled with import time. Explicit source frontmatter can supply book title, author and first-update date; user-supplied metadata takes precedence. Files are recoverable current-version projections, not an external editing API. SQLite commits before atomic manifest publication; failed publication is rebuildable. Full project backups omit this redundant projection and reconstruct it in the independent restored directory. Originals, retained text versions and approved facts stay authoritative.
 
-## Catalog Schema 6 and shared characters
+## Catalog Schema 7 and shared characters
 
-Current core columns are exactly `catalog_schema_v11.COLUMNS`. Works replace `两句话概括` with `剧情梗概`, add `讨论热度` and `商业规模`, and retain `热度权重` for legacy compatibility. Characters expose `人物ID,角色名,别名,角色定位,性格基调,视觉元素设计,初始状态,阶段状态,关联作品,关联cliché`; aliases and states are JSON strings in portable tables. Character identity and snapshots use the current Schema-4 `character_contract.py` business contract (with historical Schema 3 preserved) as reference extraction. Cross-work snapshots are isolated by `(character_id,work_id)` rather than copied between works based on name. The first import/binding is explicit; bound reference edits and catalog context edits synchronize transactionally with independent revision checks.
+Current core columns are exactly `catalog_schema_v11.COLUMNS`. Works replace `两句话概括` with `剧情梗概`, add `讨论热度`, `商业规模`, `作品题材` and `作品风格`, and retain `热度权重` for legacy compatibility. Characters expose `人物ID,角色名,别名,角色定位,性格基调,视觉元素设计,初始状态,阶段状态,关联作品,关联cliché`; aliases and states are JSON strings in portable tables. Character identity and snapshots use the current Schema-4 `character_contract.py` business contract (with historical Schema 3 preserved) as reference extraction. Cross-work snapshots are isolated by `(character_id,work_id)` rather than copied between works based on name. The first import/binding is explicit; bound reference edits and catalog context edits synchronize transactionally with independent revision checks.
 
 Cliches expose `clichéID,cliché内容,cliché评分,关联作品,关联角色,人设塑造,剧情机制`. The score is computed as `100 * sum(heat of unique matched works) / sum(heat of all unique catalog works)`. `heat` is the mean of discussion and market components; a component can be a finite 1–10 number or `{min,max,source_ids?,rationale?}` JSON with 1 <= min <= max <= 10, using its midpoint. Missing components use 1; a valid old single heat remains a compatibility fallback. Record responses include `computed:{cliche_score,matched_work_count,total_work_count,missing_heat_count,formula}`. These implementation counts explain the formula; the GUI presents the score rather than the removed prevalence/hit metrics. This is catalog-weighted prevalence, not a measured global-web probability. Character–cliche maps maintain reverse links without duplicate related cards.
 
-Raw v8 and portable schemas 3/4/5 remain importable. Original headers and schema-specific digests are validated before migration. `legacy_values` preserves the original v8 snapshot; `catalog_field_archive` preserves later removed schema-4/5 fields without overwriting that first archive. Schema-6 exports include optional archives/character contexts when present; omitted optional tables do not imply lost required main tables. User edits do not recreate removed fields as current columns.
+Raw v8 and portable schemas 3/4/5/6 remain importable. Original headers and schema-specific digests are validated before migration. `legacy_values` preserves the original v8 snapshot; `catalog_field_archive` preserves later removed schema-4/5 fields without overwriting that first archive. Schema-7 exports include optional archives/character contexts when present; omitted optional tables do not imply lost required main tables. User edits do not recreate removed fields as current columns.
 
 ### Character identity/context bridge
 
@@ -374,7 +414,7 @@ All update bodies reject extra fields, apply revision checks and preserve per-wo
 
 ## Current fixed analysis contract, content Schema 4
 
-Main-library schema 6 and portable format 1 remain independent of content schema 4. Default workflow/Skill is `default@4.0.0` / `unified-reference@4.0.0`; stage overrides and uploaded Skills must use the same `contract_version:4`. `canonical_stage_schema(stage,version=4)` defines the current shape. Historical contracts 1/2/3, requests, prompts, candidates, caches and source contributions remain version-pinned; reading a copy adapted to schema 4 is not a destructive migration or model extraction.
+Main-library schema 7 and portable format 1 remain independent of content schema 4. Default workflow/Skill is `default@4.0.0` / `unified-reference@4.0.0`; stage overrides and uploaded Skills must use the same `contract_version:4`. `canonical_stage_schema(stage,version=4)` defines the current shape. Historical contracts 1/2/3, requests, prompts, candidates, caches and source contributions remain version-pinned; reading a copy adapted to schema 4 is not a destructive migration or model extraction.
 
 | Record | Current business shape |
 |---|---|
@@ -398,9 +438,9 @@ The default contract-4 target limits are `chunk_chars:400000,max_input_tokens:10
 |---|---|
 | `POST /jobs/{id}/pause` | Request a resumable pause; current successful response is saved before the next request. Transitional stage `pausing`, terminal status `paused`. |
 | `POST /jobs/{id}/resume` | Resume a paused/failed/historically cancelled task from checkpoints, preserving the fixed targets and successful responses. |
-| `POST /jobs/{id}/terminate` | Persist an irreversible `terminated` execution state. Reject further resume/retry/paste execution, retain already-produced candidates for review. Transitional stage `terminating`. Repeated terminate is idempotent. |
+| `POST /jobs/{id}/terminate` | Persist a `terminated` stopped state. Retain produced candidates for review; explicit reopening is required before further work. Transitional stage `terminating`. Repeated terminate is idempotent. |
 
-Historical `/cancel` remains resumable for API compatibility. Pause/terminate do not promise that a provider retracts or refunds an in-flight request. New GUI labels the page 提取任务管理 and displays colored symbol controls; text-cleaning 分卷 is not the model chunk plan.
+Historical `/cancel` remains resumable for API compatibility. Pause/terminate do not promise that a provider retracts or refunds an in-flight request. New GUI labels the page 任务管理 and displays colored symbol controls; text-cleaning 分卷 is not the model chunk plan.
 
 ### Chapter ranges, incremental reuse and extraction A/B
 

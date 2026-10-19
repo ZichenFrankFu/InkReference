@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { ArrowUpRight, BookOpen, ChevronRight, FileText, Link2Off, Sparkles, UsersRound, Layers3 } from "lucide-react";
+import { ArrowUpRight, BookOpen, ChevronRight, FileText, Link2Off, Sparkles, Upload, UsersRound, Layers3 } from "lucide-react";
 import { Busy } from "./ui";
 import { jsonBody, request } from "./api";
 import { ChronicleEntities, ChroniclePlot, EraBackgroundEditor, LanguageAnalysisEditor } from "./ChronicleEditors";
@@ -87,7 +87,7 @@ export default function WorkReference({ workId }: { workId: string }) {
   return <NarrativeProvider chapterCount={analysis?.narrative_context?.chapter_count || 0}><div ref={root} className="detail-scroll catalog-reference">
     {(loading || analysisLoading || !!unlinkBusy) && <Busy label={unlinkBusy ? "正在更新作品关联" : "正在读取文本与分析"} compact />}
     {error && <div className="notice error" role="alert">{error}<button className="text-button" onClick={() => setRefresh(value => value + 1)}>重试</button></div>}
-    {loading && !summary ? <div className="catalog-empty"><span>正在读取…</span></div> : !summary?.documents.length ? <div className="catalog-empty"><FileText size={28} /><h3>暂无关联文本</h3></div> : <>
+    {loading && !summary ? <div className="catalog-empty"><span>正在读取…</span></div> : !summary?.documents.length ? <div className="catalog-empty"><FileText size={28} /><h3>暂无关联文本</h3><button className="button primary compact-button" onClick={() => window.dispatchEvent(new CustomEvent("inkreference:navigate", { detail: { section: "documents", workId, upload: true, tab: "metadata" } }))}><Upload size={14} />上传正文</button></div> : <>
       <section className="catalog-documents" aria-label="关联文本">{summary.documents.map(doc => <article className={documentId === doc.id ? "selected" : ""} key={doc.id}>
         <button className="catalog-document-select" onClick={() => setDocumentId(doc.id)} aria-pressed={documentId === doc.id}><FileText size={17} /><span><strong>{doc.title}</strong><small>{(Number(doc.current_characters || 0) / 10000).toFixed(1)} 万字{doc.completed_version_id === doc.latest_version_id && doc.completed_version_id ? " · 已清理" : ""}{doc.analysis ? " · 有分析" : ""}</small></span><ChevronRight size={15} /></button>
         <div className="catalog-document-actions"><button className="text-button" onClick={() => navigate("documents", doc)}><BookOpen size={13} />文本</button><button className="text-button" onClick={() => navigate("reference", doc)}><Sparkles size={13} />分析<ArrowUpRight size={12} /></button><button className="text-button catalog-unlink" disabled={!!unlinkBusy} aria-label={`解除 ${doc.title} 的关联`} onClick={() => void unlink(doc)}><Link2Off size={13} />解除关联</button></div>

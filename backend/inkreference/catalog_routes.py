@@ -63,4 +63,34 @@ def install_catalog_routes(application, runtime):
         with runtime.studio.lock:
             return catalog().link(document_id, **body.model_dump())
 
+    search_router = APIRouter(prefix="/api/catalog")
+
+    @search_router.get("/search")
+    def search(q: Annotated[str, Query(max_length=1000)] = "",
+               offset: Annotated[int, Query(ge=0, le=10_000_000)] = 0,
+               limit: Annotated[int, Query(ge=1, le=200)] = 50,
+               work_id: Annotated[str | None, Query(max_length=300)] = None,
+               character_id: Annotated[str | None, Query(max_length=300)] = None,
+               cliche_id: Annotated[str | None, Query(max_length=300)] = None,
+               category: Annotated[str | None, Query(max_length=300)] = None,
+               seen: Annotated[str | None, Query(max_length=100)] = None,
+               genre: Annotated[str | None, Query(max_length=300)] = None,
+               style: Annotated[str | None, Query(max_length=300)] = None,
+               role: Annotated[str | None, Query(max_length=300)] = None,
+               character_trait: Annotated[str | None, Query(max_length=100)] = None,
+               plot_mechanism: Annotated[str | None, Query(max_length=100)] = None,
+               has_uploaded_text: bool | None = None, analysis_completed: bool | None = None,
+               has_text: bool | None = None, has_analysis: bool | None = None,
+               sort_by: Annotated[str | None, Query(max_length=100)] = None,
+               sort_direction: str = "asc"):
+        from .catalog_search import CatalogSearch
+        filters = {key: value for key, value in {"category": category, "seen": seen, "genre": genre,
+            "style": style, "role": role, "character_trait": character_trait, "plot_mechanism": plot_mechanism,
+            "has_uploaded_text": has_uploaded_text, "analysis_completed": analysis_completed,
+            "has_text": has_text, "has_analysis": has_analysis}.items() if value is not None}
+        return CatalogSearch(runtime.store, lambda: runtime.studio.documents).search(q, offset=offset, limit=limit,
+            work_id=work_id, character_id=character_id, cliche_id=cliche_id, filters=filters,
+            sort_by=sort_by, sort_direction=sort_direction)
+
+    application.include_router(search_router)
     application.include_router(router)

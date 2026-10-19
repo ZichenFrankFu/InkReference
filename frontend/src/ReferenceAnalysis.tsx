@@ -95,6 +95,26 @@ export default function ReferenceAnalysis({ docs, runs, loading, navigate, onRef
     window.addEventListener("inkreference:catalog-focus", open);
     return () => window.removeEventListener("inkreference:catalog-focus", open);
   }, [docs, documentId, select]);
+  useEffect(() => {
+    let active = true;
+    const restore = async () => {
+      if (!documentId || state?.document_id !== documentId || dirtyRef.current || transform) return;
+      let target: { operation?: string; prepared_id?: string } | null = null;
+      try { target = JSON.parse(sessionStorage.getItem("inkreference.prompt-focus") || "null"); } catch { return; }
+      if (!target?.prepared_id || !["summarize", "translate"].includes(target.operation || "")) return;
+      try {
+        const saved = await studio<{ operation: string; payload: { document_id?: string; entry_index?: number } }>(`/dynamic-functions/preparations/${encodeURIComponent(target.prepared_id)}`);
+        if (!active || dirtyRef.current || selectedRef.current !== documentId || stateRef.current?.document_id !== documentId || saved.payload.document_id !== documentId || saved.operation !== target.operation) return;
+        if (saved.operation !== "summarize" && saved.operation !== "translate") return;
+        setTransform({ kind: saved.operation, ...(saved.operation === "translate" ? { entryIndex: Number.isInteger(saved.payload.entry_index) ? saved.payload.entry_index : 0 } : {}) });
+      } catch (e) { if (active && selectedRef.current === documentId) setError(messageOf(e)); }
+    };
+    void restore();
+    const focus = () => { void restore(); };
+    window.addEventListener("inkreference:catalog-focus", focus);
+    window.addEventListener("inkreference:prompt-focus", focus);
+    return () => { active = false; window.removeEventListener("inkreference:catalog-focus", focus); window.removeEventListener("inkreference:prompt-focus", focus); };
+  }, [documentId, state?.document_id, dirty, transform]);
   useEffect(() => { const before = (e: BeforeUnloadEvent) => { if (dirtyRef.current) e.preventDefault(); }; window.addEventListener("beforeunload", before); return () => window.removeEventListener("beforeunload", before); }, []);
   useEffect(() => { onDirtyChange(dirty); return () => onDirtyChange(false); }, [dirty, onDirtyChange]);
   const reload = useCallback(async () => {
@@ -104,10 +124,10 @@ export default function ReferenceAnalysis({ docs, runs, loading, navigate, onRef
     if (selectedRef.current === id) setState(next);
   }, []);
   useEffect(() => { const refresh = () => { if (!selectedRef.current || dirtyRef.current) return; setBusy("load"); void reload().catch(e => setError(messageOf(e))).finally(() => setBusy("")); }; window.addEventListener("inkreference:reference-refresh", refresh); return () => window.removeEventListener("inkreference:reference-refresh", refresh); }, [reload]);
-  const save = useCallback(async (section: ReferenceSection, data: unknown) => {
+  const save = useCallback(async (section: ReferenceSection, data: unknown, preparedId?: string) => {
     const current = stateRef.current; if (!current) return;
     setBusy("save"); setError("");
-    try { const next = await send<ReferenceState>(`/documents/${current.document_id}/reference/${section}`, { data, expected_revision: current.revision }, "PUT"); if (selectedRef.current === next.document_id) { setState(next); stateRef.current = next; setMessage("修改已保存"); setDirty(false); } }
+    try { const next = await send<ReferenceState>(`/documents/${current.document_id}/reference/${section}`, { data, expected_revision: current.revision, ...(preparedId ? {prepared_id: preparedId} : {}) }, "PUT"); if (selectedRef.current === next.document_id) { setState(next); stateRef.current = next; setMessage("修改已保存"); setDirty(false); } }
     catch (e) { setError(messageOf(e)); throw e; }
     finally { setBusy(""); }
   }, []);
@@ -185,7 +205,7 @@ export default function ReferenceAnalysis({ docs, runs, loading, navigate, onRef
         <div className="reference-notices"><Notice error={!!error} success={!error && !!message}>{error || message}</Notice></div>
         <div className="reference-tab-body" key={`${documentId}:${tab}`}>
           {!projection ? <Busy label={readOnly ? "正在读取叙事进度视图" : "正在读取作品分析"} /> : shown && <>
-          {tab === "plot" && <><div className="ref-raw-tools"><button className="button secondary" disabled={!!busy || dirty || readOnly} onClick={() => setTransform({kind:"summarize"})}><Sparkles size={14}/>整理大纲</button></div><ChroniclePlot sourceVersionId={selected.latest_version_id || ""} value={shown.plot} rawValue={shown.plot} onSave={readOnly ? undefined : data => save("plot", data)} busy={!!busy} onDirty={sectionDirty} characters={records(shown.characters)} settings={records(shown.settings)} readOnly={readOnly} /></>}
+          {tab === "plot" && <><ChroniclePlot sourceVersionId={selected.latest_version_id || ""} value={shown.plot} rawValue={shown.plot} onSave={readOnly ? undefined : data => save("plot", data)} busy={!!busy} onDirty={sectionDirty} characters={records(shown.characters)} settings={records(shown.settings)} readOnly={readOnly} /></>}
           {(["characters", "settings"] as string[]).includes(tab) && <ChronicleEntities sourceVersionId={selected.latest_version_id || ""} kind={tab as "characters" | "settings"} value={shown[tab as ReferenceSection]} rawValue={shown[tab as ReferenceSection]} onSave={readOnly ? undefined : data => save(tab as ReferenceSection, data)} busy={!!busy} onDirty={sectionDirty} plot={shown.plot} characters={records(shown.characters)} settings={records(shown.settings)} readOnly={readOnly} onCatalog={readOnly ? undefined : item => void openCatalogCharacter(item)} />}
           {tab === "setting_features" && <CollectionEditor kind="setting_features" value={shown.setting_features} onSave={items => save("setting_features", items)} busy={!!busy || readOnly} onDirty={sectionDirty} />}
           {tab === "era_background" && <EraBackgroundEditor sourceVersionId={selected.latest_version_id || ""} value={shown.era_background} plot={shown.plot} characters={records(shown.characters)} onSave={readOnly ? undefined : data => save("era_background", data)} busy={!!busy} onDirty={sectionDirty} />}
@@ -201,7 +221,7 @@ export default function ReferenceAnalysis({ docs, runs, loading, navigate, onRef
     {pending && <Modal title="有未保存的修改" onClose={() => setPending(null)}><div className="modal-body"><p>当前编辑尚未保存。</p></div><div className="modal-footer"><button className="button secondary" onClick={() => setPending(null)}>继续编辑</button><button className="button danger" onClick={() => { const next = pending; setPending(null); setDirty(false); dirtyRef.current = false; if (next.documentId) void select(next.documentId, true, next.tab); else if (next.tab) setTab(next.tab); }}>放弃并切换</button></div></Modal>}
     {structureDialog && <Modal title="切换作品结构" onClose={() => setStructureDialog(false)} busy={!!busy}><div className="modal-body"><p>{collection ? "切换为叙事作品，使用剧情大纲、角色、设定、时代背景事件和语言分析。" : "切换为设定集，使用原始条目、角色、设定和设定特征。"}</p><Notice error>{error}</Notice>{busy && <Busy label="正在切换作品结构" compact />}</div><div className="modal-footer"><button className="button secondary" disabled={!!busy} onClick={() => setStructureDialog(false)}>取消</button><button className="button primary" disabled={!!busy} onClick={() => void configure()}>切换为{collection ? "叙事作品" : "设定集"}</button></div></Modal>}
     {importDialog && <Modal title="导入原始文本" onClose={() => setImportDialog(false)} busy={!!busy}><div className="modal-body"><label className="studio-field"><span>UTF-8 文本文件</span><input type="file" accept=".txt,text/plain" onChange={e => setImportFile(e.target.files?.[0] || null)} /></label><label className="studio-field"><span>导入方式</span><select value={importMode} onChange={e => setImportMode(e.target.value)}><option value="merge">合并导入</option><option value="replace">替换现有内容</option></select></label><Notice error>{error}</Notice>{busy && <Busy label="正在读取并保存文本" compact />}</div><div className="modal-footer"><button className="button secondary" onClick={() => setImportDialog(false)} disabled={!!busy}>取消</button><button className="button primary" onClick={() => void importEntries()} disabled={!!busy || !importFile}>导入</button></div></Modal>}
-    {transform && state && <TransformDialog transform={transform} state={state} navigate={navigate} onClose={() => setTransform(null)} onApply={async data => { if (transform.kind === "summarize") await save("plot", data); else { const entries = records(state.sections.raw_entries); entries[transform.entryIndex || 0] = { ...entries[transform.entryIndex || 0], content: stringValue(data.text) }; await save("raw_entries", entries); } setTransform(null); await reload(); }} />}
+    {transform && state && <TransformDialog transform={transform} state={state} navigate={navigate} onClose={() => setTransform(null)} onApply={async (data, preparedId) => { if (transform.kind === "summarize") await save("plot", data, preparedId); else { const entries = records(state.sections.raw_entries); entries[transform.entryIndex || 0] = { ...entries[transform.entryIndex || 0], content: stringValue(data.text) }; await save("raw_entries", entries, preparedId); } setTransform(null); await reload(); }} />}
   </div></NarrativeProvider>;
 }
 

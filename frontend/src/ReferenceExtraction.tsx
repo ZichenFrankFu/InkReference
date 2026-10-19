@@ -7,7 +7,7 @@ import "./jobs.css";
 import { CollectionEditor } from "./ReferenceEditors";
 import { ChronicleEntities, ChroniclePlot, EraBackgroundEditor, LanguageAnalysisEditor } from "./ChronicleEditors";
 import { ExtractionComparison } from "./ExtractionComparison";
-import { DynamicModeSwitch, DynamicPromptExchange } from "./DynamicFunction";
+import { DynamicModeSwitch, usePromptWorkbench } from "./DynamicFunction";
 import ManualStageForm from "./ManualStageForm";
 import { NarrativeProvider } from "./NarrativePosition";
 import { record, records, stringValue, type ReferenceResult, type ReferenceSection, type ReferenceState } from "./reference-types";
@@ -53,7 +53,6 @@ export function ReferenceExtraction({ document: doc, state, runs, initialRunId, 
   const [workflows, setWorkflows] = useState<Workflow[]>([]);
   const [workflowId, setWorkflowId] = useState("");
   const [createMode, setCreateMode] = useState("api");
-  const [prompt, setPrompt] = useState("");
   const [source, setSource] = useState("");
   const [paste, setPaste] = useState("");
   const [manualTemplate, setManualTemplate] = useState<{stage: string | null; schema: ReturnType<typeof record> | null; template: ReturnType<typeof record> | null} | null>(null);
@@ -99,6 +98,7 @@ export function ReferenceExtraction({ document: doc, state, runs, initialRunId, 
     void studio<{stage: string | null; schema: ReturnType<typeof record> | null; template: ReturnType<typeof record> | null}>(`/jobs/${run.id}/chunks/${chunkId}/template`, {signal: controller.signal}).then(next => { if (!controller.signal.aborted) { setManualTemplate(next); setManualData(next.template || {}); setManualDirty(false); } }).catch(e => { if (!controller.signal.aborted) setError(messageOf(e)); }).finally(() => { if (!controller.signal.aborted) setManualLoading(false); });
     return () => controller.abort();
   }, [mode, run?.id, run?.revision, chunkId, legacyContract]);
+  useEffect(() => { let live = true; void studio<List<ModelProfile>>("/models").then(result => { if (live) { const items = normalizeList(result); setProfiles(items); setProfileId(current => current || items[0]?.id || ""); } }).catch(e => { if (live) setError(messageOf(e)); }); return () => { live = false; }; }, []);
   const taskStages = records(record(run).stages);
   const currentStage = stringValue(record(run).current_stage);
   const sections = collection ? ["settings", "characters", "setting_features"] : ["plot", "characters", "settings", "style", ...(rich.era_background !== undefined || fixed ? ["era_background"] : [])];
@@ -113,7 +113,7 @@ export function ReferenceExtraction({ document: doc, state, runs, initialRunId, 
     if (!current) return;
     if (chunkRef.current === id && runRef.current?.id === current.id && runRef.current?.revision === current.revision) return;
     const c = current.candidates.find(c => c.chunk_id === id);
-    setChunkId(id); setPreview(c?.result ? structuredClone(record(c.result)) as ReferenceResult : null); setLegacyJSON(c?.result ? JSON.stringify(c.result, null, 2) : ""); setPreviewDirty(false); setEditorDirty(false); setManualDirty(false); setManualTemplate(null); setPaste(""); setOpenSection(null); setPrompt(""); setSource(""); setError(""); setMessage("");
+    setChunkId(id); setPreview(c?.result ? structuredClone(record(c.result)) as ReferenceResult : null); setLegacyJSON(c?.result ? JSON.stringify(c.result, null, 2) : ""); setPreviewDirty(false); setEditorDirty(false); setManualDirty(false); setManualTemplate(null); setPaste(""); setOpenSection(null); setSource(""); setError(""); setMessage("");
   }, []);
   const chooseRun = useCallback(async (id: string, discard = false) => {
     if (dirtyRef.current && !discard) { setPending({ runId: id }); return; }
@@ -138,7 +138,7 @@ export function ReferenceExtraction({ document: doc, state, runs, initialRunId, 
     }, 1200);
     return () => window.clearInterval(interval);
   }, [onRefresh]);
-  const promptForChunk = async () => { if (!run || !chunkId) return; const id = chunkId; setBusy("prompt"); setError(""); try { const data = await studio<{ prompt: string; text: string }>(`/jobs/${run.id}/chunks/${chunkId}/prompt`); if (chunkRef.current === id) { setPrompt(data.prompt); setSource(data.text); } } catch (e) { setError(messageOf(e)); } finally { setBusy(""); } };
+  const promptForChunk = async () => { if (!run || !chunkId) return; const id = chunkId; setBusy("prompt"); setError(""); try { const data = await studio<{ prompt: string; text: string }>(`/jobs/${run.id}/chunks/${chunkId}/prompt`); if (chunkRef.current === id) { setSource(data.text); } } catch (e) { setError(messageOf(e)); } finally { setBusy(""); } };
   const openCreate = async () => { setNewOpen(true); setBusy("config"); setError(""); try { const [p, w, index] = await Promise.all([studio<List<ModelProfile>>("/models"), studio<List<Workflow>>("/workflows"), collection ? Promise.resolve({chapters: []}) : studio<{chapters: unknown[]}>(`/documents/${doc.id}/versions/${doc.latest_version_id}/chapters`)]); const ps = normalizeList(p), ws = normalizeList(w).filter(workflow => workflow.fixed_pipeline && Number(record(workflow).contract_version || workflow.version.split(".")[0]) >= 4); setProfiles(ps); setWorkflows(ws); setProfileId(ps[0]?.id || ""); setProfileB(ps[1]?.id || ""); const directory = records(index.chapters).filter(chapter => !["preamble", "fallback"].includes(stringValue(chapter.kind)) && (chapter.raw_marker || chapter.placeholder)); setChapterDirectory(directory); setScopeRanges([{start_chapter: 1, end_chapter: Math.max(1, directory.length)}]); setScopeMode("all"); const preferred = ws.find(w => w.id === "default" && w.version === "4.0.0") || ws.find(w => w.id === "default" && w.version === "1.1.0") || ws[0]; setWorkflowId(preferred ? `${preferred.id}@${preferred.version}` : ""); } catch (e) { setError(messageOf(e)); } finally { setBusy(""); } };
   const selectedWorkflow = workflows.find(w => `${w.id}@${w.version}` === workflowId);
   const stageProfileIds = record(selectedWorkflow?.stage_models);
@@ -162,12 +162,12 @@ export function ReferenceExtraction({ document: doc, state, runs, initialRunId, 
     finally { setBusy(""); }
   };
   const runAction = async (kind: "all" | "one" | "pause" | "terminate") => {
-    if (!run) return; setBusy(kind); setError("");
-    try { const path = kind === "one" ? `/jobs/${run.id}/chunks/${chunkId}/start` : ["pause", "terminate"].includes(kind) ? `/jobs/${run.id}/${kind}` : `/jobs/${run.id}/${run.status === "queued" ? "start" : "resume"}`; const next = await send<Run>(path, {}); setRun(next); await onRefresh(); } catch (e) { setError(messageOf(e)); } finally { setBusy(""); }
+    if (!run) return; if (kind === "all" || kind === "one") { await openExtraction(kind === "all"); return; } setBusy(kind); setError("");
+    try { const path = `/jobs/${run.id}/${kind}`; const next = await send<Run>(path, {}); setRun(next); await onRefresh(); } catch (e) { setError(messageOf(e)); } finally { setBusy(""); }
   };
   const savePaste = async (edited = false, contentOverride?: string) => {
     if (!run) return; setBusy("paste"); setError("");
-    try { const next = await send<Run>(`/jobs/${run.id}/chunks/${chunkId}/paste`, { content: contentOverride ?? (edited ? JSON.stringify(preview) : paste), expected_revision: run.revision }); setRun(next); const c = next.candidates.find(c => c.chunk_id === chunkId); setPreview(c?.result ? structuredClone(record(c.result)) as ReferenceResult : null); setLegacyJSON(c?.result ? JSON.stringify(c.result, null, 2) : ""); setPreviewDirty(false); setEditorDirty(false); setManualDirty(false); if (!edited) { setPrompt(""); setPaste(""); } setMessage(edited ? "候选修改已保存" : "结果已解析，请逐区审核"); await onRefresh(); } catch (e) { setError(messageOf(e)); } finally { setBusy(""); }
+    try { const next = await send<Run>(`/jobs/${run.id}/chunks/${chunkId}/paste`, { content: contentOverride ?? (edited ? JSON.stringify(preview) : paste), expected_revision: run.revision }); setRun(next); const c = next.candidates.find(c => c.chunk_id === chunkId); setPreview(c?.result ? structuredClone(record(c.result)) as ReferenceResult : null); setLegacyJSON(c?.result ? JSON.stringify(c.result, null, 2) : ""); setPreviewDirty(false); setEditorDirty(false); setManualDirty(false); if (!edited) { setPaste(""); } setMessage(edited ? "候选修改已保存" : "结果已解析，请逐区审核"); await onRefresh(); } catch (e) { setError(messageOf(e)); } finally { setBusy(""); }
   };
   const commit = async (section: string) => {
     if (!run) return; setBusy(`commit:${section}`); setError("");
@@ -179,6 +179,23 @@ export function ReferenceExtraction({ document: doc, state, runs, initialRunId, 
   const sourceChapterNumbers = records(record(record(run?.snapshots).document).progress_chapters);
   const scopeChapterLabel = (ordinal: unknown) => { const index = Number(ordinal) - 1; return stringValue(sourceChapterNumbers[index]?.number) || stringValue(ordinal); };
   const chapterCount = Number(narrativeContext.chapter_count || 0) || records(record(record(run?.snapshots).document).progress_chapters).length || records(version?.chapters).filter(chapter => chapter.kind !== "preamble" && chapter.kind !== "fallback" && chapter.raw_marker).length;
+  type ExtractionPreview = { run_id: string; chunk_id: string; expected_revision: number; content: string; stage?: string; data: unknown };
+  const workbench = usePromptWorkbench<ExtractionPreview>({ operation: "extraction", title: "提取提示词与回复", mode: mode === "web" ? "semi" : "automatic", profiles, profileId, onProfileChange: setProfileId, applyLabel: "确认候选", resumeScope: {run_id: run?.id}, onApply: async (result, preparedId) => { const next = await send<Run>(`/jobs/${result.run_id}/chunks/${result.chunk_id}/paste`, { content: result.content, expected_revision: result.expected_revision, prepared_id: preparedId }); setRun(next); chooseChunk(result.chunk_id, next); const selected = next.candidates.find(item => item.chunk_id === result.chunk_id); setPreview(selected?.result ? structuredClone(record(selected.result)) as ReferenceResult : null); setMessage("候选已保存"); await onRefresh(); }, renderPreview: result => <><strong>{({plot:"剧情大纲",characters:"角色",settings:"设定",language:"语言分析与时代背景事件"} as Record<string,string>)[result.stage || ""] || "提取结果"}</strong><pre>{JSON.stringify(result.data,null,2)}</pre></> });
+  const openExtraction = async (nextStage = false) => {
+    if (!run) return;
+    const stageKey = currentStage === "language" ? "style" : currentStage;
+    const target = nextStage ? run.candidates.find(item => item.status !== "completed" && (!fixed || record(record(item.result).reference)[stageKey] === undefined)) || run.candidates.find(item => item.status !== "completed") : candidate;
+    if (!target) return;
+    if (target.chunk_id !== chunkId) chooseChunk(target.chunk_id);
+    const targetProfile = [stringValue(record(record(record(run.snapshots).stage_models)[currentStage]).id), stringValue(record(run).profile_id), profileId].find(id => !!id && id !== "manual") || "";
+    await workbench.open({ run_id: run.id, chunk_id: target.chunk_id, expected_revision: run.revision }, targetProfile);
+  };
+  useEffect(() => {
+    const focus = (event?: Event) => { const detail = event ? (event as CustomEvent<{runId?: string}>).detail : null; const id = detail?.runId || sessionStorage.getItem("inkreference.extraction-prompt-focus"); if (!id || id !== run?.id || !chunkId || dirtyRef.current) return; sessionStorage.removeItem("inkreference.extraction-prompt-focus"); void openExtraction(true); };
+    focus(); window.addEventListener("inkreference:extraction-prompt-focus", focus); return () => window.removeEventListener("inkreference:extraction-prompt-focus", focus);
+  // Wait for this task and its chunk selection before consuming navigation.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [run?.id, chunkId]);
   return <NarrativeProvider chapterCount={chapterCount} chapterNumbers={Array.isArray(narrativeContext.chapter_numbers) ? narrativeContext.chapter_numbers as number[] : undefined}><section className={`ref-extraction ${running ? "is-running" : ""}`}><div className="ref-section-heading"><div><h3>提取任务</h3></div><button className="button primary" onClick={() => void openCreate()} disabled={!!busy || dirtyRef.current}><Plus size={15} />新建提取任务</button></div>
     <Notice error={!!error} success={!error && !!message}>{error || message}</Notice>
     <ExtractionComparison documentId={doc.id} initialId={comparisonId} onReview={(id, groupId) => { setComparisonContext({ id: groupId, runId: id }); void chooseRun(id, true); }} />
@@ -192,9 +209,9 @@ export function ReferenceExtraction({ document: doc, state, runs, initialRunId, 
       {mode === "api" && <div className="ref-model-target"><span>{isRemoteModel(snapshot) ? "远程 API" : "本机模型"}</span><strong>{modelEndpoint(stringValue(snapshot.base_url))}</strong><small>{stringValue(snapshot.model)}</small></div>}
       <div className="ref-chunk-workspace"><aside className="ref-chunk-index"><div className="task-chunks-title">切块 <span>{run.total}</span></div>{run.candidates.map(raw => { const c = raw as Chunk, chapter = chunkChapter(c); const done = sections.filter(s => state.commits.some(k => k.run_id === run.id && k.chunk_id === c.chunk_id && k.section === s)).length; return <button key={c.chunk_id} className={`ref-chunk-item ${chunkId === c.chunk_id ? "active" : ""} ${done === sections.length ? "complete" : ""}`} onClick={() => { if (dirtyRef.current) setPending({ chunkId: c.chunk_id }); else chooseChunk(c.chunk_id); }}><div><strong>切块 {Number(c.index || 0) + 1}</strong>{done === sections.length ? <CheckCircle2 size={14} /> : <span className={`ref-chunk-status ${c.status}`} />}</div><small>{version?.chapters.length ? `第 ${chapter.first}–${chapter.last} 章 · ` : ""}{(Math.max(0, Number(c.end || 0) - Number(c.start || 0)) / 10000).toFixed(1)} 万字</small><div className="ref-chunk-section-dots">{sections.map(s => <span className={state.commits.some(k => k.run_id === run.id && k.chunk_id === c.chunk_id && k.section === s) ? "done" : ""} key={s} title={sectionNames[s]} />)}<small>{done}/{sections.length}</small></div></button>; })}</aside>
       <div className="ref-chunk-detail"><div className={`ref-inline-operation ${busy ? "visible" : ""}`}>{busy && <Busy label={busy === "load" ? "正在读取提取任务" : busy === "paste" ? "正在解析并校验候选" : busy.startsWith("commit:") ? "正在确认分区入库" : busy === "prompt" ? "正在准备提示词" : "正在更新任务"} compact />}</div>
-        {candidate && <><div className="ref-chunk-detail-heading"><div><span className="eyebrow">CHUNK {Number(candidate.index || 0) + 1}</span><h4>第 {chunkChapter(candidate).first}–{chunkChapter(candidate).last} 章</h4><small>{Math.max(0, Number(candidate.end || 0) - Number(candidate.start || 0)).toLocaleString()} 字</small></div>{mode === "api" && <button className="button primary" disabled={!!busy || running || dirtyRef.current || candidate.status === "completed" || ["approved", "terminated"].includes(run.status)} onClick={() => void runAction("one")}><Sparkles size={15} />{candidate.status === "failed" ? "重试本块" : "提取本块"}</button>}</div>
+        {candidate && <><div className="ref-chunk-detail-heading"><div><span className="eyebrow">CHUNK {Number(candidate.index || 0) + 1}</span><h4>第 {chunkChapter(candidate).first}–{chunkChapter(candidate).last} 章</h4><small>{Math.max(0, Number(candidate.end || 0) - Number(candidate.start || 0)).toLocaleString()} 字</small></div>{mode === "api" && <button className="button primary" disabled={!!busy || running || dirtyRef.current || candidate.status === "completed" || ["approved", "terminated"].includes(run.status)} onClick={() => void runAction(fixed ? "all" : "one")}><Sparkles size={15} />{candidate.status === "failed" ? "重试本块" : "提取本块"}</button>}</div>
           {candidate.error && <Notice error>{candidate.error}</Notice>}
-          {mode === "web" && <div className="ref-paste-workspace">{!prompt && <button className="button secondary" disabled={!!busy} onClick={() => void promptForChunk()}><FileText size={14} />准备本块提示词</button>}<DynamicPromptExchange prompt={prompt} reply={paste} onReplyChange={setPaste} onParse={() => void savePaste()} disabled={!!busy || running || ["approved","terminated"].includes(run.status)} replyLabel="粘贴提取 JSON" parseLabel="解析并预览" /></div>}
+          {mode === "web" && <div className="ref-paste-workspace"><button className="button primary" disabled={!!busy || running || dirtyRef.current || ["approved","terminated"].includes(run.status) || candidate.status === "completed"} onClick={() => void openExtraction(true)}><FileText size={14} />提示词与回复</button></div>}
           {mode === "manual" && <section className="ref-manual-workspace"><div className="ref-mini-heading"><h4>手动录入{manualTemplate?.stage ? ` · ${{plot:"剧情大纲",characters:"角色",settings:"设定",language:"语言分析与时代背景事件"}[manualTemplate.stage] || ""}` : ""}</h4>{manualDirty && <span className="ref-tag">未保存</span>}</div>{manualLoading ? <Busy label="读取填写模板" compact /> : manualTemplate?.schema ? <><ManualStageForm schema={manualTemplate.schema} value={manualData} sourceVersionId={run.version_id} disabled={!!busy || running || ["approved","terminated"].includes(run.status)} onChange={value => { setManualData(value); setManualDirty(true); }} /><div className="ref-editor-actions"><button className="button secondary" disabled={!!busy || !manualDirty} onClick={() => { setManualData(structuredClone(manualTemplate.template || {})); setManualDirty(false); }}>重置</button><button className="button primary" disabled={!!busy || running || ["approved","terminated"].includes(run.status)} onClick={() => void savePaste(false, JSON.stringify(manualData))}><FileSearch size={14} />校验并预览</button></div></> : <div className="ref-empty">本切块已完成</div>}</section>}
 
           {source ? <details className="ref-source-preview"><summary>本块原文 · {Array.from(source).length.toLocaleString()} 字<ChevronDown size={14} /></summary><pre>{source}</pre></details> : <button className="text-button" disabled={!!busy} onClick={() => void promptForChunk()}><FileText size={13} />查看本块原文</button>}
@@ -221,5 +238,5 @@ export function ReferenceExtraction({ document: doc, state, runs, initialRunId, 
       </div><div className="modal-footer"><button className="button secondary" disabled={!!busy} onClick={() => setNewOpen(false)}>取消</button><button className="button primary" disabled={!!busy || !workflowId || (!["web", "manual"].includes(createMode) && (!profileId || !targetsReady)) || (createMode === "ab" && (!profileB || profileB === profileId)) || (scopeMode === "range" && scopeRanges.some(range => range.start_chapter > range.end_chapter))} onClick={() => void create()}>{createMode === "ab" ? "建立 A/B 测试" : createMode === "api" && remoteTargets ? "确认目标并准备分析" : "准备分析"}</button></div>
     </Modal>}
     {pending && <Modal title="有未保存的候选修改" onClose={() => setPending(null)}><div className="modal-body"><p>保存候选修改后可继续审核。</p></div><div className="modal-footer"><button className="button secondary" onClick={() => setPending(null)}>继续编辑</button><button className="button danger" onClick={() => { const next = pending; setPending(null); setPreviewDirty(false); setEditorDirty(false); dirtyRef.current = false; if (next.runId) void chooseRun(next.runId, true); else if (next.chunkId) chooseChunk(next.chunkId); }}>放弃并切换</button></div></Modal>}
-  </section></NarrativeProvider>;
+  {workbench.modal}</section></NarrativeProvider>;
 }

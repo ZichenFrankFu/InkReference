@@ -39,6 +39,7 @@ CLICHE_PLOT_MECHANISMS = ("信息反转", "机械降神", "顿悟突破", "代�
 CLICHE_TAGS = {"人设塑造": CLICHE_CHARACTER_TRAITS, "剧情机制": CLICHE_PLOT_MECHANISMS}
 LIBRARY_CLICHE_COLUMNS = [*SCHEMA4_CLICHE_COLUMNS, *CLICHE_TAGS]
 SCHEMA4_COLUMNS = {"works": LIBRARY_WORK_COLUMNS, "characters": LIBRARY_CHARACTER_COLUMNS, "cliches": SCHEMA4_CLICHE_COLUMNS}
+SCHEMA6_COLUMNS = catalog_schema.SCHEMA6_COLUMNS
 SCHEMA5_COLUMNS = {"works": list(LIBRARY_WORK_COLUMNS), "characters": list(LIBRARY_CHARACTER_COLUMNS), "cliches": list(LIBRARY_CLICHE_COLUMNS)}
 LIBRARY_WORK_COLUMNS = catalog_schema.WORK_COLUMNS
 LIBRARY_CHARACTER_COLUMNS = catalog_schema.CHARACTER_COLUMNS
@@ -235,6 +236,7 @@ class DataStore:
         """Share deterministic SQL functions with transactional import previews."""
         connection.create_function("catalog_work_heat", 1, lambda value: catalog_schema.work_heat(json.loads(value))[0], deterministic=True)
         connection.create_function("catalog_work_missing_heat", 1, lambda value: int(catalog_schema.work_heat(json.loads(value))[1]), deterministic=True)
+        connection.create_function("catalog_heat_component", 1, catalog_schema.heat_component, deterministic=True)
 
     @contextlib.contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
@@ -256,7 +258,7 @@ class DataStore:
         with self.transaction() as connection:
             connection.execute("CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)")
             current = connection.execute("SELECT COALESCE(MAX(version), 0) FROM schema_migrations").fetchone()[0]
-            if current > 6:
+            if current > 7:
                 raise DataError(409, "数据库版本高于当前应用，请使用更新的应用")
             applied = {row[0] for row in connection.execute("SELECT version FROM schema_migrations")}
             if 1 not in applied:
@@ -353,6 +355,18 @@ class DataStore:
                 connection.execute("CREATE TABLE IF NOT EXISTS character_contexts (character_id TEXT NOT NULL,work_id TEXT NOT NULL,document_id TEXT,extracted_character_id TEXT NOT NULL,character_json TEXT NOT NULL,revision INTEGER NOT NULL DEFAULT 1,PRIMARY KEY(character_id,work_id),UNIQUE(work_id,extracted_character_id))")
                 connection.execute("INSERT INTO schema_migrations VALUES (6, ?)", (datetime.now(timezone.utc).isoformat(),))
 
+            if 7 not in applied:
+                # Classifications are blank until supplied. Archive the exact
+                # schema 6 input and keep external IDs and edit revisions.
+                for row in connection.execute("SELECT id,values_json FROM works").fetchall():
+                    values = json.loads(row["values_json"])
+                    if catalog_schema.is_current("works", values) and any(field not in values for field in ("作品题材", "作品风格")):
+                        connection.execute("INSERT OR IGNORE INTO catalog_field_archive VALUES (?,?,?,?)", ("works", row["id"], "6", row["values_json"]))
+                        values.setdefault("作品题材", "")
+                        values.setdefault("作品风格", "")
+                        connection.execute("UPDATE works SET values_json=? WHERE id=?", (_json(values), row["id"]))
+                connection.execute("INSERT INTO schema_migrations VALUES (7, ?)", (datetime.now(timezone.utc).isoformat(),))
+
             for table in TABLES:
                 connection.execute(f"CREATE TRIGGER IF NOT EXISTS {table}_delete_catalog_archives AFTER DELETE ON {table} BEGIN DELETE FROM catalog_field_archive WHERE table_key='{table}' AND record_id=OLD.id; END")
             connection.execute("CREATE TRIGGER IF NOT EXISTS characters_delete_contexts AFTER DELETE ON characters BEGIN DELETE FROM character_contexts WHERE character_id=OLD.id; END")
@@ -386,7 +400,7 @@ class DataStore:
 
     def meta(self) -> dict[str, Any]:
         counts = self.stats()
-        return {"tables": [{"key": table, **spec, "count": counts[table]} for table, spec in TABLES.items()], "version": VERSION, "schema_version": 6}
+        return {"tables": [{"key": table, **spec, "count": counts[table]} for table, spec in TABLES.items()], "version": VERSION, "schema_version": 7}
 
     def _row(self, connection: sqlite3.Connection, table: str, identifier: str) -> sqlite3.Row:
         require_table(table)
@@ -485,13 +499,16 @@ class DataStore:
             connection.execute("BEGIN")
             return self._all(connection, table)
 
-    def list_records(self, table: str, q: str = "", offset: int = 0, limit: int = 50, work_id: str | None = None, cliche_id: str | None = None, filters: dict[str,Any] | None = None, sort_by: str | None = None, sort_direction: str = "asc", include_work_facets: bool = True) -> dict[str, Any]:
+    def list_records(self, table: str, q: str = "", offset: int = 0, limit: int = 50, work_id: str | None = None, cliche_id: str | None = None, filters: dict[str,Any] | None = None, sort_by: str | None = None, sort_direction: str = "asc", include_work_facets: bool = True, state_db_path: str | Path | None = None) -> dict[str, Any]:
+        from .catalog_search import SORT_ALIASES, STATE_FILTERS, attach_catalog_state, work_state_sql, record_order
+        sort_by = SORT_ALIASES.get(sort_by, sort_by)
         require_table(table)
         if offset < 0 or limit < 1 or limit > 500:
             raise DataError(422,"分页范围无效（limit 为 1–500）")
         if sort_direction not in {"asc","desc"}:
             raise DataError(422,"排序方向必须为 asc 或 desc")
         clauses: list[str] = []; parameters: list[Any] = []
+        derived_filters: dict[str, bool] = {}
         if work_id:
             if table == "works":
                 clauses.append("r.id=?"); parameters.append(work_id)
@@ -508,14 +525,26 @@ class DataStore:
                 parameters.extend((cliche_id,table,cliche_id,table,cliche_id))
         if q:
             # SQLite casefold is intentionally supplied by Python for Unicode.
-            clauses.append("EXISTS(SELECT 1 FROM json_each(r.values_json) j WHERE instr(casefold(j.value),?)>0)");parameters.append(q.casefold())
+            own_match = "EXISTS(SELECT 1 FROM json_each(r.values_json) j WHERE instr(casefold(j.value),?)>0)"
+            if table == "works":
+                from .catalog_search import EDGE_CTE, RECORDS_CTE
+                linked_match = f"EXISTS(WITH {RECORDS_CTE},{EDGE_CTE} SELECT 1 FROM edges e JOIN records n ON n.table_key=e.target_table AND n.id=e.target_id,json_each(n.values_json) j WHERE e.source_table='works' AND e.source_id=r.id AND instr(casefold(j.value),?)>0)"
+                clauses.append(f"({own_match} OR {linked_match})")
+                parameters.extend((q.casefold(), q.casefold()))
+            else:
+                clauses.append(own_match); parameters.append(q.casefold())
         for key,value in (filters or {}).items():
+            if key in STATE_FILTERS:
+                if table != "works" or type(value) is not bool or state_db_path is None:
+                    raise DataError(422,"文本与分析筛选仅适用于关联状态的作品查询")
+                derived_filters[key] = value
+                continue
             if key == "work_ids":
                 if table != "works" or not isinstance(value,(list,tuple,set)) or any(not isinstance(item,str) for item in value):
                     raise DataError(422,"work_ids 必须为作品编号列表")
                 clauses.append("r.id IN (SELECT value FROM json_each(?))");parameters.append(_json(list(value)))
                 continue
-            field = {"category":"类别","seen":"用户是否完整体验过","看过":"用户是否完整体验过","role":"角色定位","character_trait":"性格基调" if table=="characters" else "人设塑造","plot_mechanism":"剧情机制"}.get(key,key)
+            field = {"category":"类别","genre":"作品题材","style":"作品风格","seen":"用户是否完整体验过","看过":"用户是否完整体验过","role":"角色定位","character_trait":"性格基调" if table=="characters" else "人设塑造","plot_mechanism":"剧情机制"}.get(key,key)
             if field not in TABLES[table]["columns"]:
                 raise DataError(422,f"不支持的筛选字段：{key}")
             if not isinstance(value, str):
@@ -534,14 +563,21 @@ class DataStore:
                 raise DataError(422,"排序字段无效")
             direction = "DESC" if sort_direction == "desc" else "ASC"
             if sort_by == "id": order = f"r.id {direction}"
+            elif table=="works" and sort_by in {"讨论热度","商业规模"}:
+                order = record_order(table, sort_by, sort_direction)
             elif table=="cliches" and sort_by=="cliché评分":
                 order=f"COALESCE((SELECT SUM(catalog_work_heat(w.values_json)) FROM works w JOIN work_cliches wc ON wc.work_id=w.id WHERE wc.cliche_id=r.id)/(SELECT SUM(catalog_work_heat(values_json)) FROM works),0) {direction},r.id"
             else:
                 # Only schema-owned paths become SQL. Literal paths let SQLite
                 # use expression indexes; user values remain bound parameters.
                 order = f"{json_field_expression(sort_by, prefix='r.')} COLLATE NOCASE {direction},r.id"
-        where = " WHERE " + " AND ".join(clauses) if clauses else ""
         with self.connect() as connection:
+            if derived_filters:
+                attach_catalog_state(connection, state_db_path)
+                for key, value in derived_filters.items():
+                    expression = work_state_sql(connection, key)
+                    clauses.append(expression if value else f"NOT ({expression})")
+            where = " WHERE " + " AND ".join(clauses) if clauses else ""
             connection.create_function("casefold",1,lambda value:str(value).casefold(),deterministic=True)
             connection.create_function("catalog_work_heat",1,lambda value:catalog_schema.work_heat(json.loads(value))[0],deterministic=True)
             connection.execute("BEGIN")
@@ -554,8 +590,10 @@ class DataStore:
             categories = [row[0] for row in connection.execute(f"SELECT DISTINCT {category} category FROM works WHERE COALESCE({category},'') != '' ORDER BY category")]
             roles = [row[0] for row in connection.execute(f"SELECT DISTINCT {role} role FROM characters WHERE COALESCE({role},'') != '' ORDER BY role")]
             works = [{"id":row["id"], "title":row["title"]} for row in connection.execute("SELECT id,json_extract(values_json,'$.作品') title FROM works ORDER BY sort_order,id")] if include_work_facets else []
-            facets = {"categories":categories,"roles":roles,"works":works,"character_traits":list(CLICHE_CHARACTER_TRAITS),"plot_mechanisms":list(CLICHE_PLOT_MECHANISMS)}
-            if not include_work_facets: facets["works_paged"] = True
+            from .catalog_search import facets as catalog_facets
+            facets = {**catalog_facets(connection, include_primary=False),"categories":categories,"roles":roles,"works":works,"character_traits":list(CLICHE_CHARACTER_TRAITS),"plot_mechanisms":list(CLICHE_PLOT_MECHANISMS)}
+            if include_work_facets: facets.pop("works_paged", None)
+            else: facets["works_paged"] = True
             return {"items":items,"total":total,"offset":offset,"limit":limit,"facets":facets,"summary":{"matches":total,**self._stats(connection)}}
 
     def relations(self, table: str, identifier: str) -> dict[str, list[dict[str, Any]]]:
@@ -905,7 +943,7 @@ class DataStore:
                 if table=="works" and "两句话概括" in values: values["剧情梗概"]=values.pop("两句话概括")
                 if table=="characters" and "角色" in values: values["角色名"]=values.pop("角色")
                 if table=="cliches": values.pop("cliché评分",None)
-            if not catalog_schema.is_current(table,current) and any(k in values for k in ({"works":{"剧情梗概","讨论热度","商业规模"},"characters":{"角色名","性格基调","视觉元素设计","初始状态","阶段状态"},"cliches":{"cliché评分"}}[table])):
+            if not catalog_schema.is_current(table,current) and any(k in values for k in ({"works":{"剧情梗概","讨论热度","商业规模","作品题材","作品风格"},"characters":{"角色名","性格基调","视觉元素设计","初始状态","阶段状态"},"cliches":{"cliché评分"}}[table])):
                 connection.execute("INSERT OR IGNORE INTO legacy_values VALUES (?,?,?)",(table,identifier,_json(current)))
                 current=catalog_schema.project_values(table,current)
             candidate = {**current, **values}

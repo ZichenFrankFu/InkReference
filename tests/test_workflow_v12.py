@@ -108,7 +108,7 @@ def test_pause_preserves_successful_wire_call_and_resumes_without_double_billing
     assert sum(stage["tokens"] for stage in final["stages"]) == 120
 
 
-def test_terminate_keeps_received_usage_and_is_terminal_after_restart(tmp_path):
+def test_terminate_keeps_received_usage_and_reopens_without_model_calls_after_restart(tmp_path):
     runner, doc, models, profile, entered, release, requests = setup(tmp_path, block=True)
     run = runner.create_run(doc["id"], profile_id=profile["id"])
     runner.start(run["id"])
@@ -124,11 +124,22 @@ def test_terminate_keeps_received_usage_and_is_terminal_after_restart(tmp_path):
     assert len(requests) == len(models.list_usage(run["id"])) == 1
     restarted = WorkflowRunner(tmp_path, documents=runner.documents, models=models)
     assert restarted.get_run(run["id"])["status"] == "terminated"
-    for action in (restarted.start, restarted.resume, restarted.pause):
-        with pytest.raises(DataError): action(run["id"])
+    with pytest.raises(DataError):
+        restarted.start(run["id"])
     with pytest.raises(DataError):
         restarted.paste_chunk(run["id"], run["candidates"][0]["chunk_id"], json.dumps({"characters": []}), final["revision"])
     assert len(requests) == 1
+    snapshots = restarted.get_run(run["id"])["snapshots"]
+    reopened = restarted.reopen(run["id"])
+    assert reopened["status"] == "paused"
+    assert len(requests) == len(models.list_usage(run["id"])) == 1
+    assert restarted.get_run(run["id"])["snapshots"] == snapshots
+    assert reopened["stages"][0]["completed"] == 1
+    restarted.resume(run["id"])
+    completed = restarted.wait(run["id"], 10)
+    assert completed["status"] == "needs_review", completed["error"]
+    assert [request["stage"] for request in requests] == ["plot", "characters", "settings", "language"]
+    assert len(models.list_usage(run["id"])) == 4
 
 
 def test_terminated_intent_survives_process_interruption_without_auto_calls(tmp_path):

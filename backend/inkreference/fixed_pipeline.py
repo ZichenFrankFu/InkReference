@@ -404,7 +404,7 @@ class FixedPipeline:
                     raise DataError(422, "阶段结束进度早于原文证据定位；持续阶段请将结束设为 null")
                 span["start"] = progress
 
-    def _paste_fixed(self, run_id: str, chunk_id: str, parsed: dict, expected_revision: int) -> dict:
+    def _paste_fixed(self, run_id: str, chunk_id: str, parsed: dict, expected_revision: int, *, prompt_review: dict | None = None) -> dict:
         from .chronicle_schema import validate_stage_result, canonical_stage_schema, _validate
         if "reference" in parsed:
             return self._edit_fixed_candidate(run_id, chunk_id, parsed, expected_revision)
@@ -425,10 +425,35 @@ class FixedPipeline:
             _validate(parsed, canonical_stage_schema(stage, version=contract(snapshots)), stage)
             result = validate_stage_result(stage, parsed, chunk["text"], source_version_id=snapshots["document"]["version_id"], known_entities=self._fixed_context(db, run_id, chunk, stage))
             result = self._absolute_anchors(result, chunk["start"], chunk["text"])
+            if prompt_review:
+                from .workflows import _now
+                if prompt_review.get("chunk_id") != chunk_id or prompt_review.get("stage") != stage or not prompt_review.get("prepared_id"):
+                    raise DataError(409, "提示词记录与当前分段阶段不符")
+                # Edited prompts and per-request model choices cannot inherit
+                # the unedited workflow's reuse signature. This change shares
+                # the candidate transaction, so a failed save retains both.
+                snapshots.pop("scope_signature", None)
+                retained = {key: copy.deepcopy(prompt_review.get(key)) for key in ("prepared_id", "stage", "chunk_id", "mode", "profile_id", "model", "model_fingerprint", "prompt_sha256", "call_id")}
+                snapshots.setdefault("prompt_reviews", []).append(retained)
+                db.execute("DELETE FROM run_scope_fingerprints WHERE run_id=?", (run_id,))
+                db.execute("UPDATE run_jobs SET snapshots_json=? WHERE id=?", (dump(snapshots), run_id))
+                if prompt_review.get("call_id"):
+                    usage = prompt_review.get("usage") or {}
+                    attempt = db.execute("SELECT COALESCE(MAX(attempt),0)+1 FROM run_attempts WHERE run_id=? AND chunk_id=?", (run_id, chunk_id)).fetchone()[0]
+                    stamp = _now()
+                    input_estimate = prompt_review.get("input_estimate") or usage.get("input_tokens") or 0
+                    output_reserve = prompt_review.get("output_reserve") or usage.get("output_tokens") or 0
+                    db.execute("INSERT INTO run_attempts(run_id,chunk_id,attempt,status,input_estimate,output_reserve,call_id,usage_json,created_at,updated_at,stage) VALUES (?,?,?,'succeeded',?,?,?,?,?,?,?)",
+                               (run_id, chunk_id, attempt, input_estimate, output_reserve, prompt_review["call_id"], dump(usage), stamp, stamp, stage))
+                    db.execute("UPDATE run_chunks SET attempts=attempts+1 WHERE run_id=? AND id=?", (run_id, chunk_id))
             self._save_fixed_result(db, run_id, chunk, stage, result)
             complete = self._next_cursor(db, run_id) == -1
             self._update_job(db, run_id, status="needs_review" if complete else "paused", stage="review" if complete else stage, results_json=None, error=None, revision=row["revision"] + 1)
-            self._event(db, run_id, "manual_candidate", STAGE_NAMES[stage] + "：已保存人工粘贴候选，未调用模型", chunk_id)
+            if prompt_review:
+                message = "已保存经确认的模型回复" if prompt_review.get("call_id") else "已保存网页模型回复，本地未调用模型" if prompt_review.get("mode") == "semi" else "已保存人工候选，本地未调用模型"
+                self._event(db, run_id, "prompt_review_candidate", STAGE_NAMES[stage] + "：" + message, chunk_id)
+            else:
+                self._event(db, run_id, "manual_candidate", STAGE_NAMES[stage] + "：已保存人工粘贴候选，未调用模型", chunk_id)
         return self.get_run(run_id)
 
     def _edit_fixed_candidate(self, run_id: str, chunk_id: str, parsed: dict, expected_revision: int) -> dict:

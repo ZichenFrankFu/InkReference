@@ -29,7 +29,7 @@ from .fixed_pipeline import FixedPipeline, fixed, contract
 from .workflow_definitions import FIXED_STAGES
 
 KINDS = ("characters", "events", "cliches")
-RESUMABLE = {"paused", "failed", "cancelled"}
+RESUMABLE = {"paused", "failed", "cancelled", "terminated"}
 
 
 def _now() -> str:
@@ -604,6 +604,17 @@ class WorkflowRunner(FixedPipeline):
             for stage in stages:
                 selected_model = self._fixed_model(snapshots, stage["id"])
                 stage["profile_id"], stage["model"] = selected_model.get("id"), selected_model.get("model")
+                reviews = [review for review in snapshots.get("prompt_reviews", []) if review.get("stage") == stage["id"]]
+                if reviews:
+                    stage["prompt_reviews"] = reviews
+                    stage["configured_profile_id"] = stage["profile_id"]
+                    stage["configured_model"] = stage["model"]
+                    if len(reviews) == stage["completed"]:
+                        identities = {(review.get("profile_id"), review.get("model")) if review.get("call_id") else (None, "网页模型" if review.get("mode") == "semi" else "人工填写") for review in reviews}
+                        if len(identities) == 1:
+                            stage["profile_id"], stage["model"] = next(iter(identities))
+                        elif len(identities) > 1:
+                            stage["profile_id"], stage["model"] = None, "多模型"
             payload["stages"] = stages
             payload["current_stage"] = next((stage["id"] for stage in stages if stage["status"] != "completed"), "review")
             payload["progress"] = sum(stage["progress"] for stage in stages) / len(FIXED_STAGES)
@@ -663,7 +674,8 @@ class WorkflowRunner(FixedPipeline):
             return {"run_id": run_id, "chunk_id": chunk_id, "text": chunk["text"],
                     "prompt": self._messages(snapshots, chunk["text"])[-1]["content"]}
 
-    def paste_chunk(self, run_id: str, chunk_id: str, content: str, expected_revision: int) -> dict[str, Any]:
+    def paste_chunk(self, run_id: str, chunk_id: str, content: str, expected_revision: int,
+                    *, prompt_review: dict[str, Any] | None = None) -> dict[str, Any]:
         """Review a web-model JSON response without making a provider request."""
         if not isinstance(content, str) or len(content.encode("utf-8")) > 4_000_000:
             raise DataError(422, "粘贴结果需为不超过 4 MB 的 JSON")
@@ -678,7 +690,7 @@ class WorkflowRunner(FixedPipeline):
             raise DataError(422, "粘贴结果必须为 JSON 对象")
         current = self.get_run(run_id)
         if fixed(current["snapshots"]):
-            return self._paste_fixed(run_id, chunk_id, parsed, expected_revision)
+            return self._paste_fixed(run_id, chunk_id, parsed, expected_revision, prompt_review=prompt_review)
         from .reference_analysis import validate_reference
         # InkOctoBot's web-LLM response may contain only the rich four sections.
         # Preserve that shape as a human-reviewed reference candidate. Only core
@@ -829,6 +841,22 @@ class WorkflowRunner(FixedPipeline):
     def resume(self, run_id: str, *, remote_consent: bool = False) -> dict[str, Any]:
         return self._launch(run_id, resume=True, remote_consent=remote_consent)
 
+    def reopen(self, run_id: str) -> dict[str, Any]:
+        """Restore local editing and prompt review without invoking a model.
+
+        Source snapshots, successful chunks, attempts, reference contributions
+        and comparison membership stay exactly as recorded. Only explicit
+        prompt confirmation may perform the next provider request.
+        """
+        with self._registry_lock, self._db(write=True) as db:
+            row = self._job(db, run_id)
+            if self._key(run_id) in self._owners or row["status"] not in RESUMABLE | {"queued"}:
+                raise DataError(409, "请先等待当前任务停止，再恢复")
+            self._update_job(db, run_id, status="paused", stage="prompt_review", cancel_requested=0,
+                             stop_kind="cancelled", error=None)
+            self._event(db, run_id, "reopened", "已恢复本地进度，等待确认提示词；未调用模型")
+        return self.list_run_summaries(run_id=run_id, limit=1)[0]
+
     def execute(self, run_id: str, *, remote_consent: bool = False) -> dict[str, Any]:
         """Synchronous explicit user execution, useful for integration and tests."""
         key = self._key(run_id)
@@ -862,8 +890,7 @@ class WorkflowRunner(FixedPipeline):
             if row["status"] == "terminated":
                 if stop_kind == "terminated":
                     return self._render(db, row)
-                raise DataError(409, "任务已终止，不能恢复或改为暂停")
-            if row["cancel_requested"] and row["stop_kind"] == "terminated" and stop_kind != "terminated":
+            if row["status"] != "terminated" and row["cancel_requested"] and row["stop_kind"] == "terminated" and stop_kind != "terminated":
                 raise DataError(409, "任务正在终止，不能改为暂停")
             running = row["status"] in {"running", "cancelling"}
             pending_stage = {"paused": "pausing", "terminated": "terminating", "cancelled": "cancelling"}[stop_kind]

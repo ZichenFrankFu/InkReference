@@ -122,6 +122,7 @@ class QuickRepair(RepairGenerationMixin):
                                  error="请检查修复文件；未自动覆盖后续修改",
                                  rollback_available=bool(saved.get("files")) and all((manifest.parent / f"{index}.original").is_file() for index, _ in enumerate(saved.get("files", []))))
                 self.operations[saved["operation_id"]] = saved
+                self._mirror_operation(saved)
             except (OSError, ValueError, TypeError, KeyError, DataError):
                 continue
 
@@ -137,6 +138,21 @@ class QuickRepair(RepairGenerationMixin):
         temporary.write_text(json.dumps(saved, ensure_ascii=False, indent=2), encoding="utf-8")
         temporary.chmod(0o600)
         os.replace(temporary, target)
+        self._mirror_operation(operation)
+
+    def _mirror_operation(self, operation):
+        """Best-effort scalar metadata; manifests remain the repair authority."""
+        try:
+            from .task_hub import record_external_task
+            rollback = "恢复" in operation.get("stage", "") or operation.get("status") == "rolled_back"
+            kind = "repair_cache" if operation.get("kind") == "chapter_cache" else "repair_rollback" if rollback else "repair_source"
+            record_external_task(self.backups.parent, identifier=operation["operation_id"], operation=kind,
+                                 status=operation.get("status", "running"), stage=self.redact(operation.get("stage", ""), 160),
+                                 progress=operation.get("progress"), title={"repair_cache": "重建章节缓存", "repair_rollback": "恢复修复前版本", "repair_source": "应用修复"}[kind],
+                                 error=self.redact(operation.get("error", ""), 1200), document_id=operation.get("document_id"))
+        except Exception:
+            # A metadata mirror cannot change the result of an atomic repair.
+            pass
 
     def redact(self, value: Any, limit: int = 16_000) -> str:
         text = str(value)[:limit]
@@ -514,14 +530,14 @@ class QuickRepair(RepairGenerationMixin):
         if self.closed.is_set():
             _fail("应用正在关闭，修复操作已取消", 409)
 
-    def apply(self, preview_id):
+    def apply(self, preview_id, *, on_completed=None):
         if not self.source:
             _fail("打包版不能直接修改程序文件，请导出修复方案并在源码环境应用", 409)
         preview = self._preview(preview_id)
         self._check_current(preview["files"])
         operation = self._new_operation("source", preview["restart_required"])
         operation["files"] = copy.deepcopy(preview["files"])
-        self._start(self._apply_owned, operation)
+        self._start(self._apply_owned, operation, on_completed)
         return self.operation(operation["operation_id"])
 
     def operation(self, operation_id):
@@ -649,7 +665,7 @@ class QuickRepair(RepairGenerationMixin):
         finally:
             shutil.rmtree(output_dir, ignore_errors=True)
 
-    def _apply_owned(self, operation):
+    def _apply_owned(self, operation, on_completed=None):
         written = []
         try:
             self._update(operation, stage="校验当前源码", progress=10)
@@ -685,6 +701,11 @@ class QuickRepair(RepairGenerationMixin):
             self._update(operation, status="failed", stage="修复未应用" if not restore_error else "需要手动恢复", progress=100,
                          error=message, diagnostic_id=diagnostic_id, rollback_available=bool(restore_error), auto_rolled_back=bool(written) and not restore_error,
                          **({"restore_error": restore_error} if restore_error else {}))
+        if on_completed is not None and operation.get("status") == "succeeded":
+            try:
+                on_completed()
+            except Exception as error:
+                self._operation_error(operation, error)
 
     def rollback(self, operation_id):
         if not self.source:
@@ -714,6 +735,7 @@ class QuickRepair(RepairGenerationMixin):
         if not document_id or len(document_id) > 200 or (version_id is not None and (not version_id or len(version_id) > 200)):
             _fail("作品或版本标识无效")
         operation = self._new_operation("chapter_cache")
+        self._update(operation, document_id=document_id, version_id=version_id)
         def run():
             try:
                 self._check_open()

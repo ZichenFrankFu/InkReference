@@ -54,20 +54,29 @@ class CatalogLinks:
         result = self.store.list_records("works", q=q, offset=offset, limit=limit, include_work_facets=False)
         return {**result, "items": [self._work(item) for item in result["items"]]}
 
+    def list_records(self, table: str, *, has_text: bool | None = None,
+                     has_analysis: bool | None = None, has_uploaded_text: bool | None = None,
+                     analysis_completed: bool | None = None, filters: dict | None = None, **kwargs) -> dict:
+        """Apply workbench status in SQLite before catalog counts/pagination.
+
+        has_analysis retains its historical revision>0 meaning. The newer
+        analysis_completed requires approved full-text, current-version four
+        stage coverage and every reviewed section, including valid empties.
+        """
+        flags = {key: value for key, value in {"has_text": has_text, "has_analysis": has_analysis,
+                 "has_uploaded_text": has_uploaded_text, "analysis_completed": analysis_completed}.items() if value is not None}
+        return self.store.list_records(table, filters={**(filters or {}), **flags},
+                                       state_db_path=self.documents.db_path, **kwargs)
+
     def filter_work_ids(self, *, has_text: bool | None = None, has_analysis: bool | None = None) -> list[str]:
-        """Filter metadata before catalog pagination; never hydrate text or facts."""
+        """Compatibility ID view; paged clients use list_records instead."""
+        from .catalog_search import attach_catalog_state, work_filter_sql
+        filters = {key: value for key, value in {"has_text": has_text, "has_analysis": has_analysis}.items() if value is not None}
         with self.store.connect() as db:
-            identifiers = {row[0] for row in db.execute("SELECT id FROM works")}
-        with self.documents._connection() as db:
-            text_ids = {row[0] for row in db.execute("SELECT DISTINCT work_id FROM doc_documents WHERE work_id IS NOT NULL")}
-            exists = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='reference_analysis'").fetchone()
-            # Merely opening an empty analysis creates revision 0, not content.
-            analysis_ids = {row[0] for row in db.execute("SELECT DISTINCT d.work_id FROM doc_documents d JOIN reference_analysis a ON a.document_id=d.id WHERE d.work_id IS NOT NULL AND a.revision>0")} if exists and has_analysis is not None else set()
-        if has_text is not None:
-            identifiers = identifiers & text_ids if has_text else identifiers - text_ids
-        if has_analysis is not None:
-            identifiers = identifiers & analysis_ids if has_analysis else identifiers - analysis_ids
-        return sorted(identifiers)
+            attach_catalog_state(db, self.documents.db_path)
+            clauses, values = work_filter_sql(db, filters)
+            where = " WHERE " + " AND ".join(clauses) if clauses else ""
+            return [row[0] for row in db.execute("SELECT r.id FROM works r" + where + " ORDER BY r.id", values)]
 
     def get(self, document_id: str) -> dict:
         with self.documents._connection() as db:

@@ -20,7 +20,9 @@ MODE_LABELS = {"automatic": "自动", "semi": "半自动", "manual": "手动"}
 def mode_contract() -> list[dict]:
     return [{"id": mode, "label": MODE_LABELS[mode], "requires_model": mode == "automatic",
              "copies_prompt": mode == "semi", "uses_template": mode == "manual",
-             "editable_preview": True, "explicit_confirmation": True} for mode in MODES]
+             "editable_preview": True, "explicit_confirmation": True,
+             "editable_prompt": mode != "manual", "prompt_confirmation": mode == "automatic",
+             "reply_confirmation": True} for mode in MODES]
 
 
 def parse_json_reply(reply: str, *, maximum: int = 2_000_000, max_depth: int = 18,
@@ -123,12 +125,20 @@ _OPERATIONS = (
 
 
 def operation_registry() -> dict:
-    return {"version": 1, "modes": mode_contract(), "operations": copy.deepcopy(list(_OPERATIONS)),
+    return {"version": 1, "modes": mode_contract(), "operations": [_review_paths(item) for item in _OPERATIONS],
             "confirmation": "domain_transaction", "api_prefix": "/api/studio"}
 
 
 def operation_definition(operation_id: str) -> dict:
     for item in _OPERATIONS:
         if item["id"] == operation_id:
-            return copy.deepcopy(item) | {"modes": mode_contract()}
+            return _review_paths(item) | {"modes": mode_contract()}
     raise DataError(404, "动态功能不存在")
+
+
+def _review_paths(item):
+    result = copy.deepcopy(item)
+    base = "/dynamic-functions/" + item["id"]
+    result["review_paths"] = {"prepare": base + "/prepare", "execute": base + "/execute", "preview": base + "/preview"}
+    result["review_protocol"] = "inkreference.prompt-review.v1"
+    return result

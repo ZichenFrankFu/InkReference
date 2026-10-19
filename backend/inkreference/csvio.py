@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .database import (
-    TABLES, LEGACY_TABLES, SCHEMA4_COLUMNS, SCHEMA5_COLUMNS, modern_values, WORK_RELATION_FIELD, DataError, DataStore, parse_work_relations,
+    TABLES, LEGACY_TABLES, SCHEMA4_COLUMNS, SCHEMA5_COLUMNS, SCHEMA6_COLUMNS, modern_values, WORK_RELATION_FIELD, DataError, DataStore, parse_work_relations,
     record_id, require_table, validate_values,
 )
 
@@ -67,7 +67,7 @@ def parse_files(files: list[tuple[str, bytes]]) -> ImportBatch:
                 raise DataError(422, "文件为空或缺少表头")
             if len(header) != len(set(header)):
                 raise DataError(422, "CSV 存在重复表头")
-            matches = [table for table in TABLES if set(header) in (set(TABLES[table]["columns"]),set(SCHEMA4_COLUMNS[table]),set(SCHEMA5_COLUMNS[table]),set(LEGACY_TABLES[table]["columns"]))]
+            matches = [table for table in TABLES if set(header) in (set(TABLES[table]["columns"]),set(SCHEMA4_COLUMNS[table]),set(SCHEMA5_COLUMNS[table]),set(SCHEMA6_COLUMNS[table]),set(LEGACY_TABLES[table]["columns"]))]
             if len(matches) != 1:
                 raise DataError(422, "表头无法识别：必须包含作品、角色或桥段表的全部字段，且不能含未知字段")
             table = matches[0]

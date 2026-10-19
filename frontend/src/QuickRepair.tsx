@@ -3,7 +3,7 @@ import { AlertCircle, ArrowLeft, ArrowRight, Check, CheckCircle2, ChevronDown, C
 import { download, jsonBody } from "./api";
 import { diagnosticEvents } from "./diagnostics";
 import { send, studio, type ModelProfile } from "./studio";
-import { DynamicModeSwitch, DynamicModelSelector, DynamicPromptExchange, type DynamicMode } from "./DynamicFunction";
+import { DynamicModeSwitch, DynamicModelSelector, usePromptWorkbench, type DynamicMode } from "./DynamicFunction";
 import { isRemoteModel } from "./model-security";
 import { Busy, Modal, Progress, messageOf } from "./ui";
 import "./quick-repair.css";
@@ -25,6 +25,7 @@ type PromptResult = {
   template?: RepairTemplate;
 };
 type PreviewResult = {
+  prepared_id?: string;
   preview_id: string;
   session_id: string;
   summary: string;
@@ -53,7 +54,6 @@ type GenerationSummary = Pick<Generation, "id" | "status" | "stage" | "progress"
 type ManualFile = { id: string; path: string; sha256: string; edits: { before: string; after: string }[] };
 type SourceContext = { path: string; sha256: string; content: string; truncated: boolean };
 const sourceName = (path: string) => path.split("/").slice(-2).join("/");
-const consentedTargets = new Set<string>();
 type Draft = {
   mode: DynamicMode;
   profileId: string;
@@ -78,7 +78,6 @@ export default function QuickRepair({ onClose }: { onClose: () => void }) {
   const [mode, setMode] = useState<DynamicMode>(retained.mode);
   const [profiles, setProfiles] = useState<ModelProfile[]>([]);
   const [profileId, setProfileId] = useState(retained.profileId);
-  const [confirmTarget, setConfirmTarget] = useState(false);
   const [generation, setGeneration] = useState<Generation | null>(retained.generation);
   const [manualFiles, setManualFiles] = useState<ManualFile[]>(retained.manualFiles);
   const [manualSummary, setManualSummary] = useState(retained.manualSummary);
@@ -213,21 +212,6 @@ export default function QuickRepair({ onClose }: { onClose: () => void }) {
     }).catch(failure => { if (!controller.signal.aborted) setSourceError(messageOf(failure)); }).finally(() => { if (!controller.signal.aborted) setSourceLoading(false); });
     return () => { controller.abort(); setSourceLoading(false); };
   }, [mode, step, prompt?.session_id, selectedManual?.id, selectedManual?.path, caps?.mode]);
-  const startAutomatic = async () => {
-    if (!selectedProfile) return;
-    setConfirmTarget(false); setBusy("正在整理诊断与源码"); setError("");
-    try {
-      events.current = diagnosticEvents();
-      const result = await send<Generation>("/repair/automatic", { description, topic, frontend_events: events.current, profile_id: selectedProfile.id, remote_consent: isRemoteModel(selectedProfile), expected_model_fingerprint: selectedProfile.target_fingerprint });
-      if (selectedProfile.target_fingerprint) consentedTargets.add(selectedProfile.target_fingerprint);
-      setPreview(null); setOperation(null); setReply(""); setStep(1); acceptGeneration(result);
-    } catch (failure) { setError(messageOf(failure)); }
-    finally { setBusy(""); }
-  };
-  const requestAutomatic = () => {
-    if (isRemoteModel(selectedProfile) && !consentedTargets.has(selectedProfile?.target_fingerprint || "")) setConfirmTarget(true);
-    else void startAutomatic();
-  };
   const cancelGeneration = async () => {
     if (!generation) return;
     setBusy("正在取消生成"); setError("");
@@ -263,7 +247,7 @@ export default function QuickRepair({ onClose }: { onClose: () => void }) {
     setBusy("正在启动修复");
     setError("");
     try {
-      setOperation(await send<RepairOperation>("/repair/apply", { preview_id: preview.preview_id }));
+      setOperation(await send<RepairOperation>("/repair/apply", { preview_id: preview.preview_id, ...(preview.prepared_id ? {prepared_id: preview.prepared_id} : {}) }));
     } catch (failure) { setError(messageOf(failure)); }
     finally { setBusy(""); }
   };
@@ -279,7 +263,7 @@ export default function QuickRepair({ onClose }: { onClose: () => void }) {
     if (!preview) return;
     setBusy("正在导出方案");
     setError("");
-    try { await download("/studio/repair/export", "InkReference-repair.json", { method: "POST", ...jsonBody({ preview_id: preview.preview_id }) }); }
+    try { await download("/studio/repair/export", "InkReference-repair.json", { method: "POST", ...jsonBody({ preview_id: preview.preview_id, ...(preview.prepared_id ? {prepared_id:preview.prepared_id} : {}) }) }); if (preview.prepared_id) await send(`/dynamic-functions/preparations/${preview.prepared_id}/control`, {action:"complete"}); }
     catch (failure) { setError(messageOf(failure)); }
     finally { setBusy(""); }
   };
@@ -323,7 +307,10 @@ export default function QuickRepair({ onClose }: { onClose: () => void }) {
     finally { setBusy(""); }
   };
 
-  return <Modal title="快捷修复" onClose={onClose} busy={Boolean(busy)} wide>
+  const workbench = usePromptWorkbench<PreviewResult>({ operation: "repair", title: "修复提示词与回复", completeOnApply: false, mode: mode === "semi" ? "semi" : "automatic", profiles, profileId, onProfileChange: setProfileId, applyLabel: "确认方案", onApply: async (result, preparedId) => { setPreview({...result, prepared_id: preparedId}); setSelectedFile(0); setOperation(null); setStep(2); }, renderPreview: result => <><p className="repair-summary">{result.summary}</p>{result.files.map(file => <section key={file.path}><strong>{file.path}</strong><FileDiff diff={file.diff}/></section>)}</> });
+  const openWorkbench = async () => { events.current = diagnosticEvents(); await workbench.open({ description, topic, frontend_events: events.current }); };
+
+  return <><Modal title="快捷修复" onClose={onClose} busy={Boolean(busy)} wide>
     <div className="repair-workbench">
       <nav className="repair-steps" aria-label="修复步骤">
         {["问题描述", "交换方案", "检查与应用"].map((label, index) => <button type="button" key={label} className={step === index ? "active" : step > index ? "done" : ""} disabled={locked || (index === 1 && !prompt) || (index === 2 && !preview && !operation)} onClick={() => { setStep(index); setError(""); }}><span>{step > index ? <Check size={13} /> : index + 1}</span>{label}</button>)}
@@ -331,14 +318,14 @@ export default function QuickRepair({ onClose }: { onClose: () => void }) {
       </nav>
       {capsLoading && <Busy label="正在读取修复能力" compact inline delay={0} />}
       <div className="repair-body">
-        <DynamicModeSwitch value={mode} disabled={locked} label="修复模式" onChange={next => { if (next === mode) return; setMode(next); setConfirmTarget(false); setError(""); setPreview(null); setOperation(null); setPrompt(null); setGeneration(null); setReply(""); setStep(0); }} />
+        <DynamicModeSwitch value={mode} disabled={locked} label="修复模式" onChange={next => { if (next === mode) return; setMode(next);  setError(""); setPreview(null); setOperation(null); setPrompt(null); setGeneration(null); setReply(""); setStep(0); }} />
         {error && <div className="repair-error" role="alert"><strong>操作未完成</strong><span>{error}</span>{!caps && <button type="button" className="button secondary" onClick={() => void loadCapabilities()} disabled={capsLoading}>重试</button>}</div>}
         {step === 0 && <>
           <div className="repair-section-heading"><h3>遇到了什么问题？</h3><span>{recentEvents.length} 条近期诊断</span></div>
           <label className="studio-field"><span>功能位置</span><select aria-label="功能位置" value={topic} onChange={(event) => setTopic(event.target.value)} disabled={!caps || locked}>{(caps?.topics || [{ id: "chapters", label: "正文与清洗" }]).map((item) => <option value={item.id} key={item.id}>{item.label}</option>)}</select></label>
           <label className="studio-field"><span>问题与预期结果</span><textarea aria-label="问题与预期结果" className="repair-description" value={description} onChange={(event) => setDescription(event.target.value)} placeholder="操作步骤、出现的问题、希望怎样调整" maxLength={6000} disabled={locked} /></label>
-          {mode === "automatic" && <DynamicModelSelector profiles={profiles} value={profileId} onChange={id => { setProfileId(id); setConfirmTarget(false); }} disabled={locked} label="修复模型" onConfigure={() => { onClose(); window.dispatchEvent(new CustomEvent("inkreference:navigate", { detail: { section: "models" } })); }} />}
-          {confirmTarget && selectedProfile && <section className="repair-target-confirm"><strong>{selectedProfile.model}</strong><div className="inline-actions"><button type="button" className="button secondary" disabled={locked} onClick={() => setConfirmTarget(false)}>取消</button><button type="button" className="button primary" disabled={locked} onClick={() => void startAutomatic()}>确认并生成</button></div></section>}
+          {mode === "automatic" && <DynamicModelSelector profiles={profiles} value={profileId} onChange={id => { setProfileId(id);  }} disabled={locked} label="修复模型" onConfigure={() => { onClose(); window.dispatchEvent(new CustomEvent("inkreference:navigate", { detail: { section: "models" } })); }} />}
+
           <details className="repair-diagnostics"><summary>近期诊断 <ChevronDown size={14} /></summary><ul>{recentEvents.length ? recentEvents.slice().reverse().map((event, index) => { const id = event.diagnostic_id || event.request_id || ""; return <li key={index}><code>{event.kind}</code><span>{event.message}</span>{id && <button type="button" className="repair-diagnostic-id" title={id} aria-label={`复制诊断 ID ${id}`} onClick={() => void copyDiagnostic(id)}>{copiedDiagnostic === id ? <Check size={12} /> : <Copy size={12} />}<code>{id.slice(0, 14)}</code></button>}{selectedDiagnostic === id && id && <input className="repair-diagnostic-copy" aria-label="诊断 ID" value={id} readOnly autoFocus onFocus={event => event.target.select()} />}{(event.route || event.path) && <small>{event.route || event.path}</small>}</li>; }) : <li className="muted">暂无错误记录</li>}</ul></details>
           {(caps?.can_rebuild_cache || previous.length > 0) && <details className="repair-recovery" onToggle={(event) => { if (event.currentTarget.open) { if (caps?.can_rebuild_cache) void loadDocuments(); void loadGenerations(); } }}><summary>本机恢复<ChevronDown size={14} /></summary><div>
             {previous.length > 0 && <div className="repair-recovery-row"><span>上次源码修复</span><button className="button secondary" type="button" onClick={() => { setOperation(previous[0]); setPreview(null); setStep(2); }}><Undo2 size={14} />查看与回滚</button></div>}
@@ -351,11 +338,7 @@ export default function QuickRepair({ onClose }: { onClose: () => void }) {
         {step === 1 && <>
           {generating && generation && <div className="repair-generation"><Progress completed={generation.progress.completed} total={generation.progress.total} stage={generation.progress.label || generation.stage || "正在生成修复方案"} busy /><button type="button" className="icon-button repair-cancel" aria-label="取消生成" title="取消生成" disabled={!!busy} onClick={() => void cancelGeneration()}><Square size={15} /></button></div>}
           {generation?.status === "cancelled" && <div className="repair-status" role="status">已取消生成</div>}
-          {prompt && mode === "semi" && <DynamicPromptExchange prompt={prompt.prompt} reply={reply} onReplyChange={value => { setReply(value); setPreview(null); }} disabled={locked} promptLabel="诊断提示词" replyLabel="修复 JSON" placeholder='{"protocol":"inkreference.repair.v1", …}' extra={<details className="repair-sources"><summary>{prompt.source_files.length} 个源码文件{prompt.truncated ? " · 上下文已截取" : ""}<ChevronDown size={14} /></summary><div>{prompt.source_files.map(file => <code key={file.path}>{file.path}</code>)}</div></details>} />}
-          {mode === "automatic" && !generating && reply && <>
-            <div className="repair-section-heading"><h3>修复方案</h3><span>待确认</span></div>
-            <label className="studio-field repair-reply"><span>修复 JSON</span><textarea aria-label="修复 JSON" value={reply} onChange={event => { setReply(event.target.value); setPreview(null); }} spellCheck={false} disabled={locked} /></label>
-          </>}
+          {mode !== "manual" && <button type="button" className="button primary" disabled={locked} onClick={() => void openWorkbench()}>打开提示词</button>}
           {prompt && mode === "manual" && <>
             <label className="studio-field"><span>变更摘要</span><input aria-label="变更摘要" value={manualSummary} onChange={event => { setManualSummary(event.target.value); setPreview(null); }} disabled={locked} maxLength={2000} /></label>
             <div className="repair-manual-tabs" role="tablist" aria-label="手动修复文件">{manualFiles.map((file, index) => <button type="button" role="tab" key={file.id} aria-selected={manualIndex === index} className={manualIndex === index ? "active" : ""} onClick={() => setManualIndex(index)}>{sourceName(file.path) || `文件 ${index + 1}`}</button>)}<button type="button" className="icon-button" aria-label="增加文件" title="增加文件" disabled={locked || manualFiles.length >= 12} onClick={addManual}><Plus size={15} /></button></div>
@@ -388,17 +371,17 @@ export default function QuickRepair({ onClose }: { onClose: () => void }) {
       <footer className="repair-footer">
         {step > 0 ? <button type="button" className="button secondary" onClick={() => { setStep(step === 2 && !preview ? 0 : step - 1); setError(""); }} disabled={locked}><ArrowLeft size={15} />上一步</button> : <button type="button" className="button secondary" onClick={onClose} disabled={locked}>关闭</button>}
         <div>
-          {step === 0 && <button type="button" className="button primary" disabled={locked || !caps || !description.trim() || (mode === "automatic" && (!selectedProfile || (isRemoteModel(selectedProfile) && !selectedProfile.target_fingerprint)))} onClick={() => mode === "automatic" ? requestAutomatic() : void makePrompt()}>{mode === "automatic" ? "生成修复方案" : mode === "semi" ? "生成诊断提示词" : "准备修复模板"}<ArrowRight size={15} /></button>}
-          {step === 1 && <button type="button" className="button primary" disabled={locked || !prompt || (mode === "manual" && (sourceLoading || !!sourceError)) || (mode === "manual" ? !manualSummary.trim() || !manualFiles.length || manualFiles.some(file => !file.path || !/^[0-9a-f]{64}$/.test(file.sha256) || file.edits.some(edit => !edit.before)) : !reply.trim())} onClick={() => void parseReply()}>检查修复方案<ArrowRight size={15} /></button>}
+          {step === 0 && <button type="button" className="button primary" disabled={locked || !caps || !description.trim() || (mode === "automatic" && (!selectedProfile || (isRemoteModel(selectedProfile) && !selectedProfile.target_fingerprint)))} onClick={() => mode === "manual" ? void makePrompt() : void openWorkbench()}>{mode === "manual" ? "准备修复模板" : "准备提示词"}<ArrowRight size={15} /></button>}
+          {step === 1 && mode === "manual" && <button type="button" className="button primary" disabled={locked || !prompt || (mode === "manual" && (sourceLoading || !!sourceError)) || (mode === "manual" ? !manualSummary.trim() || !manualFiles.length || manualFiles.some(file => !file.path || !/^[0-9a-f]{64}$/.test(file.sha256) || file.edits.some(edit => !edit.before)) : !reply.trim())} onClick={() => void parseReply()}>检查修复方案<ArrowRight size={15} /></button>}
           {step === 2 && (preview || operation) && <>
             {applying && <button type="button" className="button secondary" onClick={onClose}>后台运行</button>}
             {operation?.rollback_available && operation.status !== "rolled_back" && <button type="button" className="button secondary" disabled={locked} onClick={() => void rollback()}><Undo2 size={15} />回滚本次修复</button>}
             {preview && !preview.can_apply && <button type="button" className="button primary" disabled={locked} onClick={() => void exportPatch()}><Download size={15} />导出修复方案</button>}
-            {preview?.can_apply && !operation && <button type="button" className="button primary" disabled={locked} onClick={() => void apply()}><Wrench size={15} />应用修复</button>}
+            {preview?.can_apply && !operation && <button type="button" className="button primary" disabled={locked} onClick={() => void apply()}><Wrench size={15} />确认应用修复</button>}
             {operation && operation.status !== "running" && <button type="button" className="button primary" onClick={onClose} disabled={locked}>完成</button>}
           </>}
         </div>
       </footer>
     </div>
-  </Modal>;
+  </Modal>{workbench.modal}</>;
 }

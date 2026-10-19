@@ -31,6 +31,7 @@ import { ReferenceExtraction } from "./ReferenceExtraction";
 import type { ReferenceState } from "./reference-types";
 import "./reference-analysis.css";
 import "./jobs.css";
+import TaskManager, {type ManagedTask, type TaskNavigation} from "./TaskManager";
 import {
   Busy,
   Empty,
@@ -180,6 +181,12 @@ function LegacyJobReview({ initialId, documentId, navigate, onDirtyChange }: Pro
     setBusy(kind);
     setError("");
     try {
+      if (kind === "resume") {
+        if (dirty) { setError("请先保存或取消审核修改"); return; }
+        await send(`/jobs/${selected.id}/reopen`, {});
+        window.dispatchEvent(new CustomEvent("inkreference:open-extraction", { detail: {runId:selected.id,documentId:selected.document_id,reviewPrompt:true} }));
+        return;
+      }
       const run = await send<Run>(`/jobs/${selected.id}/${kind}`, {});
       setSelected(run);
       setDraft(run.results);
@@ -378,7 +385,7 @@ function LegacyJobReview({ initialId, documentId, navigate, onDirtyChange }: Pro
                       <Pause size={14} />
 
                     </button>
-                  ) : ["cancelled", "failed", "paused"].includes(
+                  ) : ["cancelled", "failed", "paused", "terminated"].includes(
                       selected.status,
                     ) ? (
                     <button
@@ -833,28 +840,48 @@ function useAnalysisLibrary(documentId?: string) {
 export function ReferencePage({ navigate }: Props) {
   const { docs, runs, loading, error, load } = useAnalysisLibrary();
   const [, setDirty] = useState(false);
-  return <main className="studio-main reference-page"><PageTitle title="参考作品分析" /><Notice error>{error}</Notice><ReferenceAnalysis docs={docs} runs={runs} loading={loading} navigate={navigate} onRun={run => { window.dispatchEvent(new CustomEvent("inkreference:navigate", { detail: { section: "jobs", runId: run.id } })); }} onRefresh={load} onDirtyChange={setDirty} /></main>;
+  return <main className="studio-main reference-page"><PageTitle title="作品解析" /><Notice error>{error}</Notice><ReferenceAnalysis docs={docs} runs={runs} loading={loading} navigate={navigate} onRun={run => { window.dispatchEvent(new CustomEvent("inkreference:navigate", { detail: { section: "jobs", runId: run.id } })); }} onRefresh={load} onDirtyChange={setDirty} /></main>;
 }
-export default function Jobs({ initialId, navigate }: Props) {
-  const [filter, setFilter] = useState("all"), [controlBusy, setControlBusy] = useState(""), [documentId, setDocumentId] = useState(() => { try { return sessionStorage.getItem("inkreference.task-selection") || ""; } catch { return ""; } }), [state, setState] = useState<ReferenceState | null>(null), [dirty, setDirty] = useState(false), [localError, setLocalError] = useState(""), [legacy, setLegacy] = useState(false), [focusedRunId, setFocusedRunId] = useState("");
-  const { docs, runs, loading, error, load, lookupRun } = useAnalysisLibrary(documentId);
-  const doc = docs.find(d => d.id === documentId);
-  useEffect(() => { if (documentId) { try { sessionStorage.setItem("inkreference.task-selection", documentId); } catch { /* Keep selection within this session. */ } } }, [documentId]);
-  useEffect(() => { if (!loading && docs.length && documentId && !docs.some(doc => doc.id === documentId) && !dirty) setDocumentId(docs[0].id); }, [docs, documentId, dirty, loading]);
-  useEffect(() => { setLegacy(false); }, [documentId]);
-  const initialApplied = useRef("");
-  useEffect(() => { const target = (event?: Event) => { const id = (event as CustomEvent<{ documentId?: string }> | undefined)?.detail?.documentId || sessionStorage.getItem("inkreference.task-document"); if (id && !dirty) { sessionStorage.removeItem("inkreference.task-document"); setDocumentId(id); } }; target(); window.addEventListener("inkreference:task-document", target); return () => window.removeEventListener("inkreference:task-document", target); }, [dirty]);
-  useEffect(() => { const focus = (event: Event) => { const target = (event as CustomEvent<{ section?: string; runId?: string }>).detail; if (target?.section === "jobs" && target.runId && !dirty) { void lookupRun(target.runId).then(run => { setDocumentId(run.document_id); setFocusedRunId(run.id); window.dispatchEvent(new CustomEvent("inkreference:focus-run", { detail: { runId: run.id } })); }).catch(e => setLocalError(messageOf(e))); } }; window.addEventListener("inkreference:catalog-focus", focus); return () => window.removeEventListener("inkreference:catalog-focus", focus); }, [lookupRun, dirty]);
-  useEffect(() => { if (initialId && initialApplied.current !== initialId) { initialApplied.current = initialId; void lookupRun(initialId).then(run => { setDocumentId(run.document_id); setFocusedRunId(run.id); }).catch(e => { initialApplied.current = ""; setLocalError(messageOf(e)); }); } else if (!initialId && !documentId && docs.length) setDocumentId(docs[0].id); }, [initialId, lookupRun, docs, documentId]);
-  useEffect(() => { if (!documentId || legacy) return; let active = true; setState(null); void studio<ReferenceState>(`/documents/${documentId}/reference`).then(next => { if (active) setState(next); }).catch(e => { if (active) setLocalError(messageOf(e)); }); return () => { active = false; }; }, [documentId, legacy]);
-  const control = async (run: RunSummary, action: "pause" | "resume" | "terminate") => {
-    setControlBusy(`${run.id}:${action}`); setLocalError("");
-    try { await send<Run>(`/jobs/${run.id}/${action === "resume" && run.status === "queued" ? "start" : action}`, {}); await load(); if (focusedRunId === run.id) window.dispatchEvent(new CustomEvent("inkreference:focus-run", { detail: { runId: run.id } })); }
-    catch (e) { setLocalError(messageOf(e)); } finally { setControlBusy(""); }
-  };
-  const visibleRuns = runs.filter(run => filter === "all" || filter === "active" && ["queued", "running", "cancelling"].includes(run.status) || filter === "paused" && ["paused", "failed", "cancelled"].includes(run.status) || filter === "finished" && ["needs_review", "approved", "terminated"].includes(run.status));
-  return <main className="studio-main tasks-page"><PageTitle title="提取任务管理" action={<button className="button secondary" onClick={() => navigate("reference")}><FileSearch size={15} />查看作品分析</button>} /><Notice error>{error || localError}</Notice>
-    <section className="surface extraction-queue"><header className="extraction-queue-header"><div className="task-filters">{[["all", "全部"], ["active", "进行中"], ["paused", "已暂停"], ["finished", "已结束"]].map(([value, label]) => <button key={value} className={filter === value ? "active" : ""} onClick={() => setFilter(value)}>{label}<span>{runs.filter(run => value === "all" || value === "active" && ["queued", "running", "cancelling"].includes(run.status) || value === "paused" && ["paused", "failed", "cancelled"].includes(run.status) || value === "finished" && ["needs_review", "approved", "terminated"].includes(run.status)).length}</span></button>)}</div><button className="icon-button" aria-label="刷新任务" disabled={dirty || !!controlBusy} onClick={() => void load()}><RefreshCw size={16} /></button></header>
-      {loading && !runs.length ? <Busy label="正在读取提取任务" compact /> : !visibleRuns.length ? <div className="task-queue-empty">暂无任务</div> : <div className="task-queue-list">{visibleRuns.map(run => { const active = ["running", "cancelling"].includes(run.status), resumable = ["queued", "paused", "failed", "cancelled"].includes(run.status), terminal = ["needs_review", "approved", "terminated"].includes(run.status), stages = run.stages || []; const title = docs.find(doc => doc.id === run.document_id)?.title || "参考作品"; return <article className={`task-queue-item ${focusedRunId === run.id ? "selected" : ""} ${active ? "is-running" : ""}`} key={run.id}><button className="task-queue-select" disabled={dirty} onClick={() => { setDocumentId(run.document_id); setFocusedRunId(run.id); setLegacy(false); window.dispatchEvent(new CustomEvent("inkreference:focus-run", { detail: { runId: run.id } })); }}><span className="task-queue-icon"><FileSearch size={20} /></span><span className="task-queue-main"><span className="task-queue-title"><strong>{title}</strong><Status value={run.status} /></span><span className="task-queue-meta">{dateLabel(run.created_at)} · {run.total} 个切块</span><Progress completed={Math.round(run.progress * 100)} total={100} stage={run.stage === "pausing" ? "正在暂停" : run.stage === "terminating" ? "正在终止" : `${run.completed} / ${run.total} 个切块`} busy={active} />{stages.length > 0 && <span className="task-queue-stages">{stages.map(stage => <span key={(stage.id || stage.stage)} className={stage.completed === stage.total ? "complete" : run.current_stage === (stage.id || stage.stage) ? "current" : ""}>{({ plot: "剧情", characters: "角色", settings: "设定", language: "语言" } as Record<string, string>)[(stage.id || stage.stage)] || (stage.id || stage.stage)}<b>{stage.completed}/{stage.total}</b></span>)}</span>}</span></button><div className="task-controls">{active && <button className="icon-button task-control pause" aria-label={`暂停 ${title}`} title="暂停提取" disabled={!!controlBusy || run.status === "cancelling"} onClick={() => void control(run, "pause")}><Pause size={17} fill="currentColor" /></button>}{resumable && run.profile_id !== "manual" && <button className="icon-button task-control resume" aria-label={`${run.status === "queued" ? "开始" : "恢复"} ${title}`} title={run.status === "queued" ? "开始提取" : "恢复提取"} disabled={!!controlBusy || dirty} onClick={() => void control(run, "resume")}><Play size={17} fill="currentColor" /></button>}{!terminal && <button className="icon-button task-control terminate" aria-label={`终止 ${title}`} title="终止提取" disabled={!!controlBusy || run.stage === "terminating"} onClick={() => void control(run, "terminate")}><Square size={15} fill="currentColor" /></button>}</div></article>; })}</div>}{controlBusy && <Busy label="正在更新任务" compact />}</section>
-    <section className="surface task-manager-panel"><div className="task-manager-toolbar"><label className="studio-field"><span>参考作品库</span><select aria-label="选择分析作品" value={documentId} disabled={dirty} onChange={e => { setDocumentId(e.target.value); setFocusedRunId(""); setLocalError(""); }}>{!docs.length && <option value="">暂无作品</option>}{docs.map(d => <option key={d.id} value={d.id}>{d.title}</option>)}</select></label>{legacy && <button className="button secondary" disabled={dirty} onClick={() => setLegacy(false)}>返回分区审核</button>}</div>{loading && !docs.length && <Busy label="正在读取任务" />}{legacy ? <LegacyJobReview initialId={focusedRunId || initialId} documentId={documentId} navigate={navigate} onDirtyChange={setDirty} /> : state && doc ? <ReferenceExtraction key={doc.id} document={doc} state={state} runs={runs.filter(r => r.document_id === doc.id)} initialRunId={focusedRunId || initialId} navigate={navigate} onRun={run => { setFocusedRunId(run.id); setLegacy(true); }} onState={setState} onRefresh={load} onDirty={setDirty} /> : !loading && !docs.length ? <Empty icon={FileSearch} title="暂无参考作品" action={<button className="button primary" onClick={() => navigate("documents")}>上传文件<ArrowRight size={14} /></button>} /> : <Busy label="正在读取作品任务" />}</section></main>;
+function ExtractionWorkspace({initialId,documentId:initialDocument,navigate,onDirtyChange}:Props) {
+  const [documentId,setDocumentId]=useState(()=>initialDocument||sessionStorage.getItem("inkreference.task-selection")||""),[state,setState]=useState<ReferenceState|null>(null),[dirty,setDirty]=useState(false),[localError,setLocalError]=useState(""),[legacy,setLegacy]=useState(false),[focusedRunId,setFocusedRunId]=useState(initialId||"");
+  const {docs,runs,loading,error,load,lookupRun}=useAnalysisLibrary(documentId);
+  const doc=docs.find(item=>item.id===documentId);
+  useEffect(()=>{onDirtyChange?.(dirty);return()=>onDirtyChange?.(false);},[dirty,onDirtyChange]);
+  useEffect(()=>{if(documentId){try{sessionStorage.setItem("inkreference.task-selection",documentId);}catch{/* Optional selection. */}}},[documentId]);
+  useEffect(()=>{if(!loading&&docs.length&&!docs.some(doc=>doc.id===documentId)&&!dirty)setDocumentId(docs[0].id);},[loading,docs,documentId,dirty]);
+  useEffect(()=>{if(!initialId)return;let active=true;void lookupRun(initialId).then(run=>{if(active){setDocumentId(run.document_id);setFocusedRunId(run.id);}}).catch(e=>{if(active)setLocalError(messageOf(e));});return()=>{active=false;};},[initialId,lookupRun]);
+  useEffect(()=>{setLegacy(false);},[documentId]);
+  useEffect(()=>{if(!documentId||legacy)return;let active=true;setState(null);void studio<ReferenceState>(`/documents/${documentId}/reference`).then(next=>{if(active)setState(next);}).catch(e=>{if(active)setLocalError(messageOf(e));});return()=>{active=false;};},[documentId,legacy]);
+  return <div className="task-workbench-body"><Notice error>{error||localError}</Notice><section className="task-manager-panel"><div className="task-manager-toolbar"><label className="studio-field"><span>参考作品库</span><select aria-label="选择解析作品" value={documentId} disabled={dirty} onChange={e=>{setDocumentId(e.target.value);setFocusedRunId("");setLocalError("");}}>{!docs.length&&<option value="">暂无作品</option>}{docs.map(doc=><option value={doc.id} key={doc.id}>{doc.title}</option>)}</select></label>{legacy&&<button className="button secondary" disabled={dirty} onClick={()=>setLegacy(false)}>返回分区审核</button>}</div>{loading&&!docs.length?<Busy label="正在读取作品"/>:legacy?<LegacyJobReview initialId={focusedRunId} documentId={documentId} navigate={navigate} onDirtyChange={setDirty}/>:state&&doc?<ReferenceExtraction key={doc.id} document={doc} state={state} runs={runs.filter(run=>run.document_id===doc.id)} initialRunId={focusedRunId} navigate={navigate} onRun={run=>{setFocusedRunId(run.id);setLegacy(true);}} onState={setState} onRefresh={load} onDirty={setDirty}/>:!loading&&!docs.length?<Empty icon={FileSearch} title="暂无正文" action={<button className="button primary" onClick={()=>navigate("library")}>作品库<ArrowRight size={14}/></button>}/>:<Busy label="正在读取解析任务"/>}</section></div>;
+}
+export default function Jobs({initialId,navigate}:Props) {
+  const [workspace,setWorkspace]=useState<{runId?:string;documentId?:string}|null>(null),[dirty,setDirty]=useState(false),[error,setError]=useState("");
+  const initialApplied=useRef("");
+  const openTask=useCallback((task:ManagedTask,navigation?:TaskNavigation)=>{
+    const target=navigation||task.navigation;setError("");
+    if(target.prepared_id){try{sessionStorage.setItem("inkreference.prompt-focus",JSON.stringify({operation:target.operation||task.operation,prepared_id:target.prepared_id}));}catch{/* Event delivery remains available. */}}
+    const runId=target.run_id||(task.kind==="extraction"?task.id:undefined),documentId=target.document_id||task.document_id;
+    if(target.section==="jobs"||task.kind==="extraction"){
+      if(target.action==="open_prompt"&&!target.prepared_id&&runId){try{sessionStorage.setItem("inkreference.extraction-prompt-focus",runId);}catch{/* Optional focus. */}}
+      setWorkspace({runId,documentId});return;
+    }
+    if(target.section==="repair"){window.dispatchEvent(new Event("inkreference:debug-open"));return;}
+    if(target.section==="library"){
+      const jobId=target.job_id||(task.kind==="research"?task.id:undefined);
+      if(jobId){try{sessionStorage.setItem("inkreference.research-focus",jobId);}catch{/* Optional focus. */}}
+      window.dispatchEvent(new CustomEvent("inkreference:navigate",{detail:{section:"library",intake:true,intakeMode:task.mode==="semi"?"semi":"automatic"}}));return;
+    }
+    if(target.section==="models"){
+      try{sessionStorage.setItem("inkreference.embedding-task-focus",task.id);}catch{/* Optional focus. */}
+      navigate("models");window.dispatchEvent(new Event("inkreference:embedding-task-focus"));return;
+    }
+    if(target.section==="documents"){
+      window.dispatchEvent(new CustomEvent("inkreference:navigate",{detail:{section:"documents",documentId,versionId:target.version_id||task.version_id,tab:task.kind==="volume_research"||task.operation==="volumes"?"volumes":"metadata",taskKind:task.kind,taskId:task.id,...(target.prepared_id?{prepared_id:target.prepared_id,operation:target.operation}: {})}}));return;
+    }
+    window.dispatchEvent(new CustomEvent("inkreference:navigate",{detail:{section:"reference",documentId,prepared_id:target.prepared_id,operation:target.operation}}));
+  },[navigate]);
+  useEffect(()=>{if(initialId&&initialApplied.current!==initialId){initialApplied.current=initialId;setWorkspace({runId:initialId});}},[initialId]);
+  useEffect(()=>{const focus=(event:Event)=>{const target=(event as CustomEvent<{section?:string;runId?:string;documentId?:string}>).detail;if(target?.section==="jobs"&&target.runId&&!dirty)setWorkspace({runId:target.runId,documentId:target.documentId});};window.addEventListener("inkreference:catalog-focus",focus);return()=>window.removeEventListener("inkreference:catalog-focus",focus);},[dirty]);
+  useEffect(()=>{const open=(event:Event)=>{const target=(event as CustomEvent<{runId:string;documentId:string;reviewPrompt?:boolean}>).detail;if(!target||dirty)return;if(target.reviewPrompt)sessionStorage.setItem("inkreference.extraction-prompt-focus",target.runId);setWorkspace({runId:target.runId,documentId:target.documentId});};window.addEventListener("inkreference:open-extraction",open);return()=>window.removeEventListener("inkreference:open-extraction",open);},[dirty]);
+  return <main className="studio-main tasks-page"><PageTitle title="任务管理"/><TaskManager onOpen={openTask} onCreate={()=>setWorkspace({})}/>{workspace&&<Modal wide title="作品解析任务" onClose={()=>{if(dirty){setError("请先保存或取消当前修改");return;}setWorkspace(null);setError("");window.dispatchEvent(new Event("inkreference:jobs-refresh"));}}><Notice error>{error}</Notice><ExtractionWorkspace key={`${workspace.documentId||""}:${workspace.runId||"new"}`} initialId={workspace.runId} documentId={workspace.documentId} navigate={navigate} onDirtyChange={setDirty}/></Modal>}</main>;
 }

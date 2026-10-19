@@ -26,7 +26,7 @@ def character(id='CH1',name='林青'):
 def test_schema6_columns_and_weighted_unique_score(tmp_path):
     s=store(tmp_path);a=work(s);b=work(s,'W2','2','2');work(s,'W3','','')
     c=s.create_record('cliches',{'clichéID':'C1','cliché内容':'护送同伴','关联作品':'[{"作品ID":"W1"}]'})
-    assert s.meta()['schema_version']==6
+    assert s.meta()['schema_version']==7
     assert c['computed']['cliche_score']==round(600/9,4)
     assert c['computed']['missing_heat_count']==1
     assert c['computed']['formula']==SCORE_FORMULA

@@ -1,13 +1,18 @@
-"""Schema 6 catalog business fields and lossless compatibility projections."""
+"""Schema 7 catalog fields with explicit schema 6 compatibility columns."""
 from __future__ import annotations
 import json
 import math
 from typing import Any
 
 WORK_COLUMNS = ['作品ID','作品','类别','作者','发布日期','用户是否完整体验过','剧情梗概','讨论热度','商业规模','热度权重','关联作品','关联角色','关联cliché']
+SCHEMA6_WORK_COLUMNS = list(WORK_COLUMNS)
+WORK_COLUMNS = [*WORK_COLUMNS, '作品题材', '作品风格']
+GENRES = ('奇幻','科幻','现实','历史','武侠','仙侠','悬疑','爱情','冒险')
+STYLES = ('推理','克苏鲁','赛博朋克','蒸汽朋克','黑色幽默','浪漫','史诗')
 CHARACTER_COLUMNS = ['人物ID','角色名','别名','角色定位','性格基调','视觉元素设计','初始状态','阶段状态','关联作品','关联cliché']
 CLICHE_COLUMNS = ['clichéID','cliché内容','cliché评分','关联作品','关联角色','人设塑造','剧情机制']
 COLUMNS = {'works':WORK_COLUMNS,'characters':CHARACTER_COLUMNS,'cliches':CLICHE_COLUMNS}
+SCHEMA6_COLUMNS = {'works': SCHEMA6_WORK_COLUMNS, 'characters': list(CHARACTER_COLUMNS), 'cliches': list(CLICHE_COLUMNS)}
 JSON_DEFAULTS = {'别名':'[]','初始状态':'{}','阶段状态':'[]','关联作品':'[]','关联角色':'[]','关联cliché':'[]'}
 TRAITS = ('强大','智谋','利他','共情','利己','执念','反差','宿命')
 SCORE_FORMULA = '100 × Σ命中唯一作品热度 / Σ全库唯一作品热度；热度=(讨论热度+商业规模)/2；缺失分项按1'

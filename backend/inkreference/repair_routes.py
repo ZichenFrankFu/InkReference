@@ -34,6 +34,7 @@ class AutomaticRequest(PromptRequest):
 class ApplyRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     preview_id: str = Field(min_length=1, max_length=100)
+    prepared_id: str | None = Field(default=None, min_length=1, max_length=100)
 
 
 class RollbackRequest(BaseModel):
@@ -107,6 +108,12 @@ def install_repair_routes(application, runtime):
 
     @router.post("/apply")
     def apply(body: ApplyRequest):
+        if body.prepared_id:
+            from .prompt_workbench import get_prompt_workbench
+            workbench = get_prompt_workbench(runtime.studio, get_service)
+            with get_service().lock:
+                workbench.validate_for_confirmation("repair", body.prepared_id, preview_id=body.preview_id)
+                return get_service().apply(body.preview_id, on_completed=lambda: workbench.control_preparation(body.prepared_id, "complete"))
         return get_service().apply(body.preview_id)
 
     @router.get("/operations/{operation_id}")
@@ -123,6 +130,9 @@ def install_repair_routes(application, runtime):
 
     @router.post("/export")
     def export(body: ApplyRequest):
+        if body.prepared_id:
+            from .prompt_workbench import get_prompt_workbench
+            get_prompt_workbench(runtime.studio, get_service).validate_for_confirmation("repair", body.prepared_id, preview_id=body.preview_id)
         return Response(get_service().export(body.preview_id), media_type="application/json",
                         headers={"Content-Disposition": 'attachment; filename="InkReference-repair.json"'})
 

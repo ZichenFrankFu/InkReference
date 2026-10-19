@@ -56,8 +56,11 @@ class VolumeResearch:
     def get(self, job_id, document_id=None, version_id=None):
         row = self._row(job_id, document_id, version_id)
         value = json.loads(row["payload_json"])
-        return {key: value.get(key) for key in ("stage", "progress", "volumes", "sources", "source_ids", "error", "usage")} | {
-            "id": job_id, "document_id": row["document_id"], "version_id": row["version_id"], "status": row["status"], "updated_at": row["updated_at"]}
+        verified = [{key: source[key] for key in ("id", "url", "title", "excerpt")} for source in value.get("sources", []) if source.get("fetch_status") == "verified"]
+        prompt = value.get("prompt", "") + ("\n<已读取来源>\n" + json.dumps(verified, ensure_ascii=False) + "\n</已读取来源>" if verified else "")
+        return {key: value.get(key) for key in ("stage", "progress", "volumes", "sources", "source_ids", "error", "usage", "response", "base_revision", "metadata_revision")} | {
+            "id": job_id, "document_id": row["document_id"], "version_id": row["version_id"], "status": row["status"], "updated_at": row["updated_at"],
+            "prompt": prompt, "profile_id": value.get("profile", {}).get("id")}
 
     def _payload(self, job_id):
         return json.loads(self._row(job_id)["payload_json"])

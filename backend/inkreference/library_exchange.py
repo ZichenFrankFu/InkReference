@@ -25,11 +25,11 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from .csvio import ImportBatch, ImportTable, _apply_import, _csv_bytes, _decode, _snapshot
-from .database import TABLES, LEGACY_TABLES, SCHEMA4_COLUMNS as CORE_SCHEMA4_COLUMNS, SCHEMA5_COLUMNS as CORE_SCHEMA5_COLUMNS, ASSOCIATIONS, modern_values, association_items, DataError, DataStore, character_version, parse_work_relations, record_id, validate_values
+from .database import TABLES, LEGACY_TABLES, SCHEMA4_COLUMNS as CORE_SCHEMA4_COLUMNS, SCHEMA5_COLUMNS as CORE_SCHEMA5_COLUMNS, SCHEMA6_COLUMNS as CORE_SCHEMA6_COLUMNS, ASSOCIATIONS, modern_values, association_items, DataError, DataStore, character_version, parse_work_relations, record_id, validate_values
 
 FORMAT = "InkReference material library"
 FORMAT_VERSION = 1
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 MAX_BYTES = 128 * 1024 * 1024
 MAX_EXPANDED_BYTES = 256 * 1024 * 1024
 MAX_ROWS = 200_000
@@ -43,6 +43,7 @@ SCHEMA5_COLUMNS = {**CORE_SCHEMA5_COLUMNS, "material_relations": MATERIAL_RELATI
 SCHEMA4_COLUMNS = {**CORE_SCHEMA4_COLUMNS, "material_relations": MATERIAL_RELATION_COLUMNS, "legacy_values": ["table_key","record_id","values_json"]}
 COLUMNS["catalog_field_archive"] = ["table_key","record_id","source_schema","values_json"]
 COLUMNS["character_contexts"] = ["character_id","work_id","document_id","extracted_character_id","character_json"]
+SCHEMA6_COLUMNS = {**COLUMNS, **CORE_SCHEMA6_COLUMNS}
 LABELS = {**{key: spec["label"] for key, spec in TABLES.items()}, "work_cliches": "作品与桥段关联", "material_relations": "素材关联说明", "legacy_values":"旧版字段归档", "character_contexts":"作品人物阶段状态", "catalog_field_archive":"历史字段归档"}
 LEGACY_NAMES = {"works": "works_library_v8.csv", "characters": "character_database_v8.csv", "cliches": "cliche_database_v8.csv"}
 CELL_REF = "__INKREFERENCE_TEXT__:"
@@ -129,11 +130,11 @@ def _zip_entries(data: bytes, *, xlsx: bool = False) -> dict[str, bytes]:
 def _manifest(value: Any) -> dict[str, Any]:
     if not isinstance(value,dict) or value.get("format") != FORMAT or value.get("format_version") != FORMAT_VERSION:
         raise DataError(422,"manifest.json / _manifest 不是受支持的 InkReference 素材库格式")
-    if value.get("schema_version") not in {3,4,5,6}:
-        raise DataError(422,f"素材库结构版本为 {value.get('schema_version')}，当前支持 3、4、5、6；请使用匹配版本应用重新导出全部表")
+    if value.get("schema_version") not in {3,4,5,6,7}:
+        raise DataError(422,f"素材库结构版本为 {value.get('schema_version')}，当前支持 3、4、5、6、7；请使用匹配版本应用重新导出全部表")
     if not isinstance(value.get("bundle_id"),str) or not value["bundle_id"] or not isinstance(value.get("tables"),dict):
         raise DataError(422,"格式信息缺少 bundle_id 或 tables")
-    columns = {3: LEGACY_COLUMNS, 4: SCHEMA4_COLUMNS, 5: SCHEMA5_COLUMNS, 6: COLUMNS}[value["schema_version"]]
+    columns = {3: LEGACY_COLUMNS, 4: SCHEMA4_COLUMNS, 5: SCHEMA5_COLUMNS, 6: SCHEMA6_COLUMNS, 7: COLUMNS}[value["schema_version"]]
     missing = set(TABLES) - set(value["tables"])
     extra = set(value["tables"]) - set(columns)
     if missing or extra:
@@ -149,7 +150,11 @@ def _add_table(batch: ExchangeBatch, table: str, filename: str, rows: list[dict[
         raise DataError(422, f"{filename} 与 {batch.filenames[table]} 都是 {LABELS[table]}表，重复选择；请保留同一版本的一份。")
     batch.filenames[table] = filename
     if table in TABLES:
-        clean = [validate_values(table, row) for row in rows]
+        clean = []
+        for row in rows:
+            validated = validate_values(table, row)
+            # Digests and archives describe source columns, before projection.
+            clean.append(dict(row) if table == "works" and set(row) == set(CORE_SCHEMA6_COLUMNS["works"]) else validated)
         ids: set[str] = set()
         for row in clean:
             identifier = record_id(table, row)
@@ -189,9 +194,9 @@ def _rows_csv(data: bytes, filename: str) -> tuple[list[str], list[dict[str, str
 
 def _header_error(filename: str, header: list[str]) -> str:
     plain = set(header) - {"_bundle_id", "_schema_version"}
-    key = min(COLUMNS, key=lambda table: len(set(COLUMNS[table]) ^ plain))
-    missing = set(COLUMNS[key]) - plain
-    extra = plain - set(COLUMNS[key])
+    key, expected = min(((table, columns) for specs in (COLUMNS, SCHEMA6_COLUMNS, SCHEMA5_COLUMNS, SCHEMA4_COLUMNS, LEGACY_COLUMNS) for table, columns in specs.items()), key=lambda item: len(set(item[1]) ^ plain))
+    missing = set(expected) - plain
+    extra = plain - set(expected)
     return f"{filename} 疑似{LABELS[key]}表但字段不符；缺少：{'、'.join(sorted(missing)) or '无'}；多出：{'、'.join(sorted(extra)) or '无'}。请勿混用不同版本的表。"
 
 
@@ -214,7 +219,7 @@ def _parse_csv(batch: ExchangeBatch, files: list[tuple[str, bytes]]) -> None:
             if {"_bundle_id", "_schema_version"} & set(header):
                 batch.legacy = False
             plain = [field for field in header if field not in {"_bundle_id", "_schema_version"}]
-            matches = list(dict.fromkeys(table for specs in (COLUMNS,SCHEMA5_COLUMNS,SCHEMA4_COLUMNS,LEGACY_COLUMNS) for table,columns in specs.items() if set(plain) == set(columns)))
+            matches = list(dict.fromkeys(table for specs in (COLUMNS,SCHEMA6_COLUMNS,SCHEMA5_COLUMNS,SCHEMA4_COLUMNS,LEGACY_COLUMNS) for table,columns in specs.items() if set(plain) == set(columns)))
             if len(matches) != 1:
                 raise DataError(422, _header_error(filename, header))
             table = matches[0]
@@ -325,7 +330,7 @@ def _parse_xlsx(batch: ExchangeBatch, filename: str, data: bytes) -> None:
                 header = [cell.value for cell in next(iterator,[])]
                 if not header or any(not isinstance(column,str) or not column for column in header) or len(header) != len(set(header)):
                     raise DataError(422,f"{filename} / {sheet.title} 缺少有效表头或存在重复字段；请每个字段仅保留一列。")
-                matches = list(dict.fromkeys(table for specs in (COLUMNS,SCHEMA5_COLUMNS,SCHEMA4_COLUMNS,LEGACY_COLUMNS) for table,columns in specs.items() if table in TABLES and set(header) == set(columns)))
+                matches = list(dict.fromkeys(table for specs in (COLUMNS,SCHEMA6_COLUMNS,SCHEMA5_COLUMNS,SCHEMA4_COLUMNS,LEGACY_COLUMNS) for table,columns in specs.items() if table in TABLES and set(header) == set(columns)))
                 if len(matches) != 1:
                     raise DataError(422,_header_error(f"{filename} / {sheet.title}",header))
                 rows = []
@@ -415,6 +420,11 @@ def _normalize_legacy_batch(batch: ExchangeBatch) -> None:
     if all(modern_values(item.table,row) for item in batch.tables for row in item.rows):
         for item in batch.tables:
             for row in item.rows:
+                if item.table == "works" and is_current(item.table,row) and any(field not in row for field in ("作品题材", "作品风格")):
+                    versions = batch.relation_tables.setdefault("catalog_field_archive", [])
+                    if not any(a["table_key"] == item.table and a["record_id"] == record_id(item.table,row) and a["source_schema"] == "6" for a in versions):
+                        versions.append({"table_key":item.table,"record_id":record_id(item.table,row),"source_schema":"6","values_json":_json(row)})
+                    batch.filenames.setdefault("catalog_field_archive", "历史字段归档（自动迁移）")
                 if not is_current(item.table,row):
                     versions=batch.relation_tables.setdefault("catalog_field_archive",[])
                     source_schema=str(batch.manifest["schema_version"]) if batch.manifest else "5"

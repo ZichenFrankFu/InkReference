@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ArrowDownToLine, ArrowRight, BookOpen, CheckCircle2, ChevronDown, Link2, FileText, History, Layers3, PencilLine, RefreshCw, RotateCcw, Search, Server, SlidersHorizontal, Upload, X } from "lucide-react";
-import { ApiError, download } from "./api";
+import { ArrowDownToLine, ArrowRight, BookOpen, CheckCircle2, Link2, FileText, History, Layers3, PencilLine, RefreshCw, RotateCcw, Search, Server, SlidersHorizontal, Upload, X } from "lucide-react";
+import { ApiError, download, request } from "./api";
 import ChapterWorkbench from "./ChapterWorkbench";
 import ChapterRecognitionSettings from "./ChapterRecognitionSettings";
-import DocumentUpload, { DocumentSources, IngestionProgress, IngestionStatus, ingestionRunning, ingestionStage, type IngestionTask } from "./DocumentUpload";
+import DocumentUpload, { DocumentSources, ConversionProgress, IngestionProgress, IngestionStatus, ingestionRunning, ingestionStage, type IngestionTask, type ConversionTask, type ExistingWorkTarget } from "./DocumentUpload";
 import { VolumePanel } from "./VolumePanel";
 import { isRemoteModel, modelEndpoint } from "./model-security";
 import { studio, send, normalizeList, type DocumentMeta, type TextVersion, type ModelProfile, type Workflow, type List, type Run } from "./studio";
@@ -35,9 +35,9 @@ export default function Documents({ navigate, onJob }: Props) {
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
   const [uploadOpen, setUploadOpen] = useState(false);
-  const [uploadMenuOpen, setUploadMenuOpen] = useState(false);
-  const uploadMenu = useRef<HTMLDivElement>(null);
+  const [uploadWork, setUploadWork] = useState<ExistingWorkTarget | null>(null);
   const [uploadTarget, setUploadTarget] = useState<DocumentMeta | null>(null);
+  const [conversion, setConversion] = useState<ConversionTask | null>(null);
   const [ingestions, setIngestions] = useState<IngestionTask[]>([]);
   const [ingestion, setIngestion] = useState<IngestionTask | null>(null);
   const [chapterDirty, setChapterDirty] = useState(false);
@@ -57,7 +57,7 @@ export default function Documents({ navigate, onJob }: Props) {
   const [catalog, setCatalog] = useState<CatalogState | null>(null);
   const [catalogWorks, setCatalogWorks] = useState<CatalogWork[]>([]);
   const [catalogQuery, setCatalogQuery] = useState("");
-  const [catalogChoice, setCatalogChoice] = useState("new");
+  const [catalogChoice, setCatalogChoice] = useState("");
   const [catalogChoiceWork, setCatalogChoiceWork] = useState<CatalogWork | null>(null);
   const catalogInitialWorks = useRef<CatalogWork[]>([]);
   const [catalogSearching, setCatalogSearching] = useState(false);
@@ -92,15 +92,7 @@ export default function Documents({ navigate, onJob }: Props) {
   const remote = modelTargets.some(isRemoteModel);
   const modelTargetsReady = !!selectedProfile && stageProfiles.every(item => item.profile && (!isRemoteModel(item.profile) || !!item.profile.target_fingerprint)) && modelTargets.every(item => !isRemoteModel(item) || !!item.target_fingerprint);
   const guard = (action: () => void) => dirtyRef.current ? setDiscardAction(() => action) : action();
-  const openUpload = (doc: DocumentMeta | null = null) => { setUploadMenuOpen(false); guard(() => { setUploadTarget(doc); setUploadOpen(true); setError(""); }); };
-  useEffect(() => {
-    if (!uploadMenuOpen) return;
-    uploadMenu.current?.querySelector<HTMLButtonElement>('[role="menuitem"]')?.focus();
-    const outside = (event: PointerEvent) => { if (!uploadMenu.current?.contains(event.target as Node)) setUploadMenuOpen(false); };
-    const escape = (event: KeyboardEvent) => { if (event.key === "Escape") { setUploadMenuOpen(false); uploadMenu.current?.querySelector<HTMLButtonElement>('[aria-haspopup="menu"]')?.focus(); } };
-    window.addEventListener("pointerdown", outside); window.addEventListener("keydown", escape);
-    return () => { window.removeEventListener("pointerdown", outside); window.removeEventListener("keydown", escape); };
-  }, [uploadMenuOpen]);
+  const openUpload = (doc: DocumentMeta) => guard(() => { setUploadWork(null); setUploadTarget(doc); setUploadOpen(true); setError(""); });
 
   const load = useCallback(async () => {
     const documents = studio<List<DocumentMeta>>("/documents").then((data) => {
@@ -193,7 +185,33 @@ export default function Documents({ navigate, onJob }: Props) {
   };
   useEffect(() => {
     const open = (event: Event) => { const detail = (event as CustomEvent<{ document_id: string; tab?: string }>).detail; if (detail?.document_id) { const show = () => { setTab(detail.tab === "files" ? "files" : detail.tab === "volumes" ? "volumes" : "body"); void chooseRef.current(detail.document_id, undefined, true); }; if (dirtyRef.current) setDiscardAction(() => show); else show(); } };
-    const focus = (event: Event) => { const target = (event as CustomEvent<{ section?: string; documentId?: string; versionId?: string }>).detail; if (target?.section !== "documents" || !target.documentId) return; try { sessionStorage.removeItem("inkreference.catalog-focus"); } catch { /* Optional navigation memory. */ } const show = () => { setTab("body"); void chooseRef.current(target.documentId!, target.versionId, true); }; if (dirtyRef.current) setDiscardAction(() => show); else show(); };
+    const focus = (event: Event) => {
+      const target = (event as CustomEvent<{ section?: string; documentId?: string; versionId?: string; tab?: string; taskKind?: string; taskId?: string; workId?: string; upload?: boolean }>).detail;
+      if (target?.section !== "documents") return;
+      try { sessionStorage.removeItem("inkreference.catalog-focus"); } catch { /* Optional navigation memory. */ }
+      const show = () => {
+        setTab(target.tab === "volumes" ? "volumes" : target.tab === "metadata" || target.tab === "files" ? "files" : "body");
+        if (target.documentId) void chooseRef.current(target.documentId, target.versionId, true);
+        if (target.taskKind === "volume_research" && target.taskId) {
+          const detail = {taskId: target.taskId, documentId: target.documentId, versionId: target.versionId};
+          try { sessionStorage.setItem("inkreference.volume-task-focus", JSON.stringify(detail)); } catch { /* Optional task navigation. */ }
+          window.dispatchEvent(new CustomEvent("inkreference:volume-task-focus", {detail}));
+        }
+        if (target.upload && target.workId) {
+          setBusy("upload-context"); setError("");
+          void Promise.all([request<{ id: string; values: Record<string, string> }>(`/records/works/${encodeURIComponent(target.workId)}`), studio<{ documents: { id: string }[] }>(`/catalog/works/${encodeURIComponent(target.workId)}`)]).then(async ([work, linked]) => {
+            const existing = target.documentId || linked.documents[0]?.id;
+            if (existing) { const document = await studio<DocumentMeta>(`/documents/${encodeURIComponent(existing)}`); setUploadWork(null); setUploadTarget(document); void chooseRef.current(document.id, undefined, true, document); }
+            else { setUploadTarget(null); setUploadWork({ id: work.id, title: work.values["作品"] || "", author: work.values["作者"] || "", book_type: work.values["类别"] || "", earliest_update_at: work.values["最早更新时间"] || "" }); }
+            setUploadOpen(true);
+          }).catch(e => setError(messageOf(e))).finally(() => setBusy(""));
+        }
+
+        if (target.taskKind === "conversion" && target.taskId) void studio<ConversionTask>(`/conversions/${encodeURIComponent(target.taskId)}`).then(task => { setIngestion(null); setConversion(task); const id = task.imported_document_id || task.options?.target_document_id; if (!target.documentId && id) void chooseRef.current(id, undefined, true); }).catch(e => setError(messageOf(e)));
+        if (target.taskKind === "ingestion" && target.taskId) void studio<IngestionTask>(`/ingestions/${encodeURIComponent(target.taskId)}`).then(task => { setConversion(null); receiveTask(task); const id = task.document_id || task.target_document_id; if (!target.documentId && id) void chooseRef.current(id, task.version_id, true); }).catch(e => setError(messageOf(e)));
+      };
+      if (dirtyRef.current) setDiscardAction(() => show); else show();
+    };
     window.addEventListener("inkreference:document-open", open);
     window.addEventListener("inkreference:catalog-focus", focus);
     try { const target = sessionStorage.getItem("inkreference.catalog-focus"); if (target) focus(new CustomEvent("inkreference:catalog-focus", { detail: JSON.parse(target) })); } catch { /* Optional navigation memory. */ }
@@ -214,6 +232,15 @@ export default function Documents({ navigate, onJob }: Props) {
     handledIngestions.current.add(ingestion.id); setTab("body"); const documentId = ingestion.document_id, versionId = ingestion.version_id; void load().then(() => chooseRef.current(documentId, versionId)); setMessage("文件已处理");
   }, [ingestion, load]);
   const ingestionAction = async (kind: "cancel" | "retry") => { if (!ingestion) return; setBusy(`ingestion-${kind}`); setError(""); try { receiveTask(await send<IngestionTask>(`/ingestions/${ingestion.id}/${kind}`, {})); } catch (e) { setError(messageOf(e)); } finally { setBusy(""); } };
+
+  useEffect(() => {
+    if (!conversion || !["queued", "running", "cancelling"].includes(conversion.status)) return;
+    let active = true, timer = 0;
+    const poll = async () => { try { const next = await studio<ConversionTask>(`/conversions/${encodeURIComponent(conversion.id)}`); if (active) setConversion(next); } catch (e) { if (active) setError(messageOf(e)); } finally { if (active) timer = window.setTimeout(() => void poll(), 1200); } };
+    timer = window.setTimeout(() => void poll(), 500);
+    return () => { active = false; window.clearTimeout(timer); };
+  }, [conversion?.id, conversion?.status]);
+  const conversionAction = async (kind: "cancel" | "retry") => { if (!conversion) return; setBusy(`conversion-${kind}`); setError(""); try { setConversion(await send<ConversionTask>(`/conversions/${encodeURIComponent(conversion.id)}/${kind}`, {})); window.dispatchEvent(new Event("inkreference:jobs-refresh")); } catch (e) { setError(messageOf(e)); } finally { setBusy(""); } };
 
   useEffect(() => {
     if (!selected || !version) { setRun(null); return; }
@@ -247,7 +274,7 @@ export default function Documents({ navigate, onJob }: Props) {
     try {
       const [next, choices] = await Promise.all([studio<CatalogState>(`/documents/${documentId}/catalog`), studio<{ items: CatalogWork[] }>("/catalog/works?limit=100")]);
       if (selectedRef.current?.id !== documentId) return;
-      catalogInitialWorks.current = choices.items; setCatalog(next); setCatalogChoice(next.work_id || "new"); setCatalogChoiceWork(next.work); setCatalogWorks(choices.items);
+      catalogInitialWorks.current = choices.items; setCatalog(next); setCatalogChoice(next.work_id || ""); setCatalogChoiceWork(next.work); setCatalogWorks(choices.items);
     } catch (e) { setError(messageOf(e)); } finally { setBusy(""); }
   };
   useEffect(() => {
@@ -258,11 +285,11 @@ export default function Documents({ navigate, onJob }: Props) {
     return () => { active = false; window.clearTimeout(timer); setCatalogSearching(false); };
   }, [exportOpen, catalogQuery]);
   const exportText = async () => {
-    if (!selected || !version || !catalog) return;
+    if (!selected || !version || !catalog || !catalogChoice) return;
     setBusy("export"); setError("");
     try {
-      const nextCatalog = await send<CatalogState>(`/documents/${selected.id}/catalog`, { ...(catalogChoice === "new" ? { new_work: { title: selected.title } } : { work_id: catalogChoice }), expected_work_id: catalog.work_id, expected_version_id: version.id, complete: true }, "PUT");
-      setCatalog(nextCatalog); setCatalogChoice(nextCatalog.work_id || "new"); setCatalogChoiceWork(nextCatalog.work);
+      const nextCatalog = await send<CatalogState>(`/documents/${selected.id}/catalog`, { work_id: catalogChoice, expected_work_id: catalog.work_id, expected_version_id: version.id, complete: true }, "PUT");
+      setCatalog(nextCatalog); setCatalogChoice(nextCatalog.work_id || ""); setCatalogChoiceWork(nextCatalog.work);
       const nextDocument = { ...selected, work_id: nextCatalog.work_id || undefined };
       setSelected(nextDocument); selectedRef.current = nextDocument; setItems((current) => current.map((item) => item.id === selected.id ? nextDocument : item));
       window.dispatchEvent(new Event("inkreference:library-refresh"));
@@ -271,13 +298,13 @@ export default function Documents({ navigate, onJob }: Props) {
   };
   const restore = async () => { if (!selected || !version) return; setBusy("restore"); setError(""); try { const next = await send<TextVersion>(`/documents/${selected.id}/chapters/restore?summary=true`, { base_version_id: selected.latest_version_id, target_version_id: restoreTarget }); await receiveVersion(next.id, next); setRestoreTarget(""); setHistoryOpen(false); } catch (e) { setError(messageOf(e)); } finally { setBusy(""); } };
   const visibleItems = items.filter((doc) => `${doc.title} ${documentType(doc)}`.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()));
-  const progressLabel = loading ? "正在读取作品" : busy === "version" ? "正在读取正文" : busy ? ({ catalog: "正在读取作品库", export: "正在关联作品与导出正文", config: "正在读取分析配置", history: "正在读取历史版本", restore: "正在恢复版本", start: "正在创建分析任务", metadata: "正在读取作品信息", "metadata-save": "正在保存作品信息" } as Record<string, string>)[busy] || "正在处理" : Object.values(activities).find(Boolean) || (ingestion && ingestionRunning(ingestion) ? ingestionStage(ingestion) : "");
+  const progressLabel = loading ? "正在读取作品" : busy === "version" ? "正在读取正文" : busy ? ({ catalog: "正在读取作品库", export: "正在关联作品与导出正文", config: "正在读取分析配置", history: "正在读取历史版本", restore: "正在恢复版本", start: "正在创建分析任务", metadata: "正在读取作品信息", "metadata-save": "正在保存作品信息", "upload-context": "正在读取上传作品" } as Record<string, string>)[busy] || "正在处理" : Object.values(activities).find(Boolean) || (ingestion && ingestionRunning(ingestion) ? ingestionStage(ingestion) : "");
   const finishWorks = [catalogChoiceWork, catalog?.work, ...catalogWorks].filter((work, index, all): work is CatalogWork => !!work && all.findIndex((item) => item?.id === work.id) === index);
   const pendingTasks = ingestions.filter((task) => ingestionRunning(task) || ["failed", "interrupted"].includes(task.status));
 
   return <main className="studio-main documents-page">
-    <PageTitle title="文本清理" />
-    {progressLabel && <Busy label={progressLabel} delay={150} />}
+    <PageTitle title="正文清理" />
+    {progressLabel && <Busy label={progressLabel} inline delay={150} />}
     <Notice error={!!error} success={!error && !!message}>{error || message}</Notice>
     <div className="document-layout">
       <aside className="surface document-index">
@@ -288,24 +315,25 @@ export default function Documents({ navigate, onJob }: Props) {
       </aside>
       <section className="surface document-content">
         {!!pendingTasks.length && <div className="document-task-picker"><span>处理任务</span><div>{pendingTasks.map((task) => <button key={task.id} className={ingestion?.id === task.id ? "active" : ""} onClick={() => setIngestion(task)}>{task.filename}<IngestionStatus status={task.status} /></button>)}</div></div>}
+        {conversion && <ConversionProgress task={conversion} action={kind => void conversionAction(kind)} busy={!!busy} />}
         {ingestion && ingestion.status !== "completed" && <IngestionProgress task={ingestion} action={(kind) => void ingestionAction(kind)} busy={!!busy} />}
-        {!selected ? loading || busy === "version" ? <div className="document-first-load"><div className="document-loading-skeleton"><i /><i /><i /></div></div> : <Empty icon={BookOpen} title={ingestion && ingestionRunning(ingestion) ? "正在准备正文" : "尚未上传文件"} action={<button className="button secondary" onClick={() => openUpload()}><Upload size={16} />上传文件</button>} /> : <>
+        {!selected ? loading || busy === "version" ? <div className="document-first-load"><div className="document-loading-skeleton"><i /><i /><i /></div></div> : <Empty icon={BookOpen} title={ingestion && ingestionRunning(ingestion) ? "正在准备正文" : "尚未上传文件"} action={<button className="button secondary" onClick={() => navigate("library")}><BookOpen size={16} />前往作品库</button>} /> : <>
           <div className="document-detail-header"><div className="document-heading-copy"><h2 className="document-desktop-title">{selected.title}</h2><label className="document-title-picker"><span>参考作品库</span><select aria-label="参考作品库" value={selected.id} onChange={(event) => { if (event.target.value) void choose(event.target.value); }}>{items.map((doc) => <option key={doc.id} value={doc.id}>{doc.title} · {wordCount(doc.current_characters ?? doc.source_characters)} · {documentType(doc)}</option>)}</select></label></div><div className="inline-actions"><button className="button primary compact-button document-analyze-button" aria-label="开始分析" title="开始分析" disabled={!!busy || !version || workspaceDirty || (!!run && activeRun(run))} onClick={() => void startDialog()}><ArrowRight size={15} /><span className="document-analyze-label">开始分析</span></button></div></div>
           {run && <section className="document-analysis-progress" aria-label="全文分析进度"><div className="document-analysis-heading"><strong>作品分析</strong><Status value={run.status} /><button className="text-button" onClick={() => onJob(run.id)}>查看任务<ArrowRight size={13} /></button></div><Progress completed={run.total ? run.completed : undefined} total={run.total || undefined} stage={runStage[run.stage] || (activeRun(run) ? "正在分析" : "分析任务")} busy={activeRun(run)} />{run.error && <Notice error>{run.error}</Notice>}</section>}
-          <div className="document-subbar"><div className="document-review-tabs" role="tablist" aria-label="文本清理工作区">{([["files", "元数据", FileText], ["volumes", "分卷与章节", Layers3], ["body", "正文清理", BookOpen]] as const).map(([id, label, TabIcon], index) => <button key={id} role="tab" aria-selected={tab === id} className={tab === id ? "active" : ""} onClick={() => guard(() => setTab(id))}><span className="document-step-number">{index + 1}</span><TabIcon size={14} />{label}</button>)}</div></div>
+          <div className="document-subbar"><div className="document-review-tabs" role="tablist" aria-label="正文清理工作区">{([["files", "元数据", FileText], ["volumes", "分卷与章节", Layers3], ["body", "正文清理", BookOpen]] as const).map(([id, label, TabIcon], index) => <button key={id} role="tab" aria-selected={tab === id} className={tab === id ? "active" : ""} onClick={() => guard(() => setTab(id))}><span className="document-step-number">{index + 1}</span><TabIcon size={14} />{label}</button>)}</div></div>
           {version ? <>
             {tab === "body" && <ChapterWorkbench key={`${selected.id}:${chapterReset}`} documentId={selected.id} version={version} onDirty={setChapterDirty} onActivity={chapterActivity} onVersion={receiveVersion} onComplete={() => guard(() => void openFinish())} />}
             {tab === "volumes" && <div className="document-structure"><VolumePanel key={`${selected.id}:${version.id}:${chapterReset}`} documentId={selected.id} versionId={version.id} onDirty={setVolumeDirty} onActivity={volumeActivity} /><ChapterRecognitionSettings key={`recognition:${selected.id}:${chapterReset}`} documentId={selected.id} version={version} onVersion={receiveVersion} onDirty={setRecognitionDirty} onActivity={recognitionActivity} blocked={volumeDirty} /></div>}
-            {tab === "files" && <div className="document-metadata-workspace" aria-label="元数据"><section className="document-metadata-card"><div className="document-metadata-heading"><h3>作品信息</h3><div className="document-metadata-actions"><button className="button secondary compact-button" aria-label="编辑信息" disabled={!!busy} onClick={() => void openMetadata()}><PencilLine size={14} />编辑信息</button><button className="button secondary compact-button" aria-label="版本历史" disabled={!!busy} onClick={() => guard(() => void openHistory())}><History size={14} />版本历史</button><div className="document-upload-split" ref={uploadMenu}><button className="button primary compact-button" aria-label="上传文件" disabled={!!busy} onClick={() => openUpload(selected)}><Upload size={14} />上传文件</button><button className="button primary compact-button document-upload-options" aria-label="更多上传选项" title="更多上传选项" aria-haspopup="menu" aria-expanded={uploadMenuOpen} disabled={!!busy} onClick={() => setUploadMenuOpen(value => !value)}><ChevronDown size={14} /></button>{uploadMenuOpen && <div role="menu" className="document-upload-menu"><button role="menuitem" onClick={() => { setUploadMenuOpen(false); openUpload(); }}><Upload size={14} />上传其他作品</button></div>}</div></div></div><dl className="document-metadata-values"><div><dt>书名</dt><dd>{selected.book_title || selected.title}</dd></div><div><dt>作者</dt><dd>{selected.author || selected.catalog_author || "—"}</dd></div><div><dt>作品类型</dt><dd>{documentType(selected)}</dd></div><div><dt>最早更新时间</dt><dd>{selected.earliest_update_at || "—"}</dd></div><div><dt>字数</dt><dd>{wordCount(selected.current_characters ?? selected.source_characters)}</dd></div><div><dt>当前版本</dt><dd>版本 {version.version_number} · {chapterLabel(version)}</dd></div></dl>{selected.storage_folder && <div className="document-storage-location"><span>章节文件夹</span><code>{selected.storage_folder}</code></div>}</section><DocumentSources document={selected} versionId={version.id} onActivity={sourcesActivity} /></div>}
+            {tab === "files" && <div className="document-metadata-workspace" aria-label="元数据"><section className="document-metadata-card"><div className="document-metadata-heading"><h3>作品信息</h3><div className="document-metadata-actions"><button className="button secondary compact-button" aria-label="编辑信息" disabled={!!busy} onClick={() => void openMetadata()}><PencilLine size={14} />编辑信息</button><button className="button secondary compact-button" aria-label="版本历史" disabled={!!busy} onClick={() => guard(() => void openHistory())}><History size={14} />版本历史</button><button className="button primary compact-button" aria-label="上传文件" disabled={!!busy} onClick={() => openUpload(selected)}><Upload size={14} />上传文件</button></div></div><dl className="document-metadata-values"><div><dt>书名</dt><dd>{selected.book_title || selected.title}</dd></div><div><dt>作者</dt><dd>{selected.author || selected.catalog_author || "—"}</dd></div><div><dt>作品类型</dt><dd>{documentType(selected)}</dd></div><div><dt>最早更新时间</dt><dd>{selected.earliest_update_at || "—"}</dd></div><div><dt>字数</dt><dd>{wordCount(selected.current_characters ?? selected.source_characters)}</dd></div><div><dt>当前版本</dt><dd>版本 {version.version_number} · {chapterLabel(version)}</dd></div></dl>{selected.storage_folder && <div className="document-storage-location"><span>章节文件夹</span><code>{selected.storage_folder}</code></div>}</section><DocumentSources document={selected} versionId={version.id} onActivity={sourcesActivity} /></div>}
           </> : <div className="document-version-loading"><div className="document-loading-skeleton"><i /><i /><i /></div></div>}
         </>}
       </section>
     </div>
     {historyOpen && selected && version && <Modal title="历史版本" onClose={() => setHistoryOpen(false)} busy={busy === "history" || busy === "restore"}><div className="modal-body"><div className="document-history-list">{(selected.versions || []).map((item) => <article key={item.id}><div><strong>版本 {item.version_number}{item.id === selected.latest_version_id && <span>最新</span>}{item.id === version.id && <span>当前查看</span>}</strong><small>{dateLabel(item.created_at)}</small></div><button className="button secondary compact-button" disabled={!!busy || item.id === version.id} onClick={() => { setHistoryOpen(false); void choose(selected.id, item.id); }}>查看</button>{item.id !== selected.latest_version_id && <button className="text-button" disabled={!!busy} onClick={() => setRestoreTarget(item.id)}><RotateCcw size={13} />恢复</button>}</article>)}</div><Notice error>{error}</Notice>{busy === "history" && <Busy label="正在读取版本记录" inline />}</div><div className="modal-footer"><button className="button secondary" disabled={!!busy} onClick={() => setHistoryOpen(false)}>关闭</button></div></Modal>}
-    {exportOpen && selected && version && <Modal title={exported ? "正文已导出" : "完成清理"} busy={!!busy} onClose={() => setExportOpen(false)}><div className="modal-body document-finish"><span className="document-finish-icon"><CheckCircle2 size={28} /></span><h3>{selected.title}</h3><p>{chapterLabel(version)} · {Number(version.characters ?? selected.current_characters ?? 0).toLocaleString()} 字 · 版本 {version.version_number}</p>{catalog && <div className="document-finish-link"><label className="studio-field"><span><Link2 size={14} />关联作品</span><input aria-label="搜索关联作品" value={catalogQuery} disabled={!!busy || exported} placeholder="搜索作品库" onChange={(event) => setCatalogQuery(event.target.value)} /></label><SelectField label="作品" value={catalogChoice} onChange={(id) => { setCatalogChoice(id); setCatalogChoiceWork(finishWorks.find((work) => work.id === id) || null); }} disabled={!!busy || exported}><option value="new">新建作品：《{selected.title}》</option>{finishWorks.map((work) => <option key={work.id} value={work.id}>{work.title} · {work.id}</option>)}</SelectField>{catalogSearching && <Busy label="正在搜索作品" inline delay={0} />}{exported && catalog.work_id && <button className="text-button" onClick={() => { setExportOpen(false); window.dispatchEvent(new CustomEvent("inkreference:navigate", { detail: { section: "library", workId: catalog.work_id } })); }}>查看作品<ArrowRight size={14} /></button>}</div>}{catalog && <SelectField label="导出格式" value={exportFormat} onChange={setExportFormat} disabled={!!busy}><option value="merged">合并正文 TXT</option><option value="chapters">逐章 TXT + metadata.json（ZIP）</option></SelectField>}{exported && <Notice success>正文已导出 · 已关联作品库</Notice>}<Notice error>{error}</Notice>{busy === "catalog" && <Busy label="正在读取关联作品" inline delay={0} />}{busy === "export" && <Busy label="正在关联作品与导出正文" inline delay={0} />}</div><div className="modal-footer"><button className="button secondary" disabled={!!busy} onClick={() => setExportOpen(false)}>{exported ? "关闭" : "继续清理"}</button><button className="button primary" disabled={!!busy || !catalog} onClick={() => void exportText()}><ArrowDownToLine size={15} />{exported ? "再次导出" : "完成并导出"}</button></div></Modal>}
+    {exportOpen && selected && version && <Modal title={exported ? "正文已导出" : "完成清理"} busy={!!busy} onClose={() => setExportOpen(false)}><div className="modal-body document-finish"><span className="document-finish-icon"><CheckCircle2 size={28} /></span><h3>{selected.title}</h3><p>{chapterLabel(version)} · {Number(version.characters ?? selected.current_characters ?? 0).toLocaleString()} 字 · 版本 {version.version_number}</p>{catalog && <div className="document-finish-link"><label className="studio-field"><span><Link2 size={14} />关联作品</span><input aria-label="搜索关联作品" value={catalogQuery} disabled={!!busy || exported} placeholder="搜索作品库" onChange={(event) => setCatalogQuery(event.target.value)} /></label><SelectField label="作品" value={catalogChoice} onChange={(id) => { setCatalogChoice(id); setCatalogChoiceWork(finishWorks.find((work) => work.id === id) || null); }} disabled={!!busy || exported}><option value="">选择已有作品</option>{finishWorks.map((work) => <option key={work.id} value={work.id}>{work.title} · {work.id}</option>)}</SelectField>{catalogSearching && <Busy label="正在搜索作品" inline delay={0} />}{exported && catalog.work_id && <button className="text-button" onClick={() => { setExportOpen(false); window.dispatchEvent(new CustomEvent("inkreference:navigate", { detail: { section: "library", workId: catalog.work_id } })); }}>查看作品<ArrowRight size={14} /></button>}</div>}{catalog && <SelectField label="导出格式" value={exportFormat} onChange={setExportFormat} disabled={!!busy}><option value="merged">合并正文 TXT</option><option value="chapters">逐章 TXT + metadata.json（ZIP）</option></SelectField>}{exported && <Notice success>正文已导出 · 已关联作品库</Notice>}<Notice error>{error}</Notice>{busy === "catalog" && <Busy label="正在读取关联作品" inline delay={0} />}{busy === "export" && <Busy label="正在关联作品与导出正文" inline delay={0} />}</div><div className="modal-footer"><button className="button secondary" disabled={!!busy} onClick={() => setExportOpen(false)}>{exported ? "关闭" : "继续清理"}</button><button className="button primary" disabled={!!busy || !catalog || !catalogChoice} onClick={() => void exportText()}><ArrowDownToLine size={15} />{exported ? "再次导出" : "完成并导出"}</button></div></Modal>}
     {metadataOpen && <Modal title="作品信息" busy={busy === "metadata" || busy === "metadata-save"} onClose={() => setMetadataOpen(false)}><div className="modal-body document-metadata-form">{metadata && <><label className="studio-field"><span>书名</span><input disabled={!!busy} aria-label="书名" value={metadataDraft.book_title} maxLength={300} onChange={(event) => setMetadataDraft((value) => ({ ...value, book_title: event.target.value }))} /></label><div className="form-grid"><label className="studio-field"><span>作者</span><input disabled={!!busy} aria-label="作者" value={metadataDraft.author} maxLength={300} onChange={(event) => setMetadataDraft((value) => ({ ...value, author: event.target.value }))} /></label><label className="studio-field"><span>作品类型</span><input disabled={!!busy} aria-label="作品类型" list="document-book-types" value={metadataDraft.book_type} maxLength={100} onChange={(event) => setMetadataDraft((value) => ({ ...value, book_type: event.target.value }))} /></label></div><label className="studio-field"><span>最早更新时间</span><input disabled={!!busy} aria-label="最早更新时间" value={metadataDraft.earliest_update_at} placeholder="YYYY / YYYY-MM / YYYY-MM-DD" maxLength={100} onChange={(event) => setMetadataDraft((value) => ({ ...value, earliest_update_at: event.target.value }))} /></label>{metadata.storage_folder && <div className="document-storage-location"><span>章节文件夹</span><code>{metadata.storage_folder}</code></div>}{metadata.storage_error && <Notice error>{metadata.storage_error}</Notice>}</>}<Notice error>{error}</Notice>{(busy === "metadata" || busy === "metadata-save") && <Busy label={busy === "metadata" ? "正在读取作品信息" : "正在保存作品信息"} inline delay={0} />}</div><div className="modal-footer"><button className="button secondary" disabled={!!busy} onClick={() => setMetadataOpen(false)}>取消</button><button className="button primary" disabled={!!busy || !metadata || !metadataDraft.book_title.trim()} onClick={() => void saveMetadata()}>保存</button></div></Modal>}
     <datalist id="document-book-types">{["中文小说", "外国小说", "电影", "电视剧", "动画", "漫画", "游戏"].map((type) => <option key={type} value={type} />)}</datalist>
-    {uploadOpen && <DocumentUpload items={items} target={uploadTarget} onClose={() => setUploadOpen(false)} onSubmitted={(task) => { setUploadOpen(false); setMessage(""); receiveTask(task); }} />}
+    {uploadOpen && (uploadTarget || uploadWork) && <DocumentUpload target={uploadTarget || undefined} work={uploadWork || undefined} onClose={() => setUploadOpen(false)} onSubmitted={(task) => { setUploadOpen(false); setMessage(""); receiveTask(task); }} />}
     {startOpen && <Modal title="开始全文分析" onClose={() => setStartOpen(false)} busy={busy === "start"}>
       <div className="modal-body"><div className="run-source"><FileText size={20} /><div><strong>{selected?.title}</strong><span>版本 {version?.version_number} · {Number(version?.characters ?? selected?.current_characters ?? 0).toLocaleString()} 字</span></div></div><SelectField label="工作流版本" value={workflow} onChange={setWorkflow}>{workflows.map((item) => <option key={`${item.id}@${item.version}`} value={`${item.id}@${item.version}`}>{item.name} · v{item.version}</option>)}</SelectField><SelectField label="模型配置" value={profile} onChange={setProfile}>{!profiles.length && <option value="">尚未配置模型</option>}{profiles.map((item) => <option value={item.id} key={item.id}>{item.name} · {item.model}</option>)}</SelectField><div className="document-model-actions"><button className="text-button" onClick={() => { continueAfterModels.current = true; setStartOpen(false); navigate("models"); }}><SlidersHorizontal size={14} />{profiles.length ? "管理模型配置" : "配置本地模型或商业 API"}<ArrowRight size={13} /></button><button className="text-button" disabled={!!busy} onClick={() => void startDialog()}><RefreshCw size={14} />刷新配置</button></div>{modelTargets.map(targetProfile => <div className={`model-destination ${isRemoteModel(targetProfile) ? "remote" : "local"}`} key={targetProfile.id}><div><Server size={18} /><strong>{targetProfile.name}</strong></div><dl><dt>目标地址</dt><dd>{modelEndpoint(targetProfile.base_url)}</dd><dt>模型</dt><dd>{targetProfile.model}</dd></dl></div>)}{remote && <p className="model-target-consent">发送正文分块至以上所选服务。</p>}{!modelTargetsReady && selectedProfile && <Notice error>模型配置已变化或缺失，请刷新配置。</Notice>}<Notice error>{error}</Notice>{busy === "config" && <Busy label="正在刷新模型配置" inline />}{busy === "start" && <Busy label="正在创建分析任务" inline />}</div>
       <div className="modal-footer"><button className="button secondary" disabled={!!busy} onClick={() => setStartOpen(false)}>取消</button><button className="button primary" disabled={!profile || !workflow || !!busy || !modelTargetsReady} onClick={() => void begin()}>{remote ? "发送并运行" : "创建并运行"}<ArrowRight size={15} /></button></div>

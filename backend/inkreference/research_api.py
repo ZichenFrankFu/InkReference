@@ -81,9 +81,10 @@ class SemiReply(ResearchBody):
     embedding_model:str|None=None
     remote_consent:bool=False
     expected_embedding_fingerprint:str|None=None
+    prepared_id:str|None=None
 
 
-def create_research_router(service_or_getter):
+def create_research_router(service_or_getter,workbench_getter=None):
     """Accept a lazy getter so app startup never opens the research stores."""
     router=APIRouter(prefix="/api/studio/research")
     def service():return service_or_getter() if callable(service_or_getter) else service_or_getter
@@ -117,7 +118,22 @@ def create_research_router(service_or_getter):
     def semi_prompt(body:SemiPrompt):return service().create_semi(**body.model_dump())
 
     @router.post("/jobs/{job_id}/reply")
-    def semi_reply(job_id:str,body:SemiReply):return service().reply(job_id,**body.model_dump())
+    def semi_reply(job_id:str,body:SemiReply):
+        params=body.model_dump(exclude={"prepared_id"})
+        if body.prepared_id:
+            if workbench_getter is None:
+                from .database import DataError
+                raise DataError(409,"提示词审核服务未配置")
+            workbench=workbench_getter()
+            context=workbench.validate_for_confirmation("catalog",body.prepared_id,reply=body.reply)
+            if context["job_id"]!=job_id:
+                from .database import DataError
+                raise DataError(409,"回复任务与本次提示词不符")
+            params["prompt_review"]=workbench.catalog_confirmation(body.prepared_id,remote_consent=body.remote_consent,expected_embedding_fingerprint=body.expected_embedding_fingerprint)
+            result=service().reply(job_id,**params)
+            workbench.control_preparation(body.prepared_id,"complete")
+            return result
+        return service().reply(job_id,**params)
 
     @router.get("/embedding-target")
     def embedding_target_info(embedding_profile_id:str,embedding_model:str|None=None):

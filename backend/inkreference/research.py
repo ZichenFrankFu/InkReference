@@ -6,6 +6,7 @@ novel body or treats public web summaries as text-derived analysis.
 from __future__ import annotations
 
 import hashlib
+import copy
 import json
 import re
 import threading
@@ -179,6 +180,9 @@ class ResearchService(ResearchComparisonMixin):
         row=self._row(job_id)
         if row["cancel_requested"]: raise _Stopped
         p=json.loads(row["payload_json"])
+        if p.get("prompt_review"):
+            self._check_review_targets(p)
+            return
         if p.get("mode")=="semi":
             profile=p.get("profiles",{}).get("embedding")
             if profile and target_fingerprint(self.models.snapshot(profile["id"]))!=target_fingerprint(profile):
@@ -323,7 +327,60 @@ class ResearchService(ResearchComparisonMixin):
             result.append({"id":sid,"url":url,"title":_text(row.get("title"),"来源标题",500),"excerpt":_text(row.get("excerpt"),"来源摘录",8000),"fetch_status":"supplied","fetched_at":None,"error":None})
         return result
 
-    def reply(self,job_id,*,reply,expected_revision,verify_sources=False,embedding_profile_id=None,embedding_model=None,remote_consent=False,expected_embedding_fingerprint=None):
+    def preview_reply(self,job_id,*,reply,expected_revision,verified_sources=None):
+        """Validate a bound catalog response without saving or scheduling work."""
+        p=copy.deepcopy(self._editable(job_id,expected_revision))
+        if p.get("mode")!="semi":raise DataError(422,"仅半自动录入可粘贴网页模型回复")
+        parsed=self._parse_json(reply)
+        if not isinstance(parsed,dict) or set(parsed)-{"protocol","request_id","sources","draft","suggested_matches"} or parsed.get("protocol")!="inkreference.catalog.v1" or parsed.get("request_id")!=job_id:
+            raise DataError(409,"回复协议或任务ID不符，请使用本次生成的提示词")
+        p["sources"]=self._supplied_sources(parsed.get("sources"))
+        if verified_sources is not None:
+            actual={source["id"]:source for source in verified_sources}
+            for source in p["sources"]:
+                original=actual.get(source["id"])
+                if not original or any(source[key]!=original[key] for key in ("url","title","excerpt")):
+                    raise DataError(422,"来源需保留本次实际读取的 ID、网址、标题和摘录")
+            p["sources"]=[copy.deepcopy(actual[source["id"]]) for source in p["sources"]]
+        p["draft"]=self.validate_draft(parsed.get("draft"),p)
+        suggested=parsed.get("suggested_matches",{})
+        if not isinstance(suggested,dict) or set(suggested)-{"work_id","cliches"}:raise DataError(422,"匹配建议格式无效")
+        catalog=self.catalog_snapshot();matches=_matching_works(catalog,p["title"],p["author"])
+        if suggested.get("work_id") is not None and (not isinstance(suggested["work_id"],str) or suggested["work_id"] not in {work["id"] for work in matches}):raise DataError(422,"网页模型建议的作品ID与本次作品名或作者不符")
+        trope_suggestions=suggested.get("cliches",{})
+        if not isinstance(trope_suggestions,dict) or set(trope_suggestions)-{c["candidate_id"] for c in p["draft"]["cliches"]}:raise DataError(422,"桥段匹配建议引用了不存在的候选")
+        ids={row["id"] for row in catalog["cliches"]}
+        if any(value is not None and (not isinstance(value,str) or value not in ids) for value in trope_suggestions.values()):raise DataError(422,"网页模型建议的桥段ID不在当前数据库中")
+        return {"job_id":job_id,"expected_revision":expected_revision,"reply":reply,"draft":p["draft"],"sources":p["sources"],"suggested_matches":suggested}
+
+    def _check_review_targets(self,p):
+        for profile in p.get("profiles",{}).values():
+            if profile and target_fingerprint(self.models.snapshot(profile["id"]))!=target_fingerprint(profile):
+                raise DataError(409,"已确认的模型或向量目标已变化，请重新准备提示词")
+        if p.get("review_search_fingerprint") and self.sources.settings()["target_fingerprint"]!=p["review_search_fingerprint"]:
+            raise DataError(409,"搜索连接已变化，请重新准备提示词")
+
+    def _reply_reviewed(self,job_id,reply,expected_revision,review):
+        preview=self.preview_reply(job_id,reply=reply,expected_revision=expected_revision,verified_sources=review.get("sources"))
+        p=self._editable(job_id,expected_revision)
+        p.update(draft=preview["draft"],sources=preview["sources"],suggested_matches=preview["suggested_matches"],verify_sources=False,
+                 profiles={},targets={},embedding_model=review.get("embedding_model"),prompt_review=review["provenance"],
+                 review_search_fingerprint=review.get("search_fingerprint"))
+        actual=bool(review["provenance"].get("call_id"))
+        p["mode"]="automatic" if review["mode"]=="automatic" and actual else "semi"
+        if actual and review.get("profile"):
+            profile=review["profile"];p["profiles"]["model"]=profile
+            p["targets"]["model"]={"profile_id":profile["id"],"model":profile["model"],"endpoint":profile["base_url"],"connection_mode":profile["connection_mode"],"fingerprint":target_fingerprint(profile)}
+        if review.get("embedding_profile"):
+            profile=review["embedding_profile"];p["profiles"]["embedding"]=profile
+            p["targets"]["embedding"]={"profile_id":profile["id"],"model":review.get("embedding_model") or profile["model"],"endpoint":profile["base_url"],"connection_mode":profile["connection_mode"],"fingerprint":review["embedding_fingerprint"]}
+        p["output_metering"]={"kind":"app_api" if actual else "external_unmetered",**(review["provenance"].get("usage") or {}),"call_id":review["provenance"].get("call_id")}
+        p["messages"].append({"role":"assistant","content":"已确认提示词回复，开始来源与桥段匹配校验。","created_at":_now()})
+        return self._finish_semi(job_id,p,expected_revision)
+
+    def reply(self,job_id,*,reply,expected_revision,verify_sources=False,embedding_profile_id=None,embedding_model=None,remote_consent=False,expected_embedding_fingerprint=None,prompt_review=None):
+        if prompt_review is not None:
+            return self._reply_reviewed(job_id,reply,expected_revision,prompt_review)
         p=self._editable(job_id,expected_revision)
         if p.get("mode")!="semi":raise DataError(422,"仅半自动录入可粘贴网页模型回复")
         parsed=self._parse_json(reply)
@@ -514,7 +571,7 @@ class ResearchService(ResearchComparisonMixin):
         catalog=self.catalog_snapshot()
         if p.get("mode")=="semi":
             self.validate_draft(p["draft"],p)
-        if p.get("mode")=="semi" and not p["profiles"].get("embedding"):
+        if not p["profiles"].get("embedding") and (p.get("mode")=="semi" or p.get("prompt_review")):
             p["semantic_matches"]=self._manual_matches(p,catalog);p["dedup_mode"]="manual"
         else:
             p["semantic_matches"]=self.semantic.match(p["draft"]["cliches"],catalog["cliches"],p["profiles"]["embedding"],model=p["embedding_model"],run_id=job_id,check_cancel=lambda:self._check(job_id))
@@ -563,6 +620,9 @@ class ResearchService(ResearchComparisonMixin):
     def _check_targets_only(self,job_id):
         # A cancelled flag belongs to the old attempt, not the consent scope.
         row=self._row(job_id);p=json.loads(row["payload_json"])
+        if p.get("prompt_review"):
+            self._check_review_targets(p)
+            return
         if p.get("mode")=="semi":
             profile=p.get("profiles",{}).get("embedding")
             if profile and target_fingerprint(self.models.snapshot(profile["id"]))!=target_fingerprint(profile):

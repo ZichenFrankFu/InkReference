@@ -143,7 +143,7 @@ def test_old_portable_formats_upgrade_without_false_digest_warning(tmp_path,vers
     store = DataStore(tmp_path/"upgraded.db")
     batch,preview,_ = import_files(store,portable(rows,version,fmt))
     assert not [message for message in preview["warnings"] if "导出时不同" in message]
-    assert store.meta()["schema_version"] == 6
+    assert store.meta()["schema_version"] == 7
     for record in store.all_records("cliches"):
         assert record["values"]["人设塑造"] == record["values"]["剧情机制"] == ""
     if version == 4:
@@ -212,5 +212,5 @@ def test_schema4_persisted_database_upgrade_preserves_revisions_and_original_fie
     assert result["revision"] == item["revision"]
     assert result["values"] == item["values"]
     with migrated.connect() as connection:
-        assert [row[0] for row in connection.execute("SELECT version FROM schema_migrations ORDER BY version")] == [1,2,3,4,5,6]
+        assert [row[0] for row in connection.execute("SELECT version FROM schema_migrations ORDER BY version")] == [1,2,3,4,5,6,7]
     assert DataStore(path).get_record("cliches","C1") == result

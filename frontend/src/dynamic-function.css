@@ -31,3 +31,18 @@
 .dynamic-action-rail>div:last-child{justify-content:flex-end;}
 @media(max-width:640px){.dynamic-mode-switch{width:100%;}.dynamic-mode-switch button{min-width:0;padding:7px 10px;}.dynamic-model-row{gap:10px;}.dynamic-model-target{gap:4px 9px;}.dynamic-action-rail{align-items:flex-start;}.dynamic-action-rail>div{gap:7px;}}
 @media(prefers-reduced-motion:reduce){.dynamic-mode-switch button{transition:none;}}
+
+.prompt-workbench{display:flex;flex-direction:column;gap:18px;min-width:0;}
+.prompt-workbench-columns{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:18px;min-width:0;}
+.prompt-workbench-columns>section{display:flex;flex-direction:column;gap:10px;min-width:0;}
+.prompt-workbench-columns .dynamic-field-heading{min-height:32px;}
+.prompt-workbench-columns textarea{width:100%;box-sizing:border-box;min-height:340px;max-height:56vh;resize:vertical;padding:14px;border:1px solid var(--line);border-radius:10px;background:var(--field-bg,var(--paper));color:var(--text);font:12px/1.75 Consolas,"SFMono-Regular",monospace;}
+.prompt-workbench-columns textarea:focus{outline:2px solid var(--accent-soft);border-color:var(--accent);}
+.prompt-workbench-preview{border-top:1px solid var(--line);padding-top:16px;min-width:0;max-height:42vh;overflow:auto;}
+.prompt-workbench-preview pre{white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.7 Consolas,"SFMono-Regular",monospace;}
+.prompt-workbench-actions{justify-content:space-between;gap:12px;}
+.prompt-workbench-actions>div{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end;}
+@media(max-width:640px){.prompt-workbench-columns{grid-template-columns:minmax(0,1fr);gap:16px;}.prompt-workbench-columns textarea{min-height:220px;max-height:35vh;}.prompt-workbench-actions{align-items:flex-start;flex-wrap:wrap;}.prompt-workbench-actions>div{flex:1;}.prompt-workbench-actions .button{padding-left:10px;padding-right:10px;}}
+
+.modal:has(>.prompt-workbench){width:min(1120px,calc(100vw - 40px));max-width:calc(100vw - 40px);}
+@media(max-width:640px){.modal:has(>.prompt-workbench){width:calc(100vw - 20px);max-width:calc(100vw - 20px);}}

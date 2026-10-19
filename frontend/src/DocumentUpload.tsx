@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { BookOpen, Check, FileText, Files, LoaderCircle, RefreshCw, Upload, X } from "lucide-react";
 import { normalizeList, studio, type DocumentMeta, type List } from "./studio";
-import { Busy, Modal, Notice, SelectField, dateLabel, messageOf } from "./ui";
+import { Busy, Modal, Notice, Progress, SelectField, dateLabel, messageOf } from "./ui";
 
 export type IngestionTask = {
   id: string; filename: string; kind: string; status: string; stage: string;
@@ -30,68 +30,55 @@ export function IngestionProgress({ task, action, busy }: { task: IngestionTask;
   </section>;
 }
 
-export default function DocumentUpload({ items, target, onClose, onSubmitted }: { items: DocumentMeta[]; target?: DocumentMeta | null; onClose: () => void; onSubmitted: (task: IngestionTask) => void }) {
+export type ConversionTask = { id: string; filename: string; kind: string; status: string; stage: string; progress: number | null; completed?: number | null; total?: number | null; imported_document_id?: string | null; options?: { target_document_id?: string; base_version_id?: string }; error?: string };
+export function ConversionProgress({ task, action, busy }: { task: ConversionTask; action: (kind: "cancel" | "retry") => void; busy: boolean }) {
+  const working = ["queued", "running", "cancelling"].includes(task.status);
+  const stage = ({ queued: "等待转换", preparing: "准备转换", epub_to_markdown: "读取 EPUB", pdf_mineru: "转换 PDF", completed: "转换完成", failed: "转换未完成", cancelled: "转换已取消", interrupted: "转换已中断" } as Record<string, string>)[task.stage] || "正在转换文件";
+  return <section className="ingestion-progress" aria-label="文件转换进度" aria-busy={working}><div className="ingestion-progress-heading"><span className="ingestion-file-icon"><FileText size={19} /></span><div><strong>{task.filename}</strong><span>{stage}</span></div><IngestionStatus status={task.status} /><div className="ingestion-progress-actions">{working ? <button className="icon-button" aria-label="取消文件转换" disabled={busy} onClick={() => action("cancel")}><X size={16} /></button> : ["failed", "cancelled", "interrupted"].includes(task.status) && <button className="button secondary compact-button" disabled={busy} onClick={() => action("retry")}><RefreshCw size={14} />重试转换</button>}</div></div>{working && <Progress completed={task.total ? task.completed ?? 0 : undefined} total={task.total || undefined} busy stage={stage} />}<Notice error>{task.error}</Notice></section>;
+}
+
+export type ExistingWorkTarget = { id: string; title: string; author?: string; book_type?: string; earliest_update_at?: string };
+export default function DocumentUpload({ target, work, onClose, onSubmitted }: { target?: DocumentMeta; work?: ExistingWorkTarget; onClose: () => void; onSubmitted: (task: IngestionTask) => void }) {
   const [file, setFile] = useState<File | null>(null);
-  const [title, setTitle] = useState(target?.title || "");
-  const [author, setAuthor] = useState("");
-  const [earliestUpdate, setEarliestUpdate] = useState("");
-  const [bookType, setBookType] = useState("中文小说");
-  const destination = target?.id || "";
   const [mode, setMode] = useState<"replace" | "append">("replace");
   const [encoding, setEncoding] = useState("auto");
-  const [workId, setWorkId] = useState(target?.work_id || "");
-  const workIdRef = useRef(workId); workIdRef.current = workId;
-  const [works, setWorks] = useState<{ id: string; title: string }[]>([]);
-  const [workQuery, setWorkQuery] = useState("");
-  const [worksBusy, setWorksBusy] = useState(false);
   const [tier, setTier] = useState("flash");
   const [ocr, setOcr] = useState("txt");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const input = useRef<HTMLInputElement>(null);
   const format = file?.name.split(".").at(-1)?.toLowerCase();
-  const duplicate = !destination && title.trim() ? items.filter((item) => item.title.trim() === title.trim()) : [];
-  useEffect(() => {
-    if (destination) return;
-    let active = true; setWorksBusy(true);
-    const timer = window.setTimeout(() => { void studio<{ items: { id: string; title: string }[] }>(`/catalog/works?q=${encodeURIComponent(workQuery.trim())}&limit=100`).then((result) => { if (active) setWorks((current) => { const selected = current.find((work) => work.id === workIdRef.current); return selected && !result.items.some((work) => work.id === selected.id) ? [selected, ...result.items] : result.items; }); }).catch((e) => { if (active) setError(messageOf(e)); }).finally(() => { if (active) setWorksBusy(false); }); }, workQuery ? 200 : 0);
-    return () => { active = false; window.clearTimeout(timer); };
-  }, [destination, workQuery]);
   const chooseFile = (next: File | null) => {
     setError("");
-    if (next && !/\.(txt|pdf|epub)$/i.test(next.name)) { setError("请选择 TXT、PDF 或 EPUB 文件。"); return; }
+    if (next && !/\.(txt|pdf|epub)$/i.test(next.name)) { setError("请选择 TXT、PDF 或 EPUB 文件"); return; }
     setFile(next);
-    if (!destination) setTitle(next?.name.replace(/\.[^.]+$/, "") || "");
   };
   const submit = async () => {
-    if (!file) return;
+    if (!file || (!target?.id && !work?.id) || (target && !target.latest_version_id)) return;
     setBusy(true); setError("");
     try {
       const form = new FormData();
-      form.append("file", file); form.append("title", title.trim() || file.name.replace(/\.[^.]+$/, ""));
-      if (!destination) { form.append("author", author.trim()); form.append("earliest_update_at", earliestUpdate.trim()); form.append("book_type", bookType.trim()); }
-      form.append("encoding", encoding); form.append("mode", destination ? mode : "new");
-      if (workId.trim()) form.append("work_id", workId.trim());
+      form.append("file", file); form.append("title", target?.title || work?.title || "");
+      form.append("encoding", encoding); form.append("mode", target ? mode : "new");
+      const workId = target?.work_id || work?.id; if (workId) form.append("work_id", workId);
       if (target) { form.append("target_document_id", target.id); form.append("base_version_id", target.latest_version_id); }
+      else if (work) { form.append("author", work.author || ""); form.append("book_type", work.book_type || ""); form.append("earliest_update_at", work.earliest_update_at || ""); }
       form.append("options", JSON.stringify(format === "pdf" ? { tier, ocr_mode: ocr } : {}));
-      const result = await studio<IngestionTask>("/ingestions", { method: "POST", body: form });
-      onSubmitted(result);
+      onSubmitted(await studio<IngestionTask>("/ingestions", { method: "POST", body: form }));
     } catch (e) { setError(messageOf(e)); } finally { setBusy(false); }
   };
-  return <Modal title={target ? "上传文件" : "新建作品"} onClose={onClose} busy={busy}>
+  return <Modal title="上传文件" onClose={onClose} busy={busy}>
     <div className="modal-body document-upload-form">
-      {target && <div className="document-upload-target"><BookOpen size={18} /><div><span>上传至作品</span><strong>{target.title}</strong></div></div>}
+      <div className="document-upload-target"><BookOpen size={18} /><div><span>上传至作品</span><strong>{target?.title || work?.title}</strong></div></div>
       <input ref={input} type="file" accept=".txt,.pdf,.epub" hidden onChange={(event) => chooseFile(event.target.files?.[0] || null)} />
       <button className={`document-file-drop ${file ? "has-file" : ""}`} disabled={busy} onClick={() => input.current?.click()} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); if (!busy) chooseFile(event.dataTransfer.files[0] || null); }}><span className="document-drop-icon"><Upload size={23} /></span><strong>{file?.name || "选择或拖入原始文件"}</strong><span>{file ? `${(file.size / 1024 / 1024).toFixed(2)} MB · 点击更换` : "TXT · PDF · EPUB"}</span></button>
-      {destination && <fieldset className="document-upload-mode"><legend>上传后如何处理现有正文？</legend><label className={mode === "replace" ? "selected" : ""}><input type="radio" name="upload-mode" value="replace" checked={mode === "replace"} disabled={busy} onChange={() => setMode("replace")} /><span><strong>更新正文</strong><small>用新文件替换当前全部正文</small></span></label><label className={mode === "append" ? "selected" : ""}><input type="radio" name="upload-mode" value="append" checked={mode === "append"} disabled={busy} onChange={() => setMode("append")} /><span><strong>补充章节</strong><small>将新文件追加到当前正文末尾</small></span></label></fieldset>}
-      {!destination && <><label className="studio-field"><span>书名</span><input aria-label="书名" value={title} disabled={busy} maxLength={300} onChange={(event) => setTitle(event.target.value)} /></label><div className="form-grid"><label className="studio-field"><span>作者</span><input aria-label="作者" value={author} disabled={busy} maxLength={300} onChange={(event) => setAuthor(event.target.value)} /></label><SelectField label="作品类型" value={bookType} disabled={busy} onChange={setBookType}>{["中文小说", "外国小说", "电影", "电视剧", "动画", "漫画", "游戏", "其他"].map((type) => <option key={type} value={type}>{type}</option>)}</SelectField></div><label className="studio-field"><span>最早更新时间</span><input aria-label="最早更新时间" value={earliestUpdate} disabled={busy} maxLength={100} placeholder="YYYY / YYYY-MM / YYYY-MM-DD" onChange={(event) => setEarliestUpdate(event.target.value)} /></label></>}
-      {duplicate.length > 0 && <Notice>已有同名作品，本次将新建独立记录。更新已有作品时，请使用作品上方的“上传文件”。</Notice>}
+      {target && <fieldset className="document-upload-mode"><legend>正文处理</legend><label className={mode === "replace" ? "selected" : ""}><input type="radio" name="upload-mode" value="replace" checked={mode === "replace"} disabled={busy} onChange={() => setMode("replace")} /><span><strong>更新正文</strong></span></label><label className={mode === "append" ? "selected" : ""}><input type="radio" name="upload-mode" value="append" checked={mode === "append"} disabled={busy} onChange={() => setMode("append")} /><span><strong>补充章节</strong></span></label></fieldset>}
       {format === "pdf" && <section className="document-format-options"><div className="document-option-heading"><FileText size={16} /><strong>PDF 转换设置</strong><span>MinerU</span></div><div className="form-grid"><SelectField label="解析模式" value={tier} disabled={busy} onChange={(value) => { setTier(value); if (value === "flash") setOcr("txt"); }}><option value="flash">读取原生文字层</option><option value="standard">完整解析</option></SelectField><SelectField label="文字识别" value={ocr} disabled={busy || tier === "flash"} onChange={setOcr}><option value="txt">使用文字层</option><option value="ocr">OCR 扫描文字</option></SelectField></div></section>}
       {format === "epub" && <section className="document-format-options epub"><div className="document-option-heading"><Files size={16} /><strong>EPUB 转换</strong></div><div className="document-conversion-path"><span>EPUB</span><span>→</span><span>TXT</span><span>→</span><span>章节</span></div></section>}
-      <div className="form-grid">{format === "txt" && <SelectField label="文本编码" value={encoding} onChange={setEncoding} disabled={busy}><option value="auto">自动识别</option><option value="utf-8">UTF-8</option><option value="gb18030">GB18030 / GBK</option><option value="utf-16">UTF-16</option><option value="big5">Big5</option></SelectField>}{!destination && <div className="document-upload-catalog"><label className="studio-field"><span>关联作品</span><input aria-label="搜索作品库" value={workQuery} disabled={busy} onChange={(event) => setWorkQuery(event.target.value)} placeholder="搜索作品库" /></label><SelectField label="作品" value={workId} disabled={busy} onChange={setWorkId}><option value="">暂不关联</option>{works.map((work) => <option key={work.id} value={work.id}>{work.title} · {work.id}</option>)}</SelectField>{worksBusy && <Busy label="正在读取作品库" inline delay={0} />}</div>}</div>
+      {format === "txt" && <SelectField label="文本编码" value={encoding} onChange={setEncoding} disabled={busy}><option value="auto">自动识别</option><option value="utf-8">UTF-8</option><option value="gb18030">GB18030 / GBK</option><option value="utf-16">UTF-16</option><option value="big5">Big5</option></SelectField>}
       <Notice error>{error}</Notice>{busy && <Busy inline delay={0} label="正在上传原始文件" />}
     </div>
-    <div className="modal-footer"><button className="button secondary" disabled={busy} onClick={onClose}>取消</button><button className="button primary" disabled={!file || busy} onClick={() => void submit()}><Upload size={15} />{destination ? mode === "replace" ? "上传并更新正文" : "上传并补充章节" : "上传并处理"}</button></div>
+    <div className="modal-footer"><button className="button secondary" disabled={busy} onClick={onClose}>取消</button><button className="button primary" disabled={!file || busy || (!target && !work) || !!target && !target.latest_version_id} onClick={() => void submit()}><Upload size={15} />{target ? mode === "replace" ? "上传并更新正文" : "上传并补充章节" : "上传并处理"}</button></div>
   </Modal>;
 }
 

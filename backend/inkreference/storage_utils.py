@@ -41,6 +41,7 @@ INDEX_SPECS = (
     *(_spec("catalog", table, suffix, json_field_expression(field) + ",sort_order,id", "values_json", "sort_order", "id")
       for table, field, suffix in (
           ("works", "类别", "category"), ("works", "用户是否完整体验过", "seen"),
+          ("works", "作品题材", "genre"), ("works", "作品风格", "style"),
           ("characters", "角色定位", "role"), ("characters", "性格基调", "temperament"),
           ("cliches", "人设塑造", "trait"), ("cliches", "剧情机制", "mechanism"))),
     _spec("catalog", "library_links", "outgoing", "source_table,source_id,target_table,target_id", "source_table", "source_id", "target_table", "target_id"),

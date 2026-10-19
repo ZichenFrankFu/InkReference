@@ -140,6 +140,7 @@ class VolumePlan(BaseModel):
     expected_revision: StrictInt = Field(ge=0)
     volumes: list[dict[str, Any]]
     coordinate_version: Literal[1, 2] = 1
+    prepared_id: str | None = Field(default=None, min_length=1, max_length=200)
 
 
 class VolumeResearchRequest(BaseModel):
@@ -167,6 +168,7 @@ class ReferenceRevision(BaseModel):
 
 class ReferenceSection(ReferenceRevision):
     data: Any
+    prepared_id: str | None = Field(default=None, min_length=1, max_length=200)
 
 
 class ReferencePreview(BaseModel):
@@ -193,6 +195,7 @@ class NewCollection(BaseModel):
 
 class ChunkPaste(Revision):
     content: str = Field(max_length=2_000_000)
+    prepared_id: str | None = Field(default=None, min_length=1, max_length=200)
 
 
 class ChunkCommit(ReferenceRevision):
@@ -218,6 +221,7 @@ class ReferenceTransform(BaseModel):
     payload: dict[str, Any] = Field(default_factory=dict)
     remote_consent: bool = False
     expected_model_fingerprint: str | None = Field(default=None, min_length=64, max_length=64)
+    prepared_id: str | None = Field(default=None, min_length=1, max_length=200)
 
 
 class ReferenceRestore(ReferenceRevision):
@@ -626,7 +630,17 @@ def install_studio_routes(application, runtime):
     @router.put("/documents/{document_id}/versions/{version_id}/volumes")
     def save_volumes(document_id: str, version_id: str, body: VolumePlan):
         with runtime.studio.lock:
-            return runtime.studio.volumes.save(document_id, version_id, body.volumes, body.expected_revision, coordinate_version=body.coordinate_version)
+            workbench = None
+            if body.prepared_id:
+                from .prompt_workbench import get_prompt_workbench
+                workbench = get_prompt_workbench(runtime.studio)
+                context = workbench.validate_for_confirmation("volumes", body.prepared_id, document_id=document_id, volumes=body.volumes)
+                if context.get("version_id") != version_id or context.get("base_revision") != body.expected_revision:
+                    raise DataError(409, "分卷提示词绑定已变化，请重新准备")
+            result = runtime.studio.volumes.save(document_id, version_id, body.volumes, body.expected_revision, coordinate_version=body.coordinate_version)
+            if workbench:
+                workbench.control_preparation(body.prepared_id, "complete")
+            return result
 
     @router.get("/documents/{document_id}/versions/{version_id}/volumes/prompt")
     def volume_prompt(document_id: str, version_id: str):
@@ -781,12 +795,23 @@ def install_studio_routes(application, runtime):
 
     @router.post("/documents/{document_id}/reference/transform")
     def transform_reference(document_id: str, body: ReferenceTransform):
-        return runtime.studio.runner.reference_transform(document_id, **body.model_dump())
+        if body.prepared_id:
+            from .prompt_workbench import get_prompt_workbench
+            return get_prompt_workbench(runtime.studio).validate_transform_data(body.kind, body.prepared_id, document_id, body.payload.get("manual_data"))
+        return runtime.studio.runner.reference_transform(document_id, **body.model_dump(exclude={"prepared_id"}))
 
     @router.put("/documents/{document_id}/reference/{section}")
     def save_reference_section(document_id: str, section: str, body: ReferenceSection):
         with runtime.studio.lock:
-            return runtime.studio.reference.save_section(document_id, section, body.data, body.expected_revision)
+            workbench = None
+            if body.prepared_id:
+                from .prompt_workbench import get_prompt_workbench
+                workbench = get_prompt_workbench(runtime.studio)
+                workbench.validate_reference_save(body.prepared_id, document_id, section, body.data)
+            result = runtime.studio.reference.save_section(document_id, section, body.data, body.expected_revision)
+            if workbench:
+                workbench.control_preparation(body.prepared_id, "complete")
+            return result
 
     @router.post("/jobs", status_code=201)
     def create_job(body: NewRun):
@@ -833,7 +858,16 @@ def install_studio_routes(application, runtime):
     @router.post("/jobs/{run_id}/chunks/{chunk_id}/paste")
     def paste_chunk(run_id: str, chunk_id: str, body: ChunkPaste):
         with runtime.studio.lock:
-            return runtime.studio.runner.paste_chunk(run_id, chunk_id, body.content, body.expected_revision)
+            workbench = None
+            if body.prepared_id:
+                from .prompt_workbench import get_prompt_workbench
+                workbench = get_prompt_workbench(runtime.studio)
+                workbench.validate_for_confirmation("extraction", body.prepared_id, run_id=run_id, chunk_id=chunk_id, content=body.content)
+            provenance = workbench.confirmation_provenance("extraction", body.prepared_id) if workbench else None
+            result = runtime.studio.runner.paste_chunk(run_id, chunk_id, body.content, body.expected_revision, prompt_review=provenance)
+            if workbench:
+                workbench.control_preparation(body.prepared_id, "complete")
+            return result
 
     @router.post("/jobs/{run_id}/chunks/{chunk_id}/start")
     def start_chunk(run_id: str, chunk_id: str, body: ConnectionConsent = ConnectionConsent()):
@@ -850,6 +884,11 @@ def install_studio_routes(application, runtime):
     def resume_job(run_id: str, body: ConnectionConsent = ConnectionConsent()):
         with runtime.studio.lock:
             return runtime.studio.runner.resume(run_id, remote_consent=body.remote_consent)
+
+    @router.post("/jobs/{run_id}/reopen")
+    def reopen_job(run_id: str):
+        with runtime.studio.lock:
+            return runtime.studio.runner.reopen(run_id)
 
     @router.post("/jobs/{run_id}/start")
     def start_job(run_id: str, body: ConnectionConsent = ConnectionConsent()):

@@ -133,6 +133,18 @@ export default function Models() {
   const fieldPrefix = useId();
   const editorRef = useRef<HTMLHeadingElement>(null);
   const dirty = !!draft && profileValue(draft) !== baseline;
+  useEffect(() => {
+    const open = () => {
+      if (!sessionStorage.getItem("inkreference.embedding-task-focus")) return;
+      if (dirty) { setError("请先保存或取消模型修改"); return; }
+      sessionStorage.removeItem("inkreference.embedding-task-focus");
+      setShowDownloads(true);
+    };
+    open();
+    window.addEventListener("inkreference:embedding-task-focus", open);
+    window.addEventListener("inkreference:models-refresh", open);
+    return () => { window.removeEventListener("inkreference:embedding-task-focus", open); window.removeEventListener("inkreference:models-refresh", open); };
+  }, [dirty]);
   const saved = items.find((p) => p.id === draft?.id);
   const sameEndpoint = !!saved && !!draft && saved.provider === draft.provider &&
     saved.connection_mode === draft.connection_mode && saved.base_url.replace(/\/$/, "") === draft.base_url.replace(/\/$/, "");

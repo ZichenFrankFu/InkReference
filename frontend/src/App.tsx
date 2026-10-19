@@ -47,11 +47,11 @@ const sections: {
   { id: "library", label: "作品库", icon: BookOpen },
   {
     id: "documents",
-    label: "文本清理",
+    label: "正文清理",
     icon: FileText,
   },
-  { id: "reference", label: "参考作品分析", icon: FileSearch },
-  { id: "jobs", label: "提取任务管理", icon: ListTodo },
+  { id: "reference", label: "作品解析", icon: FileSearch },
+  { id: "jobs", label: "任务管理", icon: ListTodo },
   {
     id: "workflows",
     label: "Agent 与 Skills",

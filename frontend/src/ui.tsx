@@ -102,9 +102,11 @@ export function Modal({
   working.current = busy;
   useEffect(() => {
     const prev = document.activeElement as HTMLElement;
-    ref.current?.focus();
+    const topModal = () => [...document.querySelectorAll<HTMLElement>('[role="dialog"][aria-modal="true"]')].filter(element => !element.closest('[hidden],[aria-hidden="true"],[inert]') && element.getClientRects().length > 0).at(-1);
+    if (topModal() === ref.current) ref.current?.focus();
     const handle = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && !working.current) close.current();
+      if (topModal() !== ref.current) return;
+      if (e.key === "Escape") { e.stopPropagation(); if (!working.current) close.current(); }
       if (e.key !== "Tab") return;
       const els = [
         ...(ref.current?.querySelectorAll<HTMLElement>(
@@ -136,10 +138,12 @@ export function Modal({
     document.addEventListener("keydown", handle);
     return () => {
       document.removeEventListener("keydown", handle);
-      const target = prev?.isConnected && !prev.closest("[hidden]") && !prev.matches(":disabled")
-        ? prev
-        : document.getElementById("workspace-content");
-      target?.focus({ preventScroll: true });
+      queueMicrotask(() => {
+        const top = topModal();
+        const target = prev?.isConnected && !prev.closest('[hidden],[aria-hidden="true"],[inert]') && !prev.matches(":disabled") && (!top || top.contains(prev))
+          ? prev : top || document.getElementById("workspace-content");
+        target?.focus({ preventScroll: true });
+      });
     };
   }, []);
   return (

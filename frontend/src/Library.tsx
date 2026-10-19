@@ -35,7 +35,6 @@ import {
   UsersRound,
   SlidersHorizontal,
   ArrowDownUp,
-  FileText,
   Sparkles,
   X,
 } from "lucide-react";
@@ -95,14 +94,14 @@ const emptyStats: Stats = {
 const nf = new Intl.NumberFormat("zh-CN");
 const labelFor = (key: string) =>
   TABLES.find((t) => t.key === key)?.label || ({ work_cliches: "作品桥段表", material_relations: "素材关系" } as Record<string, string>)[key] || key;
-type CatalogItem = Item & { catalog_values?: Record<string, string>; computed?: { cliche_score?: number | null; missing_heat_count?: number; formula?: string } };
+type CatalogItem = Item & { catalog_values?: Record<string, string>; computed?: { cliche_score?: number | null; missing_heat_count?: number; formula?: string }; match?: { direct: boolean; related: { table: TableKey; id: string; title: string; label?: string; description?: string }[] } };
 const valuesOf = (item: Item) => (item as CatalogItem).catalog_values || item.values;
 const titleOf = (item: Item, table: TableKey) => {
   const values = valuesOf(item);
   return values[table === "works" ? "作品" : table === "characters" ? "角色名" : "cliché内容"] || (table === "characters" ? values["角色"] : "") || item.id;
 };
 const canonicalColumns: Record<TableKey, string[]> = {
-  works: ["作品ID", "作品", "类别", "作者", "发布日期", "用户是否完整体验过", "剧情梗概", "讨论热度", "商业规模", "热度权重", "关联作品", "关联角色", "关联cliché"],
+  works: ["作品ID", "作品", "类别", "作品题材", "作品风格", "作者", "发布日期", "用户是否完整体验过", "剧情梗概", "讨论热度", "商业规模", "热度权重", "关联作品", "关联角色", "关联cliché"],
   characters: ["人物ID", "角色名", "别名", "角色定位", "性格基调", "视觉元素设计", "初始状态", "阶段状态", "关联作品", "关联cliché"],
   cliches: ["clichéID", "cliché内容", "cliché评分", "人设塑造", "剧情机制", "关联作品", "关联角色"],
 };
@@ -116,7 +115,7 @@ const isLong = (column: string) =>
 const errorMessage = (e: unknown) =>
   e instanceof Error ? e.message : "操作未完成，请稍后重试。";
 const encoded = (v: string) => encodeURIComponent(v);
-const fieldLabel = (field: string) => ({ "用户是否完整体验过": "看过", "关联cliché": "关联桥段", "cliché内容": "桥段内容", "clichéID": "桥段 ID", "cliché评分": "Cliché 评分", "人物ID": "人物 ID", "两句话概括": "剧情梗概", "热度权重": "综合热度" } as Record<string, string>)[field] || field;
+const fieldLabel = (field: string) => ({ "用户是否完整体验过": "看过", "作品题材": "题材", "作品风格": "风格", "关联cliché": "关联桥段", "cliché内容": "桥段内容", "clichéID": "桥段 ID", "cliché评分": "Cliché 评分", "人物ID": "人物 ID", "两句话概括": "剧情梗概", "热度权重": "综合热度" } as Record<string, string>)[field] || field;
 const hiddenColumns = new Set(["版本与原作关系", "剧情补充说明", "典型桥段（剧透）", "经典桥段（剧透）", "两句话概括", "cliché程度（%）", "cliché程度", "命中作品数", "命中热度合计"]);
 const seenKey = "用户是否完整体验过";
 const clicheTypes = [
@@ -750,15 +749,23 @@ function WorkIntake({ initialMode = "automatic", initialTable = "works", targetW
   </Modal>;
 }
 
-type LibraryFacets = { categories?: string[]; roles?: string[]; character_traits?: string[]; plot_mechanisms?: string[]; works?: { id: string; title: string }[] };
+type LibraryFacets = { categories?: string[]; genres?: string[]; styles?: string[]; roles?: string[]; character_traits?: string[]; plot_mechanisms?: string[]; works?: { id: string; title: string }[] };
 type LibraryPage = Page & { facets?: LibraryFacets };
+type CatalogSearchPage = { q: string; groups: Record<TableKey, LibraryPage>; facets?: LibraryFacets };
+const genreOptions = ["奇幻", "科幻", "武侠", "仙侠", "现实", "历史", "都市", "军事", "爱情"];
+const styleOptions = ["推理", "克苏鲁", "赛博朋克", "悬疑", "惊悚", "喜剧", "热血", "治愈"];
+function SearchMatch({ item }: { item: Item }) {
+  const match = (item as CatalogItem).match;
+  if (!match || match.direct || !match.related?.length) return null;
+  return <span className="catalog-search-match">{match.related.slice(0, 2).map(related => <span key={`${related.table}:${related.id}`}>{TABLES.find(table => table.key === related.table)?.singular} · {related.title}</span>)}</span>;
+}
 function RecordTable({ table, items, selectedId, onSelect, onToggleSeen, seenBusy }: {
   table: TableKey; items: Item[]; selectedId?: string; onSelect: (item: Item) => void;
   onToggleSeen: (item: Item) => void; seenBusy: string;
 }) {
   const headings = table === "works" ? ["作品", "类别", "作者", "年份", "看过"] : table === "characters" ? ["角色", "角色定位", "性格基调", "关联作品"] : ["桥段内容", "Cliché 评分"];
   return <div className="record-table-wrap"><table className={`record-table table-${table}`}><thead><tr>{headings.map((heading, i) => <th key={heading} className={table === "works" && (i === 2 || i === 3) ? "optional-column" : ""}>{heading}</th>)}<th className="row-action"><span className="visually-hidden">操作</span></th></tr></thead><tbody>{items.map(item => <tr key={item.id} className={item.id === selectedId ? "selected" : ""}>
-    <td><button className={`record-title ${table === "cliches" ? "cliche-title" : ""}`} onClick={() => onSelect(item)}><span><strong>{titleOf(item, table)}</strong><small>{item.id}</small>{table === "cliches" && <ClicheTypeTags values={item.values} />}</span></button></td>
+    <td><button className={`record-title ${table === "cliches" ? "cliche-title" : ""}`} onClick={() => onSelect(item)}><span><strong>{titleOf(item, table)}</strong><small>{item.id}</small><SearchMatch item={item} />{table === "cliches" && <ClicheTypeTags values={item.values} />}</span></button></td>
     {table === "works" ? <><td><span className="tag">{item.values["类别"] || "—"}</span></td><td className="optional-column">{item.values["作者"] || "—"}</td><td className="optional-column date-cell">{item.values["发布日期"] || "—"}</td><td><button className={`seen-toggle ${item.values[seenKey] === "是" ? "seen" : ""} ${!["是", "否"].includes(item.values[seenKey]) ? "unknown" : ""}`} onClick={() => onToggleSeen(item)} disabled={seenBusy === item.id} aria-busy={seenBusy === item.id} aria-label={`${titleOf(item, table)} 看过：${["是", "否"].includes(item.values[seenKey]) ? item.values[seenKey] : "未记录"}`} aria-pressed={item.values[seenKey] === "是"}>{seenBusy === item.id ? <LoaderCircle size={13} className="spin" /> : item.values[seenKey] === "是" ? <Check size={13} /> : null}{["是", "否"].includes(item.values[seenKey]) ? item.values[seenKey] : "—"}</button></td></> : table === "characters" ? <><td><span className="tag neutral">{item.values["角色定位"] || "—"}</span></td><td><span className="cell-truncate" title={item.values["性格基调"]}>{item.values["性格基调"] || "—"}</span></td><td><span className="link-count"><Link2 size={13} />{linkedCount(item.values["关联作品"] || "[]")}</span></td></> : <><td className="date-cell"><span className="cliche-score-cell">{scoreOf(item)}</span></td></>}
     <td className="row-action"><button className="icon-button" aria-label={`查看${titleOf(item, table)}`} onClick={() => onSelect(item)}><ChevronRight size={17} /></button></td>
   </tr>)}</tbody></table></div>;
@@ -771,6 +778,7 @@ export default function Library() {
 
   const [query, setQuery] = useState("");
   const [debouncedQuery, setDebouncedQuery] = useState("");
+  const [searchPage, setSearchPage] = useState<CatalogSearchPage | null>(null);
   const [page, setPage] = useState<LibraryPage>({
     items: [],
     total: 0,
@@ -790,6 +798,8 @@ export default function Library() {
   const [toast, setToast] = useState("");
   const [intake, setIntake] = useState<{ mode: IntakeMode; table: TableKey; work?: Item } | null>(null);
   const [category, setCategory] = useState("");
+  const [genre, setGenre] = useState("");
+  const [style, setStyle] = useState("");
   const [seen, setSeen] = useState("");
   const [hasText, setHasText] = useState("");
   const [hasAnalysis, setHasAnalysis] = useState("");
@@ -801,8 +811,11 @@ export default function Library() {
   const [workId, setWorkId] = useState("");
   const [characterTrait, setCharacterTrait] = useState("");
   const [plotMechanism, setPlotMechanism] = useState("");
-  const filterActive = !!(category || seen || hasText || hasAnalysis || role || workId || characterTrait || plotMechanism);
-  const resetFilters = () => { setCategory(""); setSeen(""); setHasText(""); setHasAnalysis(""); setRole(""); setWorkId(""); setCharacterTrait(""); setPlotMechanism(""); setOffset(0); };
+  const filterActive = !!(category || genre || style || seen || hasText || hasAnalysis || role || workId || characterTrait || plotMechanism);
+  const resetFilters = () => { setCategory(""); setGenre(""); setStyle(""); setSeen(""); setHasText(""); setHasAnalysis(""); setRole(""); setWorkId(""); setCharacterTrait(""); setPlotMechanism(""); setOffset(0); };
+  const searching = !!debouncedQuery.trim();
+  const resultTotal = searching && searchPage ? TABLES.reduce((sum, entry) => sum + searchPage.groups[entry.key].total, 0) : page.total;
+  const pageTotal = searching && searchPage ? Math.max(...TABLES.map(entry => searchPage.groups[entry.key].total)) : page.total;
 
   const workspaceRef = useRef<HTMLDivElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
@@ -838,7 +851,7 @@ export default function Library() {
   }, [refresh]);
   useEffect(() => {
     const timer = window.setTimeout(() => {
-      setDebouncedQuery(query);
+      setDebouncedQuery(query.trim());
       setOffset(0);
     }, 250);
     return () => window.clearTimeout(timer);
@@ -855,9 +868,11 @@ export default function Library() {
     });
     if (table === "works") {
       if (category) params.set("category", category);
+      if (genre) params.set("genre", genre);
+      if (style) params.set("style", style);
       if (seen) params.set("seen", seen);
-      if (hasText) params.set("has_text", hasText);
-      if (hasAnalysis) params.set("has_analysis", hasAnalysis);
+      if (hasText) params.set("has_uploaded_text", hasText);
+      if (hasAnalysis) params.set("analysis_completed", hasAnalysis);
     }
     if (table !== "works" && workId) params.set("work_id", workId);
     if (table === "characters") { if (role) params.set("role", role); if (characterTrait) params.set("character_trait", characterTrait); }
@@ -865,14 +880,25 @@ export default function Library() {
       if (characterTrait) params.set("character_trait", characterTrait);
       if (plotMechanism) params.set("plot_mechanism", plotMechanism);
     }
-    if (sortBy) { params.set("sort_by", sortBy); params.set("sort_direction", sortBy === "发布日期" ? "desc" : "asc"); }
-    request<LibraryPage>(`/records/${table}?${params}`, { signal: controller.signal })
-      .then((data) => {
+    if (sortBy) { params.set("sort_by", sortBy); params.set("sort_direction", ["发布日期", "discussion_heat", "commercial_scale"].includes(sortBy) ? "desc" : "asc"); }
+    const fetchPage = async () => {
+      if (!debouncedQuery) {
+        const data = await request<LibraryPage>(`/records/${table}?${params}`, { signal: controller.signal });
+        return { data, search: null };
+      }
+      const search = await request<CatalogSearchPage>(`/catalog/search?${params}`, { signal: controller.signal });
+      const groups = Object.fromEntries(TABLES.map(entry => [entry.key, { ...search.groups[entry.key], items: search.groups[entry.key].items.map(normalizeItem) }])) as Record<TableKey, LibraryPage>;
+      return { data: { ...groups[table], facets: search.facets }, search: { ...search, groups } };
+    };
+    void fetchPage()
+      .then(({ data, search }) => {
         if (!controller.signal.aborted) {
+          setSearchPage(search);
           setPage({ ...data, items: data.items.map(normalizeItem) });
           if (data.facets) setFacets(data.facets);
-          if (offset > 0 && !data.items.length && data.total > 0)
-            setOffset(Math.floor((data.total - 1) / limit) * limit);
+          const maxTotal = search ? Math.max(...TABLES.map(entry => search.groups[entry.key].total)) : data.total;
+          if (offset > 0 && offset >= maxTotal)
+            setOffset(maxTotal ? Math.floor((maxTotal - 1) / limit) * limit : 0);
         }
       })
       .catch((e) => {
@@ -882,7 +908,7 @@ export default function Library() {
         if (!controller.signal.aborted) setLoading(false);
       });
     return () => controller.abort();
-  }, [table, debouncedQuery, offset, limit, refresh, category, seen, hasText, hasAnalysis, role, workId, characterTrait, plotMechanism, sortBy]);
+  }, [table, debouncedQuery, offset, limit, refresh, category, genre, style, seen, hasText, hasAnalysis, role, workId, characterTrait, plotMechanism, sortBy]);
   useEffect(() => {
     if (!toast) return;
     const timer = window.setTimeout(() => setToast(""), 6500);
@@ -925,8 +951,6 @@ export default function Library() {
     setDirty(false);
     setTable(key);
     resetFilters(); setSortBy("");
-    setQuery("");
-    setDebouncedQuery("");
     setOffset(0);
     setSelection(null);
   };
@@ -937,8 +961,6 @@ export default function Library() {
     if (table !== targetTable) {
       setTable(targetTable);
       resetFilters(); setSortBy("");
-      setQuery("");
-      setDebouncedQuery("");
       setOffset(0);
     }
     setSelection({ table: targetTable, id });
@@ -962,14 +984,14 @@ export default function Library() {
   const focusRecord = useRef(chooseRecord); focusRecord.current = chooseRecord;
   const intakeRef = useRef(openIntake); intakeRef.current = openIntake;
   useEffect(() => {
-    const consume = (target: { section?: string; workId?: string; intake?: boolean } | undefined) => {
+    const consume = (target: { section?: string; workId?: string; intake?: boolean; intakeMode?: IntakeMode } | undefined) => {
       if (target?.section !== "library") return;
-      if (target.intake) void intakeRef.current("automatic", "works", target.workId);
+      if (target.intake) void intakeRef.current(target.intakeMode === "semi" ? "semi" : target.intakeMode === "manual" ? "manual" : "automatic", "works", target.workId);
       else if (target.workId) focusRecord.current("works", target.workId);
       else return;
       try { sessionStorage.removeItem("inkreference.catalog-focus"); } catch { /* Navigation still works without session storage. */ }
     };
-    const focus = (event: Event) => consume((event as CustomEvent<{ section?: string; workId?: string; intake?: boolean }>).detail);
+    const focus = (event: Event) => consume((event as CustomEvent<{ section?: string; workId?: string; intake?: boolean; intakeMode?: IntakeMode }>).detail);
     window.addEventListener("inkreference:catalog-focus", focus);
     try { const pending = sessionStorage.getItem("inkreference.catalog-focus"); if (pending) consume(JSON.parse(pending)); } catch { /* Ignore an obsolete navigation target. */ }
     return () => window.removeEventListener("inkreference:catalog-focus", focus);
@@ -980,13 +1002,13 @@ export default function Library() {
     try {
       const updated = await request<Item>(`/records/works/${encoded(item.id)}`, { method: "PATCH", ...jsonBody({ values: { [seenKey]: item.values[seenKey] === "是" ? "否" : "是" }, expected_revision: item.revision }) });
       setPage(current => ({ ...current, items: current.items.map(row => row.id === updated.id ? normalizeItem(updated) : row) }));
+      setSearchPage(current => current ? { ...current, groups: { ...current.groups, works: { ...current.groups.works, items: current.groups.works.items.map(row => row.id === updated.id ? ({ ...normalizeItem(updated), match: (row as CatalogItem).match } as CatalogItem) : row) } } } : null);
       if (selection?.table === "works" && selection.id === item.id) setDetailRefresh(value => value + 1);
       if (seen) reload();
     } catch (e) { notify(errorMessage(e)); } finally { setSeenBusy(""); }
   };
   return (
     <div ref={workspaceRef} className={`library-layout library-workspace ${selection ? "has-detail" : ""}`}>
-      {(loading || seenBusy) && <Busy label={seenBusy ? "正在保存看过状态" : "正在读取素材库"} />}
       <div className="library-main">
         <main id="main-content" className="main-content" tabIndex={-1}>
           <PageTitle title={config.label} action={<div className="library-heading-actions">{selection?.table === "works" && selection.id && <button className="button secondary" onClick={() => void openIntake("automatic", "works", selection.id)}><Sparkles size={15} />更新资料</button>}
@@ -1022,8 +1044,8 @@ export default function Library() {
             <div className="list-toolbar">
               <div className="list-title">
                 <config.icon size={18} />
-                <h2>全部{config.singular}</h2>
-                <span>{nf.format(stats[table])}</span>
+                <h2>{searching ? "搜索结果" : `全部${config.singular}`}</h2>
+                <span>{nf.format(searching ? resultTotal : stats[table])}</span>
               </div>
               <div className="toolbar-actions">
                 <div className="search-box">
@@ -1032,8 +1054,8 @@ export default function Library() {
                     ref={searchRef}
                     value={query}
                     onChange={(e) => setQuery(e.target.value)}
-                    placeholder={`搜索${config.singular}、内容或 ID…`}
-                    aria-label={`搜索${config.label}`}
+                    placeholder="搜索作品、角色、桥段、作者…"
+                    aria-label="搜索素材库"
                   />
                   {query ? (
                     <button
@@ -1069,9 +1091,11 @@ export default function Library() {
               <SlidersHorizontal size={15} />
               {table === "works" && <>
                 <label><span>类别</span><select aria-label="筛选类别" value={category} onChange={e => { setCategory(e.target.value); setOffset(0); }}><option value="">全部类别</option>{facets.categories?.map(value => <option key={value}>{value}</option>)}</select></label>
+                <label><span>题材</span><select aria-label="筛选题材" value={genre} onChange={e => { setGenre(e.target.value); setOffset(0); }}><option value="">全部题材</option>{[...new Set([...genreOptions, ...facets.genres || []])].map(value => <option key={value}>{value}</option>)}</select></label>
+                <label><span>风格</span><select aria-label="筛选风格" value={style} onChange={e => { setStyle(e.target.value); setOffset(0); }}><option value="">全部风格</option>{[...new Set([...styleOptions, ...facets.styles || []])].map(value => <option key={value}>{value}</option>)}</select></label>
                 <label><span>看过</span><select aria-label="筛选看过" value={seen} onChange={e => { setSeen(e.target.value); setOffset(0); }}><option value="">全部</option><option value="是">是</option><option value="否">否</option><option value="unknown">未记录</option></select></label>
-                <label><FileText size={13} /><select aria-label="筛选文本" value={hasText} onChange={e => { setHasText(e.target.value); setOffset(0); }}><option value="">文本</option><option value="true">有文本</option><option value="false">无文本</option></select></label>
-                <label><Sparkles size={13} /><select aria-label="筛选分析" value={hasAnalysis} onChange={e => { setHasAnalysis(e.target.value); setOffset(0); }}><option value="">分析</option><option value="true">有分析</option><option value="false">无分析</option></select></label>
+                <label><span>已上传正文</span><select aria-label="筛选已上传正文" value={hasText} onChange={e => { setHasText(e.target.value); setOffset(0); }}><option value="">全部</option><option value="true">是</option><option value="false">否</option></select></label>
+                <label><span>已完成解析</span><select aria-label="筛选已完成解析" value={hasAnalysis} onChange={e => { setHasAnalysis(e.target.value); setOffset(0); }}><option value="">全部</option><option value="true">是</option><option value="false">否</option></select></label>
               </>}
               {table !== "works" && <CatalogWorkFilter value={workId} onChange={id => { setWorkId(id); setOffset(0); }} />}
               {table === "characters" && <><label><span>基调</span><select aria-label="筛选性格基调" value={characterTrait} onChange={event => { setCharacterTrait(event.target.value); setOffset(0); }}><option value="">全部基调</option>{characterTemperaments.map(value => <option key={value}>{value}</option>)}</select></label><label><span>定位</span><select aria-label="筛选角色定位" value={role} onChange={e => { setRole(e.target.value); setOffset(0); }}><option value="">全部定位</option>{facets.roles?.map(value => <option key={value}>{value}</option>)}</select></label></>}
@@ -1079,14 +1103,15 @@ export default function Library() {
                 <label><span>人设塑造</span><select aria-label="筛选人设塑造" value={characterTrait} onChange={e => { setCharacterTrait(e.target.value); setOffset(0); }}><option value="">全部</option>{clicheTypes[0].options.map(value => <option key={value}>{value}</option>)}</select></label>
                 <label><span>剧情机制</span><select aria-label="筛选剧情机制" value={plotMechanism} onChange={e => { setPlotMechanism(e.target.value); setOffset(0); }}><option value="">全部</option>{clicheTypes[1].options.map(value => <option key={value}>{value}</option>)}</select></label>
               </>}
-              <label className="database-sort"><ArrowDownUp size={13} /><select aria-label="排序" value={sortBy} onChange={e => { setSortBy(e.target.value); setOffset(0); }}><option value="">默认排序</option><option value={table === "works" ? "作品" : table === "characters" ? "角色名" : "cliché内容"}>名称</option>{table === "works" && <option value="发布日期">年份</option>}</select></label>
+              <label className="database-sort"><ArrowDownUp size={13} /><select aria-label="排序" value={sortBy} onChange={e => { setSortBy(e.target.value); setOffset(0); }}><option value="">默认排序</option><option value={table === "works" ? "作品" : table === "characters" ? "角色名" : "cliché内容"}>名称</option>{table === "works" && <><option value="发布日期">年份</option><option value="discussion_heat">讨论热度</option><option value="commercial_scale">商业规模</option></>}</select></label>
               {filterActive && <button className="text-button" onClick={resetFilters}><X size={13} />清除</button>}
             </div>
+            {(loading || seenBusy) && <div className="catalog-list-progress"><Busy inline label={seenBusy ? "正在保存看过状态" : searching ? "正在搜索素材库" : "正在读取素材库"} /></div>}
             {debouncedQuery && (
               <div className="search-summary">
                 搜索“{debouncedQuery}”
                 <span>
-                  {loading ? "查询中…" : `${nf.format(page.total)} 条结果`}
+                  {loading ? "查询中…" : `${nf.format(resultTotal)} 条结果`}
                 </span>
                 <button className="text-button" onClick={() => setQuery("")}>
                   清空条件
@@ -1103,6 +1128,16 @@ export default function Library() {
                 <button className="button secondary" onClick={reload}>
                   重新连接
                 </button>
+              </div>
+            ) : searching && searchPage ? (
+              <div className={`catalog-search-groups ${loading ? "refreshing" : ""}`} aria-busy={loading}>
+                {TABLES.map(entry => {
+                  const group = searchPage.groups[entry.key];
+                  return <section className={`catalog-search-group ${table === entry.key ? "current" : ""}`} key={entry.key} aria-label={`${entry.label}搜索结果`}>
+                    <header><entry.icon size={16} /><h3>{entry.label}</h3><span>{nf.format(group.total)}</span>{group.items.length > 0 && <small>{nf.format(Math.min(offset + 1, group.total))}–{nf.format(Math.min(offset + limit, group.total))}</small>}</header>
+                    {group.items.length ? <RecordTable table={entry.key} items={group.items} selectedId={selection?.table === entry.key ? selection.id : undefined} onSelect={item => chooseRecord(entry.key, item.id)} onToggleSeen={item => void toggleSeen(item)} seenBusy={seenBusy} /> : <p className="catalog-group-empty">{group.total ? "本页暂无结果" : `暂无匹配${entry.singular}`}</p>}
+                  </section>;
+                })}
               </div>
             ) : loading && !page.items.length ? (
               <div className="list-state">
@@ -1167,13 +1202,13 @@ export default function Library() {
             )}
             <footer className="pagination">
               <span>
-                {page.total
+                {searching && searchPage ? `共 ${nf.format(resultTotal)} 条结果` : page.total
                   ? `显示 ${nf.format(offset + 1)}–${nf.format(Math.min(offset + limit, page.total))} 条，共 ${nf.format(page.total)} 条`
                   : "暂无记录"}
               </span>
               <div>
                 <label>
-                  每页
+                  {searching ? "每组" : "每页"}
                   <select
                     value={limit}
                     aria-label="每页记录数"
@@ -1190,8 +1225,8 @@ export default function Library() {
                   条
                 </label>
                 <span className="page-number">
-                  {page.total ? Math.floor(offset / limit) + 1 : 1} /{" "}
-                  {Math.max(1, Math.ceil(page.total / limit))}
+                  {pageTotal ? Math.floor(offset / limit) + 1 : 1} /{" "}
+                  {Math.max(1, Math.ceil(pageTotal / limit))}
                 </span>
                 <button
                   className="icon-button"
@@ -1203,7 +1238,7 @@ export default function Library() {
                 </button>
                 <button
                   className="icon-button"
-                  disabled={offset + limit >= page.total || loading}
+                  disabled={offset + limit >= pageTotal || loading}
                   onClick={() => setOffset(offset + limit)}
                   aria-label="下一页"
                 >

@@ -276,24 +276,29 @@ def create_app(data_dir: str | Path | None = None, static_dir: str | Path | None
         cliche_id: Annotated[str | None, Query(max_length=300)] = None,
         category: Annotated[str | None, Query(max_length=300)] = None,
         seen: Annotated[str | None, Query(max_length=100)] = None,
+        genre: Annotated[str | None, Query(max_length=300)] = None,
+        style: Annotated[str | None, Query(max_length=300)] = None,
         role: Annotated[str | None, Query(max_length=300)] = None,
         character_trait: Annotated[str | None, Query(max_length=100)] = None,
         plot_mechanism: Annotated[str | None, Query(max_length=100)] = None,
         has_text: bool | None = None,
         has_analysis: bool | None = None,
+        has_uploaded_text: bool | None = None,
+        analysis_completed: bool | None = None,
         sort_by: Annotated[str | None, Query(max_length=100)] = None,
         sort_direction: Literal["asc", "desc"] = "asc",
         include_work_facets: bool = True,
     ):
-        filters = {key: value for key, value in {"category": category, "seen": seen, "role": role,
+        filters = {key: value for key, value in {"category": category, "seen": seen, "genre": genre, "style": style, "role": role,
             "character_trait": character_trait, "plot_mechanism": plot_mechanism}.items() if value is not None}
-        if has_text is not None or has_analysis is not None:
+        listing = dict(q=q, offset=offset, limit=limit, work_id=work_id,
+            cliche_id=cliche_id, filters=filters, sort_by=sort_by, sort_direction=sort_direction, include_work_facets=include_work_facets)
+        if any(value is not None for value in (has_text, has_analysis, has_uploaded_text, analysis_completed)):
             if table != "works":
                 raise DataError(422, "文本与分析筛选仅适用于作品")
-            filters["work_ids"] = application.state.catalog_links().filter_work_ids(
-                has_text=has_text, has_analysis=has_analysis)
-        return runtime.store.list_records(table, q=q, offset=offset, limit=limit, work_id=work_id,
-            cliche_id=cliche_id, filters=filters, sort_by=sort_by, sort_direction=sort_direction, include_work_facets=include_work_facets)
+            return application.state.catalog_links().list_records(table, has_text=has_text, has_analysis=has_analysis,
+                has_uploaded_text=has_uploaded_text, analysis_completed=analysis_completed, **listing)
+        return runtime.store.list_records(table, **listing)
 
     @application.get("/api/records/{table}/{record_id}/relations")
     def relations(table: TableName, record_id: str):
@@ -488,12 +493,19 @@ def create_app(data_dir: str | Path | None = None, static_dir: str | Path | None
     install_studio_routes(application, runtime)
     from .repair_routes import install_repair_routes, repair_service
     install_repair_routes(application, runtime)
+    from .prompt_workbench import create_prompt_workbench_router, get_prompt_workbench
+    application.include_router(create_prompt_workbench_router(lambda: runtime.studio, lambda: application.state.quick_repair()))
+    from .document_replace import create_router as create_document_replace_router
+    application.include_router(create_document_replace_router(lambda: runtime.studio.documents, lambda: runtime.studio.lock))
+    from .task_routes import install_task_routes
+    install_task_routes(application, runtime)
     from .catalog_routes import install_catalog_routes
     install_catalog_routes(application, runtime)
     from .character_routes import install_character_routes
     install_character_routes(application, runtime)
     from .research_api import create_research_router
-    application.include_router(create_research_router(lambda: runtime.studio.research))
+    application.include_router(create_research_router(lambda: runtime.studio.research,
+        lambda: get_prompt_workbench(runtime.studio, lambda: application.state.quick_repair())))
     from .embedding_download_api import create_embedding_download_router
     application.include_router(create_embedding_download_router(lambda: runtime.studio.embedding_downloads))
     from .dynamic_routes import create_dynamic_router
