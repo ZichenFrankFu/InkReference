@@ -180,7 +180,7 @@ def run_desktop(server, listener, url: str) -> int:
     try:
         window = webview.create_window(
             "InkReference", html=LOADING_HTML, width=1440, height=920,
-            min_size=(1024, 680), background_color="#f5f7fd", text_select=True,
+            min_size=(520, 560), background_color="#f5f7fd", text_select=True,
         )
         window.events.closed += on_closed
         worker = threading.Thread(target=serve, name="inkreference-http", daemon=True)
