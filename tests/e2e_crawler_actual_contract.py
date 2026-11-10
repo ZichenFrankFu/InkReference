@@ -33,18 +33,24 @@ REFERENCE_PYTHON = os.environ.get('INKREFERENCE_PYTHON', '/workspace/.onboarding
 CRAWLER = r'''
 import hashlib,json,sys
 from pathlib import Path
+from fastapi.testclient import TestClient
 from inkcrawler.app import create_app
 from inkcrawler.providers.models import DownloadRequest,Page
 from inkcrawler.providers.model_sources import model_entry
 
 root = Path(sys.argv[1])
 app = create_app(root, testing=True)
+client = TestClient(app)
+client.__enter__()
+client.get('/')
 store, service = app.state.store, app.state.source_downloads
-book = store.create_book('实时共享作品', '作者甲', 'https://books.example.org/book/123/', {}, [
-    {'title':'第一章 原始标题','url':'https://books.example.org/book/123/1'}])
+book = store.create_book('实时共享作品', '作者甲', 'https://www.qidian.com/book/123/', {}, [
+    {'title':'第一章 原始标题','url':'https://read.qidian.com/chapter/123/1/'}])
 chapter = store.list_chapters(book['id'])[0]
 store.update_chapter(chapter['id'], state='done', content='第一版正文，来自真实爬虫数据库。')
 store.update_book(book['id'], is_completed=True)
+manual = store.create_book('手动标记作品', '作者乙', 'https://books.example.org/book/456/', {}, [])
+store.update_book(manual['id'], is_completed=True)
 
 run = service.data.create('qidian', DownloadRequest(ranking_browser='playwright'))['id']
 record = {'source_id': f'{run}:月票榜:1:123', 'table':'rankings','kind':'rankings','data':{
@@ -58,6 +64,10 @@ service.data.save_page(run, None, Page([record], None))
 with store._db() as db:
     snapshot = db.execute('SELECT id FROM ranking_snapshots WHERE download_id=?', (run,)).fetchone()[0]
     work = db.execute('SELECT id FROM ranking_works WHERE platform=? AND platform_novel_id=?', ('qidian','123')).fetchone()[0]
+
+# A second prose work is created only after the ranking observation already
+# exists. Both source identities use the official URL for the same work ID.
+late_book = store.create_book('榜单之后创建的作品', '作者丙', 'https://book.qidian.com/info/123/', {}, [])
 
 model = service.data.create('model_huggingface', DownloadRequest(selections=['合成测试模型']))['id']
 entries = [model_entry('huggingface', u) for u in (
@@ -75,14 +85,70 @@ for number, entry in enumerate(entries):
     model_paths.append(str(path))
 service.data.state(model, 'completed')
 
-print('READY '+json.dumps({'book':book['id'],'chapter':chapter['id'],'snapshot':snapshot,
-      'work':work,'model':model,'model_paths':model_paths}, ensure_ascii=False), flush=True)
+remove_model = service.data.create('model_github', DownloadRequest(selections=['将删除模型']))['id']
+remove_entry = model_entry('github', 'https://github.com/fictional/sample/releases/download/v1/model.gguf')
+service.data.plan_files(remove_model, [remove_entry])
+remove_path = service.file_path(remove_model, 0)
+remove_path.parent.mkdir(parents=True, exist_ok=True)
+remove_path.write_bytes(b'remove-fixture')
+service.data.save_file(remove_model, 0, {'bytes':remove_path.stat().st_size, 'mtime_ns':remove_path.stat().st_mtime_ns,
+    'sha256':hashlib.sha256(remove_path.read_bytes()).hexdigest(), 'relative_path':remove_entry['relative_path']})
+service.data.state(remove_model, 'completed')
+
+local = root.parent / '本地合成模型.gguf'
+local.write_bytes(b'local-fixture')
+registered = client.post('/api/local-models', json={'path':str(local), 'name':'本地登记模型'})
+assert registered.status_code == 201, registered.text
+local_id = registered.json()['id']
+
+print('READY '+json.dumps({'book':book['id'],'late_book':late_book['id'],'manual':manual['id'],'chapter':chapter['id'],'snapshot':snapshot,
+      'work':work,'model':model,'model_paths':model_paths,'remove_model':remove_model,'remove_path':str(remove_path),
+      'local_id':local_id,'local_path':str(local)}, ensure_ascii=False), flush=True)
 for line in sys.stdin:
     if line.strip() == 'update':
         store.update_chapter(chapter['id'], state='done', content='第二版正文，爬虫继续保存。')
+        store.update_book(book['id'], source_completion_status='ongoing', metadata_origin='source', source_metadata_url=book['toc_url'])
         print('UPDATED', flush=True)
+    elif line.strip() in ('rank-ongoing', 'rank-completed'):
+        status = 'ongoing' if line.strip() == 'rank-ongoing' else 'completed'
+        # Use a fresh run and later captured time, as a normal update would.
+        next_run = service.data.create('qidian', DownloadRequest(ranking_browser='playwright'))['id']
+        data = {**record['data'], 'status':status,
+                'captured_at':'2026-01-03T12:00:00+00:00' if status == 'ongoing' else '2026-01-04T12:00:00+00:00'}
+        next_record = {**record, 'source_id':f'{next_run}:月票榜:1:123', 'data':data}
+        service.data.save_page(next_run, None, Page([next_record], None))
+        current, late = store.get_book(book['id']), store.get_book(late_book['id'])
+        assert current['completion_source'] == late['completion_source'] == 'source', (current, late)
+        assert current['is_completed'] == late['is_completed'] == (status == 'completed'), (current, late)
+        if status == 'ongoing':
+            rejected = client.patch('/api/books/' + book['id'], json={'is_completed':True})
+            assert rejected.status_code == 400, rejected.text
+        print('RANK-'+status.upper(), flush=True)
+    elif line.strip() == 'switch-source':
+        # The manual completion mark set before acquiring rank metadata must
+        # reappear when moving away from the official source.
+        switched = store.update_book(book['id'], toc_url='https://books.example.org/book/123/')
+        assert switched['is_completed'] and switched['completion_source'] == 'manual', switched
+        print('SOURCE-SWITCHED', flush=True)
+    elif line.strip() == 'keep-trash':
+        result = client.delete(f'/api/source-tasks/{model}?include_files=false')
+        assert result.status_code == 200, result.text
+        print('KEEP-TRASH', flush=True)
+    elif line.strip() == 'keep-delete':
+        result = client.delete(f'/api/task-trash/source/{model}')
+        assert result.status_code == 200, result.text
+        print('KEEP-DELETED', flush=True)
+    elif line.strip() == 'remove-trash':
+        result = client.delete(f'/api/source-tasks/{remove_model}?include_files=true')
+        assert result.status_code == 200, result.text
+        print('REMOVE-TRASH', flush=True)
+    elif line.strip() == 'remove-delete':
+        result = client.delete(f'/api/task-trash/source/{remove_model}')
+        assert result.status_code == 200, result.text
+        print('REMOVE-DELETED', flush=True)
     elif line.strip() == 'quit':
         break
+client.__exit__(None, None, None)
 '''
 
 
@@ -157,6 +223,11 @@ def main():
                 books = json_request(prefix + '/crawler/books')['items']
                 book = next(item for item in books if item['id'] == ids['book'])
                 assert (book['title'],book['author'],book['chapters'],book['is_completed']) == ('实时共享作品','作者甲',1,1), book
+                assert book['completion_source'] == 'source', book
+                manual = next(item for item in books if item['id'] == ids['manual'])
+                assert manual['is_completed'] and manual['completion_source'] == 'manual', manual
+                late = next(item for item in books if item['id'] == ids['late_book'])
+                assert late['is_completed'] and late['completion_source'] == 'source', late
                 snapshots = json_request(prefix + '/crawler/rankings')['items']
                 snapshot = next(item for item in snapshots if item['id'] == ids['snapshot'])
                 assert snapshot['rank_family'] == '月票榜' and snapshot['works'] == 1, snapshot
@@ -166,6 +237,38 @@ def main():
                 models = json_request(prefix + '/crawler/models')['items']
                 actual_paths = {row['path'] for row in models if row['id'] == ids['model'] and row['available']}
                 assert actual_paths == set(ids['model_paths']), (models, ids['model_paths'])
+                assert any(row['id'] == ids['local_id'] and row['path'] == ids['local_path'] and row['available'] for row in models), models
+                assert any(row['id'] == ids['remove_model'] and row['path'] == ids['remove_path'] for row in models), models
+
+                writer.stdin.write('keep-trash\n'); writer.stdin.flush()
+                assert output.get(timeout=20) == 'KEEP-TRASH'
+                models = json_request(prefix + '/crawler/models')['items']
+                assert {row['path'] for row in models if row['id'] == ids['model'] and row['available']} == set(ids['model_paths']), models
+                writer.stdin.write('keep-delete\n'); writer.stdin.flush()
+                assert output.get(timeout=20) == 'KEEP-DELETED'
+                models = json_request(prefix + '/crawler/models')['items']
+                assert {row['path'] for row in models if row['id'] == ids['model'] and row['available']} == set(ids['model_paths']), models
+                assert all(Path(path).is_file() for path in ids['model_paths'])
+                writer.stdin.write('remove-trash\n'); writer.stdin.flush()
+                assert output.get(timeout=20) == 'REMOVE-TRASH'
+                models = json_request(prefix + '/crawler/models')['items']
+                assert all(row['id'] != ids['remove_model'] for row in models), models
+                assert Path(ids['remove_path']).is_file()
+                writer.stdin.write('remove-delete\n'); writer.stdin.flush()
+                assert output.get(timeout=20) == 'REMOVE-DELETED'
+                assert not Path(ids['remove_path']).exists()
+                assert Path(ids['local_path']).is_file()
+
+                writer.stdin.write('rank-ongoing\n'); writer.stdin.flush()
+                assert output.get(timeout=20) == 'RANK-ONGOING'
+                updated_books = {item['id']:item for item in json_request(prefix + '/crawler/books')['items']}
+                for ident in (ids['book'], ids['late_book']):
+                    assert updated_books[ident]['is_completed'] is False and updated_books[ident]['completion_source'] == 'source', updated_books[ident]
+                writer.stdin.write('rank-completed\n'); writer.stdin.flush()
+                assert output.get(timeout=20) == 'RANK-COMPLETED'
+                updated_books = {item['id']:item for item in json_request(prefix + '/crawler/books')['items']}
+                for ident in (ids['book'], ids['late_book']):
+                    assert updated_books[ident]['is_completed'] is True and updated_books[ident]['completion_source'] == 'source', updated_books[ident]
 
                 original = json_request(prefix + '/crawler/books/' + ids['book'] + '/open', method='POST', data={})
                 same = json_request(prefix + '/crawler/books/' + ids['book'] + '/open', method='POST', data={})
@@ -182,11 +285,20 @@ def main():
 
                 writer.stdin.write('update\n'); writer.stdin.flush()
                 assert output.get(timeout=20) == 'UPDATED'
+                updated_book = next(item for item in json_request(prefix + '/crawler/books')['items'] if item['id'] == ids['book'])
+                assert updated_book['is_completed'] is False and updated_book['completion_source'] == 'source', updated_book
                 latest = json_request(prefix + '/crawler/books/' + ids['book'] + '/open', method='POST', data={})
                 assert latest['id'] != original['id']
                 assert '第一版正文' in json_request(old_path)['text']
                 assert '第二版正文' in json_request(prefix + '/documents/' + latest['id'] + '/versions/' + latest['latest_version_id'])['text']
-                print('PASS: real InkCrawler Store/DownloadStore with live Reference HTTP; immutable snapshots, ranking chapters, nested multi-file model paths and live updates')
+                latest_origin = json_request(prefix + '/crawler/documents/' + latest['id'] + '/origin')
+                assert latest_origin['metadata']['is_completed'] is False and latest_origin['metadata']['completion_source'] == 'source', latest_origin
+                writer.stdin.write('switch-source\n'); writer.stdin.flush()
+                assert output.get(timeout=20) == 'SOURCE-SWITCHED'
+                switched_books = {item['id']:item for item in json_request(prefix + '/crawler/books')['items']}
+                assert switched_books[ids['book']]['is_completed'] is True and switched_books[ids['book']]['completion_source'] == 'manual', switched_books[ids['book']]
+                assert switched_books[ids['late_book']]['is_completed'] is True and switched_books[ids['late_book']]['completion_source'] == 'source', switched_books[ids['late_book']]
+                print('PASS: real cross-process apps; source/manual completion and channel switching, rank-first and book-first status changes, registered/retained models, both trash modes, ranking chapters and immutable live-update snapshots')
             finally:
                 if writer.poll() is None:
                     try:

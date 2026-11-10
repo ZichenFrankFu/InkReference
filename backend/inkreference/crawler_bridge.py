@@ -13,6 +13,7 @@ import re
 import sqlite3
 import sys
 from contextlib import closing, contextmanager
+from urllib.parse import urlsplit
 
 from .database import DataError
 
@@ -20,6 +21,61 @@ _ID = re.compile(r"^[0-9a-f]{32,64}$")
 _VISIBLE_BOOK = """NOT EXISTS (SELECT 1 FROM task_trash t WHERE t.item_id=b.id
     AND (t.kind='work' OR (t.kind='book' AND t.include_work=1)))"""
 _CHUNK = 256 * 1024
+
+
+def _completion_value(status):
+    value = re.sub(r'\s+', '', status).casefold() if isinstance(status, str) else ''
+    if value in {'连载', '连载中', '連載', '連載中', '未完结', '未完結', '未完本', 'ongoing', 'serializing'}:
+        return 'ongoing'
+    if value in {'完结', '已完结', '完結', '已完結', '完本', '已完本', 'completed', 'complete', 'finished'}:
+        return 'completed'
+    return ''
+
+
+def _completion(db, book):
+    """Read the source-aware completion contract, including old workspaces."""
+    row = dict(book)
+    # Recent InkCrawler versions update these two fields atomically whenever
+    # the active source or its known completion status changes. Using that
+    # shared cache avoids per-work source queries in large libraries.
+    if row.get('completion_source_cache') in ('source', 'manual', 'default'):
+        return bool(row.get('is_completed', 0)), row['completion_source_cache']
+    active, url = row.get('active_channel_id'), row.get('toc_url')
+    status = ''
+    if active:
+        columns = {item[1] for item in db.execute('PRAGMA table_info(channels)')}
+        if {'id', 'book_id', 'toc_url', 'source_completion_status'} <= columns:
+            channel = db.execute('SELECT toc_url,source_completion_status FROM channels WHERE id=? AND book_id=?',
+                                 (active, row['id'])).fetchone()
+            if channel and channel['toc_url'] == url:
+                status = _completion_value(channel['source_completion_status'])
+                if not status:
+                    try:
+                        parts = urlsplit(url or '')
+                        host = parts.hostname
+                        pattern = (r'/book/([0-9]+)/?' if host == 'www.qidian.com' else
+                                   r'/info/([0-9]+)/?' if host == 'book.qidian.com' else
+                                   r'/page/([0-9]+)/?' if host in ('fanqienovel.com', 'www.fanqienovel.com') else '')
+                        match = re.fullmatch(pattern, parts.path) if pattern else None
+                        if (match and parts.scheme == 'https' and not parts.username and not parts.password
+                                and parts.port in (None, 443)
+                                and db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='ranking_works'").fetchone()):
+                            platform = 'qidian' if host in ('www.qidian.com', 'book.qidian.com') else 'fanqie'
+                            rank = db.execute('SELECT metadata_json FROM ranking_works WHERE platform=? AND platform_novel_id=?',
+                                              (platform, match.group(1))).fetchone()
+                            if rank:
+                                value = json.loads(rank['metadata_json'])
+                                status = _completion_value(value.get('status', '')) if isinstance(value, dict) else ''
+                    except (ValueError, TypeError, RecursionError):
+                        pass
+    else:
+        status = _completion_value(row.get('source_completion_status', ''))
+    if status == 'ongoing':
+        return False, 'source'
+    if status == 'completed':
+        return True, 'source'
+    marked = bool(row.get('manual_is_completed', row.get('is_completed', 0)))
+    return marked, 'manual' if marked else 'default'
 
 
 def default_crawler_dir() -> Path:
@@ -126,12 +182,17 @@ class CrawlerBridge:
 
     def books(self, *, limit=50, offset=0):
         with self.database() as db:
-            rows = db.execute("""SELECT b.id,b.title,b.author,b.created_at,b.is_completed,
+            rows = db.execute("""SELECT b.*,
                 count(c.id) AS chapters,coalesce(sum(c.char_count),0) AS characters
                 FROM books b LEFT JOIN chapters c ON c.book_id=b.id AND c.state<>'deleted' AND c.char_count>0
                 WHERE """ + _VISIBLE_BOOK + """
                 GROUP BY b.id ORDER BY b.created_at DESC,b.id LIMIT ? OFFSET ?""", (limit, offset)).fetchall()
-        return [dict(row) for row in rows]
+            output = []
+            for row in rows:
+                completed, origin = _completion(db, row)
+                item = {key: row[key] for key in ('id', 'title', 'author', 'created_at', 'chapters', 'characters')}
+                output.append({**item, 'is_completed': completed, 'completion_source': origin})
+        return output
 
     def rankings(self, *, limit=50, offset=0):
         with self.database() as db:
@@ -184,14 +245,45 @@ class CrawlerBridge:
         with self.database() as db:
             root = Path(db.execute('PRAGMA database_list').fetchone()[2]).parent
             columns = {row[1] for row in db.execute('PRAGMA table_info(source_downloads)')}
-            # Older workspaces did not have task removal; in those schemas no
-            # model task could have been moved to the current task trash.
-            visible = ' AND d.task_removed=0' if 'task_removed' in columns else ''
+            tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            # A hidden task may still own intentionally retained model files.
+            # Older workspaces without these tables retain the former behavior.
+            alternatives = ['d.task_removed=0']
+            if 'task_trash' in tables and 'include_files' in {row[1] for row in db.execute('PRAGMA table_info(task_trash)')}:
+                alternatives.append("EXISTS(SELECT 1 FROM task_trash t WHERE t.kind='source' AND t.item_id=d.id AND t.include_files=0)")
+            if 'source_retained_assets' in tables:
+                alternatives.append('EXISTS(SELECT 1 FROM source_retained_assets r WHERE r.download_id=d.id)')
+            visible = ' AND (' + ' OR '.join(alternatives) + ')' if 'task_removed' in columns else ''
+            local = []
+            if 'workspace_options' in tables:
+                stored = db.execute("SELECT value FROM workspace_options WHERE key='local_model_assets'").fetchone()
+                try:
+                    values = json.loads(stored[0]) if stored else []
+                except (TypeError, ValueError):
+                    values = []
+                if isinstance(values, list):
+                    for item in values[:1000]:
+                        if (not isinstance(item, dict) or not isinstance(item.get('id'), str)
+                                or not _ID.fullmatch(item['id']) or not isinstance(item.get('name'), str)
+                                or not isinstance(item.get('path'), str) or item.get('kind') not in ('file', 'directory')):
+                            continue
+                        path = Path(item['path'])
+                        if not path.is_absolute():
+                            continue
+                        try:
+                            available = path.is_file() if item['kind'] == 'file' else path.is_dir()
+                        except OSError:
+                            available = False
+                        local.append({'id': item['id'], 'source': 'local', 'state': '已登记' if available else '路径不可用',
+                                      'filename': item['name'], 'path': str(path), 'available': available})
+            local_page = local[offset:offset + limit]
+            source_offset = max(0, offset - len(local))
+            source_limit = max(0, limit - len(local_page))
             rows = db.execute("""SELECT d.id,d.source,d.state,d.request,f.filename,f.result
                 FROM source_downloads d JOIN source_files f ON f.download_id=d.id
                 WHERE d.source IN ('model_huggingface','model_github','model_kaggle')""" + visible + """
-                ORDER BY d.created_at DESC,d.id,f.number LIMIT ? OFFSET ?""", (limit, offset)).fetchall()
-        result = []
+                ORDER BY d.created_at DESC,d.id,f.number LIMIT ? OFFSET ?""", (source_limit, source_offset)).fetchall()
+        result = local_page
         for row in rows:
             try:
                 meta = json.loads(row['result'] or '{}')
@@ -228,9 +320,10 @@ class CrawlerBridge:
         from .documents import MAX_UPLOAD_BYTES
         with self.database() as db:
             root = Path(db.execute('PRAGMA database_list').fetchone()[2]).parent
-            book = db.execute("SELECT b.id,b.title,b.author,b.created_at,b.is_completed FROM books b WHERE b.id=? AND " + _VISIBLE_BOOK, (ident,)).fetchone()
+            book = db.execute("SELECT b.* FROM books b WHERE b.id=? AND " + _VISIBLE_BOOK, (ident,)).fetchone()
             if book is None:
                 raise DataError(404, "作品不存在")
+            is_completed, completion_source = _completion(db, book)
             raw_parts = bytearray()
             chapters = db.execute("""SELECT rowid,title FROM chapters WHERE book_id=?
                 AND state<>'deleted' AND char_count>0 ORDER BY position,id""", (ident,))
@@ -250,7 +343,7 @@ class CrawlerBridge:
             if not found:
                 raise DataError(422, "该作品没有已保存的文本章节")
         metadata = {'title': book['title'], 'author': book['author'], 'created_at': book['created_at'],
-                    'is_completed': bool(book['is_completed'])}
+                    'is_completed': is_completed, 'completion_source': completion_source}
         return self._upload_snapshot(documents, root, ['book', ident], book['title'], book['author'], raw_parts, metadata)
 
     @staticmethod

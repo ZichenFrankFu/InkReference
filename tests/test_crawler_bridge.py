@@ -219,6 +219,72 @@ def test_model_paths_are_relative_confined_and_checked(tmp_path):
     assert bridge.models() == []
 
 
+def test_existing_and_retained_models_are_visible_without_modifying_files(tmp_path):
+    source = tmp_path / 'crawler'; database = workspace(source)
+    external = tmp_path / 'local-model.gguf'; external.write_bytes(b'local')
+    downloaded = source / 'source-downloads' / RUN / 'weights' / 'model.gguf'
+    downloaded.parent.mkdir(parents=True); downloaded.write_bytes(b'model')
+    result = {'relative_path': 'weights/model.gguf', 'bytes': 5, 'mtime_ns': downloaded.stat().st_mtime_ns}
+    with sqlite3.connect(database) as db:
+        db.execute('ALTER TABLE source_downloads ADD COLUMN task_removed INTEGER NOT NULL DEFAULT 0')
+        db.execute('ALTER TABLE task_trash ADD COLUMN include_files INTEGER NOT NULL DEFAULT 1')
+        db.execute('CREATE TABLE source_retained_assets(download_id TEXT PRIMARY KEY)')
+        db.execute('CREATE TABLE workspace_options(key TEXT PRIMARY KEY,value TEXT NOT NULL)')
+        db.execute('INSERT INTO workspace_options VALUES (?,?)', ('local_model_assets', json.dumps([
+            {'id': '9'*32, 'name': '本机模型', 'path': str(external), 'kind': 'file'}], ensure_ascii=False)))
+        db.execute('UPDATE source_downloads SET source=?,task_removed=1 WHERE id=?', ('model_huggingface', RUN))
+        db.execute('INSERT INTO source_files VALUES (?,?,?,?)', (RUN, 'hashed-key', json.dumps(result), 0))
+        db.execute("INSERT INTO task_trash(kind,item_id,include_files) VALUES ('source',?,0)", (RUN,))
+    bridge = CrawlerBridge(tmp_path / 'reference'); bridge.configure(str(source))
+    first = bridge.models(limit=1)
+    assert len(first) == 1 and first[0]['filename'] == '本机模型' and first[0]['path'] == str(external)
+    second = bridge.models(limit=1, offset=1)
+    assert len(second) == 1 and second[0]['path'] == str(downloaded)
+    with sqlite3.connect(database) as db:
+        db.execute("UPDATE task_trash SET include_files=1 WHERE kind='source' AND item_id=?", (RUN,))
+    assert len(bridge.models()) == 1
+    with sqlite3.connect(database) as db:
+        db.execute("DELETE FROM task_trash WHERE kind='source' AND item_id=?", (RUN,))
+        db.execute('INSERT INTO source_retained_assets VALUES (?)', (RUN,))
+    assert len(bridge.models()) == 2
+    assert external.read_bytes() == b'local' and downloaded.read_bytes() == b'model'
+
+
+def test_shared_completion_matches_active_source_and_manual_fallback(tmp_path):
+    source = tmp_path / 'crawler'; database = workspace(source)
+    with sqlite3.connect(database) as db:
+        db.execute("ALTER TABLE books ADD COLUMN toc_url TEXT NOT NULL DEFAULT ''")
+        db.execute("ALTER TABLE books ADD COLUMN active_channel_id TEXT")
+        db.execute("ALTER TABLE books ADD COLUMN manual_is_completed INTEGER NOT NULL DEFAULT 0")
+        db.execute("ALTER TABLE books ADD COLUMN source_completion_status TEXT NOT NULL DEFAULT ''")
+        db.execute("CREATE TABLE channels(id TEXT PRIMARY KEY,book_id TEXT,toc_url TEXT,source_completion_status TEXT)")
+        db.execute("INSERT INTO channels VALUES ('channel',?,?,?)", (BOOK, 'https://www.qidian.com/book/123/', ''))
+        db.execute("UPDATE books SET toc_url=?,active_channel_id='channel',is_completed=0 WHERE id=?",
+                   ('https://www.qidian.com/book/123/', BOOK))
+        db.execute('UPDATE ranking_works SET metadata_json=? WHERE id=?', (json.dumps({'status': 'completed'}), WORK))
+    bridge = CrawlerBridge(tmp_path / 'reference'); bridge.configure(str(source))
+    book = bridge.books()[0]
+    assert book['is_completed'] is True and book['completion_source'] == 'source'
+    docs = DocumentStore(tmp_path / 'docs')
+    assert bridge.snapshot_book(BOOK, docs)['crawler_origin']['metadata']['is_completed'] is True
+    with sqlite3.connect(database) as db:
+        db.execute("UPDATE channels SET source_completion_status='连载中' WHERE id='channel'")
+        db.execute('UPDATE books SET manual_is_completed=1 WHERE id=?', (BOOK,))
+    assert bridge.books()[0]['is_completed'] is False
+    with sqlite3.connect(database) as db:
+        db.execute("UPDATE channels SET toc_url=?,source_completion_status='' WHERE id='channel'", ('https://evil.example/book/123/',))
+        db.execute('UPDATE books SET toc_url=? WHERE id=?', ('https://evil.example/book/123/', BOOK))
+    book = bridge.books()[0]
+    assert book['is_completed'] is True and book['completion_source'] == 'manual'
+    # Current InkCrawler writes its effective value and origin atomically;
+    # Reference reads the shared cache without per-work source queries.
+    with sqlite3.connect(database) as db:
+        db.execute("ALTER TABLE books ADD COLUMN completion_source_cache TEXT NOT NULL DEFAULT 'default'")
+        db.execute("UPDATE books SET is_completed=0, completion_source_cache='source' WHERE id=?", (BOOK,))
+    book = bridge.books()[0]
+    assert book['is_completed'] is False and book['completion_source'] == 'source'
+
+
 def test_ranking_sorted_by_real_rank_and_missing_version_is_explicit(tmp_path):
     source = tmp_path / 'crawler'; path = workspace(source)
     work, observation = '1'*64, '2'*32
