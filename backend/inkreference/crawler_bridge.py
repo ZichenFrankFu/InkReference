@@ -78,10 +78,49 @@ def _completion(db, book):
     return marked, 'manual' if marked else 'default'
 
 
+def _crawler_workspace_config() -> Path:
+    """Match InkCrawler's platformdirs user_config_path(..., roaming=True)."""
+    if sys.platform == 'win32':
+        return Path(os.environ.get('APPDATA') or Path.home() / 'AppData' / 'Roaming') / 'InkTools' / 'InkCrawler-Control' / 'workspace.json'
+    if sys.platform == 'darwin':
+        return Path.home() / 'Library' / 'Application Support' / 'InkCrawler-Control' / 'workspace.json'
+    return Path(os.environ.get('XDG_CONFIG_HOME') or Path.home() / '.config') / 'InkCrawler-Control' / 'workspace.json'
+
+
+def _configured_crawler_dir() -> Path | None:
+    config = _crawler_workspace_config()
+    try:
+        if config.is_symlink():
+            raise ValueError('configuration is a symbolic link')
+        with config.open('rb') as stream:
+            content = stream.read(16 * 1024 + 1)
+        if len(content) > 16 * 1024:
+            raise ValueError('configuration too large')
+        data = json.loads(content)
+        if (not isinstance(data, dict) or type(data.get('version')) is not int or data['version'] != 1
+                or not isinstance(data.get('data_dir'), str) or not data['data_dir']
+                or len(data['data_dir']) > 4096):
+            raise ValueError('invalid configuration')
+        directory = Path(data['data_dir']).expanduser()
+        if not directory.is_absolute():
+            raise ValueError('relative directory')
+        directory = directory.resolve()
+        if not directory.is_dir():
+            raise ValueError('missing directory')
+        return directory
+    except FileNotFoundError:
+        return None
+    except (OSError, UnicodeError, ValueError, TypeError, RecursionError):
+        raise DataError(409, 'InkCrawler 工作区配置无效或目录不可用，请检查 InkCrawler 设置') from None
+
+
 def default_crawler_dir() -> Path:
     configured = os.environ.get("INKCRAWLER_DATA_DIR")
     if configured:
         return Path(configured).expanduser().resolve()
+    configured = _configured_crawler_dir()
+    if configured is not None:
+        return configured
     if sys.platform == "win32":
         return Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local"))) / "InkTools" / "InkCrawler"
     if sys.platform == "darwin":

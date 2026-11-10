@@ -3,12 +3,14 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 import json
+import os
 import sqlite3
 import threading
 
 import pytest
 
 from inkreference.crawler_bridge import CrawlerBridge
+from inkreference import crawler_bridge
 from inkreference.database import DataError, DataStore
 from inkreference.documents import DocumentStore
 from inkreference.projects import ProjectStore
@@ -75,6 +77,56 @@ def test_status_configuration_and_backup_owned_settings(tmp_path):
         src.backup(dest)
     with sqlite3.connect(tmp_path / 'restored.sqlite3') as db:
         assert db.execute("SELECT value FROM crawler_source_settings WHERE key='data_dir'").fetchone()[0] == str(source.resolve())
+
+
+def test_default_workspace_tracks_crawler_configuration_but_respects_overrides(tmp_path, monkeypatch):
+    config = tmp_path / 'config' / 'workspace.json'
+    config.parent.mkdir()
+    first, second, explicit, env_dir = (tmp_path / name for name in ('first', 'second', 'explicit', 'env'))
+    for directory in (first, second, explicit, env_dir):
+        workspace(directory)
+    monkeypatch.setattr(crawler_bridge, '_crawler_workspace_config', lambda: config)
+    monkeypatch.delenv('INKCRAWLER_DATA_DIR', raising=False)
+    config.write_text(json.dumps({'version': 1, 'data_dir': str(first)}), encoding='utf-8')
+    bridge = CrawlerBridge(tmp_path / 'reference')
+    assert bridge.source() == first.resolve()
+    config.write_text(json.dumps({'version': 1, 'data_dir': str(second), 'migration_id': 'a' * 32}), encoding='utf-8')
+    assert bridge.source() == second.resolve()
+    monkeypatch.setenv('INKCRAWLER_DATA_DIR', str(env_dir))
+    assert bridge.source() == env_dir.resolve()
+    bridge.configure(str(explicit))
+    assert bridge.source() == explicit.resolve()
+    config.write_text('corrupt', encoding='utf-8')
+    assert bridge.source() == explicit.resolve()
+
+
+@pytest.mark.parametrize('content', [
+    'not json', '{}', '{"version":true,"data_dir":"/tmp"}',
+    '{"version":1,"data_dir":"relative/path"}',
+    '{"version":1,"data_dir":"/this-inkcrawler-workspace-does-not-exist"}',
+    ' ' * (16 * 1024 + 1),
+])
+def test_invalid_crawler_workspace_does_not_silently_open_old_data(tmp_path, monkeypatch, content):
+    config = tmp_path / 'workspace.json'
+    config.write_text(content, encoding='utf-8')
+    monkeypatch.setattr(crawler_bridge, '_crawler_workspace_config', lambda: config)
+    monkeypatch.delenv('INKCRAWLER_DATA_DIR', raising=False)
+    with pytest.raises(DataError, match='工作区配置'):
+        CrawlerBridge(tmp_path / 'reference').source()
+
+
+def test_no_crawler_configuration_uses_legacy_platform_default(tmp_path, monkeypatch):
+    monkeypatch.setattr(crawler_bridge, '_crawler_workspace_config', lambda: tmp_path / 'missing.json')
+    monkeypatch.delenv('INKCRAWLER_DATA_DIR', raising=False)
+    monkeypatch.setenv('XDG_DATA_HOME', str(tmp_path / 'data'))
+    if os.name != 'nt' and crawler_bridge.sys.platform != 'darwin':
+        assert crawler_bridge.default_crawler_dir() == tmp_path / 'data' / 'InkCrawler'
+
+
+def test_crawler_configuration_location_uses_separate_control_directory(tmp_path, monkeypatch):
+    if os.name != 'nt' and crawler_bridge.sys.platform != 'darwin':
+        monkeypatch.setenv('XDG_CONFIG_HOME', str(tmp_path))
+        assert crawler_bridge._crawler_workspace_config() == tmp_path / 'InkCrawler-Control' / 'workspace.json'
 
 
 def test_snapshot_does_not_modify_source_and_idempotency_includes_workspace_and_title(tmp_path):
