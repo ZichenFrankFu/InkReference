@@ -17,6 +17,7 @@ import {
 import { download } from "./api";
 import Conversions from "./Conversions";
 import ChapterWorkbench from "./ChapterWorkbench";
+import CrawlerShared from "./CrawlerShared";
 import { VolumePanel, SourceFiles } from "./VolumePanel";
 import { isRemoteModel, modelEndpoint } from "./model-security";
 import {
@@ -51,6 +52,7 @@ export default function Documents({ navigate, onJob }: Props) {
   const [view, setView] = useState("documents");
   const [items, setItems] = useState<DocumentMeta[]>([]);
   const [selected, setSelected] = useState<DocumentMeta | null>(null);
+  const [crawlerOrigin, setCrawlerOrigin] = useState<{ kind: string; author: string; data_dir: string } | null>(null);
   const [version, setVersion] = useState<TextVersion | null>(null);
   const [tab, setTab] = useState("chapters");
   const [loading, setLoading] = useState(true);
@@ -101,6 +103,13 @@ export default function Documents({ navigate, onJob }: Props) {
     window.addEventListener("inkreference:documents-refresh", refresh);
     return () => window.removeEventListener("inkreference:documents-refresh", refresh);
   }, [load]);
+  useEffect(() => {
+    let active = true;
+    setCrawlerOrigin(null);
+    if (selected?.id) void studio<{ kind: string; author: string; data_dir: string } | null>(`/crawler/documents/${encodeURIComponent(selected.id)}/origin`)
+      .then((origin) => { if (active) setCrawlerOrigin(origin); }).catch(() => { if (active) setCrawlerOrigin(null); });
+    return () => { active = false; };
+  }, [selected?.id]);
   useEffect(() => {
     const beforeUnload = (event: BeforeUnloadEvent) => {
       if (cleanDirtyRef.current) event.preventDefault();
@@ -322,6 +331,9 @@ export default function Documents({ navigate, onJob }: Props) {
           <RefreshCw size={16} />
           格式转换
         </button>
+        <button className={view === "crawler" ? "active" : ""} onClick={() => setView("crawler")}>
+          <Server size={16} /> InkCrawler
+        </button>
       </div>
       {view === "conversions" ? (
         <Conversions
@@ -331,6 +343,8 @@ export default function Documents({ navigate, onJob }: Props) {
             void choose(id);
           }}
         />
+      ) : view === "crawler" ? (
+        <CrawlerShared onOpen={(doc) => { setView("documents"); void load(); void choose(doc.id); }} />
       ) : (
         <>
           <Notice error={!!error} success={!error && !!message}>
@@ -412,6 +426,7 @@ export default function Documents({ navigate, onJob }: Props) {
                       </span>
                       <h2>{selected.title}</h2>
                       <span className="helper">{selected.filename}</span>
+                      {crawlerOrigin && <div className="helper">InkCrawler {crawlerOrigin.kind === 'ranking' ? '榜单章节' : '正文作品'}快照{crawlerOrigin.author ? ` · ${crawlerOrigin.author}` : ''}</div>}
                     </div>
                     <div className="inline-actions">
                       <button

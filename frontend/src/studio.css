@@ -4894,3 +4894,15 @@ button:disabled { opacity: .46; }
 .source-file code { color: #a2b3cc; }
 .source-file > .button { background: #fff; color: #6a8ec1; border: 1px solid #e0e8f6; border-radius: 8px; text-decoration: none; font-size: 12px; }
 .source-file > .button:hover { background: #f5f8ff; border-color: #c3d6f6; color: #386fca; }
+
+.crawler-shared { padding: 22px; }
+.crawler-source-row { display: flex; align-items: end; gap: 12px; }
+.crawler-source-row label { flex: 1; display: grid; gap: 7px; color: #617692; }
+.crawler-source-row input { width: 100%; min-width: 0; }
+.crawler-shared > p, .crawler-shared-list p { color: #73849b; line-height: 1.6; }
+.crawler-shared-list article { display: flex; align-items: center; justify-content: space-between; gap: 15px; padding: 15px 4px; border-bottom: 1px solid #e8eef6; }
+.crawler-shared-list article div { display: grid; gap: 5px; min-width: 0; }
+.crawler-shared-list small { color: #7c8fa9; }
+.crawler-shared-list code { overflow-wrap: anywhere; color: #71839e; }
+.crawler-shared-pages { display: flex; align-items: center; justify-content: center; gap: 15px; padding: 20px 0 4px; }
+@media (max-width: 640px) { .crawler-source-row { align-items: stretch; flex-direction: column; } .crawler-shared-list article { align-items: flex-start; flex-wrap: wrap; } }

@@ -20,6 +20,12 @@ from .skills import SkillStore
 from .workflow_definitions import WorkflowStore
 from .volumes import VolumeStore, detect_volumes, parse_volume_paste
 from .reference_analysis import ReferenceAnalysisStore
+from .crawler_bridge import CrawlerBridge
+
+
+class CrawlerSource(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    data_dir: str = Field(min_length=1, max_length=4096)
 
 
 class NewVersion(BaseModel):
@@ -197,6 +203,49 @@ def _file_response(raw: bytes, filename: str, media_type: str) -> Response:
 
 def install_studio_routes(application, runtime):
     router = APIRouter(prefix="/api/studio", tags=["studio"])
+    crawler = CrawlerBridge(runtime.data_dir)
+
+    @router.get("/crawler/status")
+    def crawler_status():
+        return crawler.status()
+
+    @router.put("/crawler/source")
+    def crawler_source(body: CrawlerSource):
+        return crawler.configure(body.data_dir)
+
+    @router.get("/crawler/books")
+    def crawler_books(limit: Annotated[int, Query(ge=1, le=100)] = 50,
+                      offset: Annotated[int, Query(ge=0)] = 0):
+        return {"items": crawler.books(limit=limit, offset=offset)}
+
+    @router.get("/crawler/rankings")
+    def crawler_rankings(limit: Annotated[int, Query(ge=1, le=100)] = 50,
+                         offset: Annotated[int, Query(ge=0)] = 0):
+        return {"items": crawler.rankings(limit=limit, offset=offset)}
+
+    @router.get("/crawler/rankings/{ident}")
+    def crawler_ranking(ident: str, limit: Annotated[int, Query(ge=1, le=100)] = 50,
+                        offset: Annotated[int, Query(ge=0)] = 0):
+        return crawler.ranking(ident, limit=limit, offset=offset)
+
+    @router.get("/crawler/models")
+    def crawler_models(limit: Annotated[int, Query(ge=1, le=100)] = 50,
+                       offset: Annotated[int, Query(ge=0)] = 0):
+        return {"items": crawler.models(limit=limit, offset=offset)}
+
+    @router.post("/crawler/books/{ident}/open", status_code=201)
+    def open_crawler_book(ident: str):
+        with runtime.studio.lock:
+            return crawler.snapshot_book(ident, runtime.studio.documents)
+
+    @router.post("/crawler/rankings/{snapshot_id}/works/{work_id}/open", status_code=201)
+    def open_crawler_ranking_work(snapshot_id: str, work_id: str):
+        with runtime.studio.lock:
+            return crawler.snapshot_ranking_work(snapshot_id, work_id, runtime.studio.documents)
+
+    @router.get("/crawler/documents/{document_id}/origin")
+    def crawler_document_origin(document_id: str):
+        return crawler.snapshot_origin(document_id, runtime.studio.documents)
 
     @router.get("/documents")
     def documents():
