@@ -49,14 +49,20 @@ def test_materialization_commits_relationships_and_exact_evidence_once(services)
     assert store.stats() == {"works": 1, "characters": 1, "cliches": 1, "work_cliches": 1}
     work = store.get_record("works", result["work_id"])
     assert work["values"]["作品"] == "合成样本"
-    assert work["values"]["两句话概括"] == run["results"]["summary"]
-    assert "发现钥匙：林舟在门前发现铜钥匙。" in work["values"]["剧情补充说明"]
+    assert work["values"]["剧情梗概"] == run["results"]["summary"]
+    assert "剧情补充说明" not in work["values"]
+    assert documents.get_document(run["document_id"])["work_id"] == result["work_id"]
     character = store.get_record("characters", result["character_ids"][0])
-    assert character["values"]["作品ID"] == result["work_id"]
-    assert character["values"]["角色"] == "林舟"
+    assert json.loads(character["values"]["关联作品"])[0]["作品ID"] == result["work_id"]
+    assert character["values"]["角色名"] == "林舟"
+    with store.connect() as db:
+        archived=json.loads(db.execute("SELECT values_json FROM catalog_field_archive WHERE record_id=? AND source_schema='legacy-extraction'",(character["id"],)).fetchone()[0])
+    assert archived == run["results"]["characters"][0]
     cliche = store.get_record("cliches", result["cliche_ids"][0])
-    assert result["cliche_ids"][0] in work["values"]["典型桥段（剧透）"]
-    assert "合成样本" in cliche["values"]["出现作品"]
+    assert result["cliche_ids"][0] in work["values"]["关联cliché"]
+    association = json.loads(cliche["values"]["关联作品"])[0]
+    assert association == {"作品ID": result["work_id"], "作品名": "合成样本", "关联内容": run["results"]["cliches"][0]["description"]}
+    assert "版本与原作关系" not in work["values"]
     with store.connect() as connection:
         ledger = connection.execute("SELECT * FROM analysis_commits WHERE run_id=?", (run["id"],)).fetchone()
         assert json.loads(ledger["result_json"]) == result
@@ -102,6 +108,26 @@ def test_linked_work_and_existing_human_character_fields_survive(services):
     assert library_snapshot(store) == before
 
 
+def test_modern_link_preserves_manual_work_and_distinct_character_ids(services):
+    store, documents, materializer = services
+    manual = store.create_record("works", {"作品ID": "CURRENT-WORK", "作品": "人工书名", "两句话概括": "人工简介", "热度权重": "7"})
+    person = store.create_record("characters", {"人物ID": "CURRENT-PERSON", "角色": "林舟", "性格": "人工事实", "关联作品": json.dumps([{"作品ID": manual["id"]}])})
+    run = analysis(documents, work_id=manual["id"])
+    result = materializer(run)
+    after = store.get_record("works", manual["id"])
+    assert after["values"]["两句话概括"] == "人工简介"
+    assert after["values"]["热度权重"] == "7"
+    assert store.get_record("characters", person["id"])["values"] == person["values"]
+    assert person["id"] not in result["character_ids"]
+    extracted = store.get_record("characters", result["character_ids"][0])
+    assert json.loads(extracted["values"]["关联作品"])[0]["作品ID"] == manual["id"]
+    assert len(store.relations("works", manual["id"])["characters"]) == 2
+    assert "剧情补充说明" not in after["values"]
+    store.update_record("works", manual["id"], {"作品": "更正书名"}, after["revision"])
+    association = json.loads(store.get_record("cliches", result["cliche_ids"][0])["values"]["关联作品"])[0]
+    assert association["作品名"] == "更正书名" and "作品" not in association
+
+
 def test_mid_commit_conflict_rolls_back_new_work_characters_relations_and_ledger(services):
     store, documents, materializer = services
     run = analysis(documents, run_id="rollback-synthetic-run")
@@ -114,6 +140,7 @@ def test_mid_commit_conflict_rolls_back_new_work_characters_relations_and_ledger
         materializer(run)
     assert caught.value.status_code == 409
     assert library_snapshot(store) == before
+    assert documents.get_document(run["document_id"])["work_id"] is None
     assert store.stats() == {"works": 0, "characters": 0, "cliches": 1, "work_cliches": 0}
     # The failed attempt remains retryable once the collision is resolved.
     collision = store.get_record("cliches", collision_id)

@@ -25,14 +25,17 @@ fulltexts/
 full_texts/
 cleaned/
 text_versions/
+books/
 exports/
 backups/
+quick-repairs/
 restored_projects/
 *.bak
 *.backup
 *.backup.zip
 *-backup.zip
 backup-*.zip
+InkReference-repair*.json
 # Uploaded books and material CSVs accidentally copied to the checkout root.
 *.epub
 *.pdf
@@ -40,6 +43,9 @@ backup-*.zip
 *.srt
 *.txt
 *.csv
+*.xlsx
+*.xlsm
+*.xls
 !requirements*.txt
 !third_party/*LICENSE*.txt
 
@@ -117,6 +123,8 @@ test-results/
 # Frontend dependencies, caches and build products.
 node_modules/
 .vite/
+.repair-build-*/
+*.inkrepair-*
 *.tsbuildinfo
 build/
 dist/

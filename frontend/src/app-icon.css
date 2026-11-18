@@ -1,0 +1,13 @@
+.studio-app .sidebar .sidebar-brand-row .brand-mark {
+  width: 34px;
+  height: 34px;
+  border-radius: 8px;
+  background: none;
+  box-shadow: none;
+  flex: 0 0 34px;
+}
+.studio-app .sidebar .sidebar-brand-row .brand-mark > img {
+  display: block;
+  width: 34px;
+  height: 34px;
+}

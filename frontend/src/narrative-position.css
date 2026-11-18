@@ -1,0 +1,15 @@
+.narrative-input-field { display: grid; min-width: 0; gap: 7px; margin-bottom: 15px; }
+.narrative-input-label { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 22px; color: var(--muted); font-size: 11px; }
+.narrative-unit-switch { display: inline-flex; padding: 2px; border: 1px solid var(--line); background: var(--surface-raised); border-radius: 6px; }
+.narrative-unit-switch > button { border: 0; background: transparent; min-width: 26px; padding: 2px 5px; color: var(--muted); font-size: 10px; border-radius: 4px; }
+.narrative-unit-switch > button[aria-pressed="true"] { background: var(--paper); color: var(--accent); box-shadow: 0 1px 3px #1b37680d; }
+.narrative-input-control { display: flex; align-items: center; gap: 7px; border: 1px solid var(--line); border-radius: 8px; min-height: 38px; padding: 0 10px; background: var(--paper); }
+.narrative-input-control:focus-within { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+.narrative-input-control > span { font-size: 11px; color: var(--muted); white-space: nowrap; }
+.studio-app .narrative-input-control > input { flex: 1; min-width: 40px; width: 100%; min-height: 35px; padding: 5px 0!important; border: 0!important; background: transparent!important; box-shadow: none!important; outline: none; font-variant-numeric: tabular-nums; }
+.narrative-position { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; color: var(--muted); font-size: 11px; line-height: 1.6; margin-top: 8px; }
+.narrative-progress { color: var(--accent); background: var(--accent-soft); padding: 2px 6px; border-radius: 5px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.narrative-range-fields { margin: 12px 0 18px; }
+.narrative-range-fields > .ref-form-grid { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 14px; }
+.narrative-range-fields .studio-field { margin-top: 0; }
+@media (max-width: 460px) { .narrative-range-fields > .ref-form-grid { grid-template-columns: minmax(0,1fr); gap: 0; } }

@@ -3,7 +3,7 @@
 ## Scope
 - Windows/macOS local reference workbench: structured materials, immutable full-text versions, EPUB/PDF conversion, durable LangGraph extraction, Skills, model usage, desktop entry and portable backups.
 - Distinguish implemented capability from actual verification. Mocked providers, native PDF text extraction and OCR/model inference are separate evidence. Never claim a model ran when only rules or fixtures ran.
-- UI copy is concise Chinese. User data, full texts, databases, API keys, model weights and local logs stay outside git. Use synthetic fixtures in committed tests.
+- UI copy is concise Chinese. Do not add explanatory notes, slogans or instructions that restate an obvious action, such as “可直接编辑”, “直接编辑正文” or “让正文成为可用素材”. This applies to all future GUI work. Keep meaningful field labels, progress/state feedback and actionable validation/error messages. User data, full texts, databases, API keys, model weights and local logs stay outside git. Use synthetic fixtures in committed tests.
 
 ## Data integrity
 - Preserve external IDs, column names, multiline values, unknown values, date precision and distinct work editions. Never deduplicate by title.

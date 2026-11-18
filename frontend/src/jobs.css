@@ -1,0 +1,76 @@
+.tasks-page .extraction-queue { margin-bottom: 18px; padding: 0; overflow: hidden; }
+.extraction-queue-header { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 14px 18px; border-bottom: 1px solid var(--line, #e5eaf2); }
+.task-filters { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; }
+.task-filters button { display: flex; align-items: center; gap: 7px; border: 0; background: transparent; color: var(--muted); border-radius: 8px; padding: 7px 11px; font-size: 12px; }
+.task-filters button.active { color: #346ad8; background: #edf3ff; font-weight: 600; }
+.task-filters button span { font-size: 10px; opacity: .75; font-variant-numeric: tabular-nums; }
+.task-queue-list { max-height: min(410px, 46vh); overflow: auto; scrollbar-width: thin; }
+.task-queue-item { display: flex; align-items: center; gap: 16px; padding: 17px 20px; border-bottom: 1px solid var(--line, #edf0f5); transition: background .15s ease; }
+.task-queue-item:last-child { border-bottom: 0; }
+.task-queue-item.selected { background: #f5f8ff; box-shadow: inset 3px 0 #447ce8; }
+.task-queue-select { display: flex; flex: 1; min-width: 0; gap: 14px; border: 0; padding: 0; text-align: left; color: inherit; background: transparent; }
+.task-queue-icon { flex: 0 0 39px; width: 39px; height: 44px; display: grid; place-items: center; border: 1px solid #dce6f8; background: #eef4ff; color: #6086c8; border-radius: 10px; }
+.task-queue-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 7px; }
+.task-queue-title { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; min-width: 0; }
+.task-queue-title strong { max-width: 100%; font-size: 13px; color: var(--text); font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.task-queue-meta { font-size: 10px; color: var(--muted); }
+.task-queue-main .task-progress { width: min(100%, 620px); margin: 0; }
+.task-queue-item.is-running .determinate, .ref-extraction.is-running .task-stage-grid .current .determinate { position: relative; overflow: hidden; }
+.task-queue-item.is-running .determinate::after, .ref-extraction.is-running .task-stage-grid .current .determinate::after { content: ""; position: absolute; inset: 0; border-radius: inherit; background: #4e87ee; animation: task-progress-breathe 1.8s ease-in-out infinite; pointer-events: none; }
+@keyframes task-progress-breathe { 0%,100% { opacity: .05; } 50% { opacity: .3; } }
+.task-queue-stages { display: flex; gap: 14px; flex-wrap: wrap; color: var(--muted); font-size: 10px; }
+.task-queue-stages > span { display: flex; gap: 7px; }
+.task-queue-stages b { font-size: 9px; font-weight: 500; font-variant-numeric: tabular-nums; opacity: .75; }
+.task-queue-stages .current { color: #3974e2; }
+.task-queue-stages .complete { color: #758fb8; }
+.task-controls { display: flex; flex: 0 0 auto; align-items: center; gap: 8px; }
+.studio-app .task-control { width: 34px; height: 34px; border-radius: 9px; border: 1px solid transparent; }
+.studio-app .task-control.pause { color: #c48a20; background: #fff6df; border-color: #f4e3bd; }
+.studio-app .task-control.resume { color: #3974df; background: #eaf2ff; border-color: #d8e5ff; }
+.studio-app .task-control.terminate { color: #d45361; background: #fff0f1; border-color: #f7dce0; }
+.studio-app .task-control:hover:not(:disabled) { filter: brightness(.96); transform: translateY(-1px); }
+.studio-app .task-control:disabled { opacity: .35; }
+.task-queue-empty { color: var(--muted); text-align: center; padding: 30px 20px; font-size: 12px; }
+.task-chunks-title { display: flex; align-items: center; justify-content: space-between; color: var(--muted); padding: 5px 9px 10px; font-size: 11px; }
+.task-chunks-title span { padding: 2px 6px; border-radius: 5px; background: #e7eef9; font-size: 10px; }
+[data-theme="dark"] .task-queue-item.selected { background: #172338; }
+[data-theme="dark"] .task-filters button.active, [data-theme="dark"] .task-queue-icon { background: #1a2b46; color: #8ab3fb; border-color: #293f60; }
+[data-theme="dark"] .task-control.pause { color: #e7bf6a; background: #342b1b; border-color: #4d3d21; }
+[data-theme="dark"] .task-control.resume { color: #8ab6ff; background: #1b2d49; border-color: #2c4264; }
+[data-theme="dark"] .task-control.terminate { color: #ef95a0; background: #381f2a; border-color: #51303b; }
+[data-theme="dark"] .task-chunks-title span { background: #20324c; }
+@media (max-width: 760px) { .task-queue-item { padding: 14px; gap: 10px; } .task-queue-icon { display: none; } .extraction-queue-header { padding: 12px; } .task-filters { gap: 2px; } .task-filters button { padding: 6px 8px; } .task-controls { gap: 5px; } .task-queue-stages { gap: 8px; } }
+@media (max-width: 480px) { .task-queue-item { align-items: flex-start; } .task-queue-item > .task-controls { flex-direction: column; } .task-queue-list { max-height: 360px; } .task-queue-stages { display: grid; grid-template-columns: repeat(2, auto); justify-content: start; } }
+@media (prefers-reduced-motion: reduce) { .task-queue-item { transition: none; } .studio-app .task-control:hover:not(:disabled) { transform: none; } .task-queue-item.is-running .determinate::after, .ref-extraction.is-running .task-stage-grid .current .determinate::after { animation: none; opacity: .12; } }
+.extraction-scope-picker { border-top: 1px solid var(--line); padding-top: 16px; margin-top: 15px; }
+.extraction-range-list { margin-top: 12px; display: grid; gap: 10px; }
+.extraction-range-list > div { display: grid; grid-template-columns: minmax(0,1fr) 12px minmax(0,1fr) 30px; align-items: end; gap: 8px; }
+.extraction-range-list .studio-field { margin: 0; min-width: 0; }
+.extraction-range-list select { width: 100%; min-width: 0; }
+.extraction-range-list > div > span { padding-bottom: 9px; color: var(--muted); }
+.extraction-reuse-toggle { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); margin: 14px 0 0; }
+.extraction-comparison { border: 1px solid var(--line); border-radius: 12px; margin-bottom: 20px; overflow: hidden; }
+.extraction-comparison > header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 13px 16px; background: var(--surface-raised); }
+.extraction-comparison h3 { display: flex; align-items: center; gap: 8px; font-size: 13px; margin: 0; color: var(--text); }
+.extraction-comparison > header > div { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.extraction-comparison > header select { max-width: 230px; min-width: 0; font-size: 11px; padding: 7px; border: 1px solid var(--line); border-radius: 6px; color: var(--text); background: var(--paper); }
+.compare-section-tabs { padding: 12px 14px; border-block: 1px solid var(--line); flex-wrap: wrap; }
+.comparison-columns { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); }
+.comparison-columns > article { min-width: 0; padding: 16px; border-right: 1px solid var(--line); }
+.comparison-columns > article:nth-child(even) { border-right: 0; }
+.comparison-columns > article.chosen { box-shadow: inset 0 3px var(--accent); }
+.comparison-columns > article > header { display: flex; align-items: start; gap: 10px; margin-bottom: 14px; }
+.comparison-letter { width: 29px; height: 29px; flex: 0 0 29px; display: grid; place-items: center; border-radius: 7px; background: var(--accent-soft); color: var(--accent); font-size: 12px; font-weight: 700; }
+.comparison-columns header > div:not(.task-controls) { display: flex; min-width: 0; flex: 1; gap: 7px; flex-wrap: wrap; align-items: center; }
+.comparison-columns header strong { max-width: 100%; color: var(--text); font-size: 12px; overflow-wrap: anywhere; }
+.comparison-columns header small { width: 100%; color: var(--muted); font-size: 10px; }
+.comparison-result { min-height: 200px; max-height: 600px; overflow: auto; scrollbar-width: thin; margin: 15px -3px; padding: 0 3px; }
+.comparison-columns footer { border-top: 1px solid var(--line); padding-top: 12px; }
+.comparison-columns footer .button { width: 100%; justify-content: center; }
+.extraction-scope-summary { display: flex; flex-wrap: wrap; gap: 7px; padding: 0 0 12px; font-size: 11px; color: var(--muted); }
+.extraction-scope-summary > span { padding: 4px 7px; background: var(--accent-soft); color: var(--accent); border-radius: 6px; }
+.extraction-scope-history { border: 1px solid var(--line); border-radius: 8px; margin-bottom: 14px; padding: 10px 12px; font-size: 11px; color: var(--muted); }
+.extraction-scope-history summary { cursor: pointer; }
+.extraction-scope-history article { display: flex; align-items: center; flex-wrap: wrap; gap: 9px; padding-top: 10px; }
+@media(max-width: 1000px) { .comparison-columns { grid-template-columns: minmax(0,1fr); } .comparison-columns > article { border-right: 0; border-bottom: 1px solid var(--line); } .comparison-result { max-height: 450px; } }
+@media(max-width: 520px) { .extraction-comparison > header { align-items: flex-start; flex-direction: column; } .extraction-comparison > header > div { width: 100%; } .extraction-comparison > header select { flex: 1; width: 0; max-width: none; } .comparison-columns > article { padding: 12px; } .extraction-range-list > div { grid-template-columns: minmax(0,1fr) 30px; } .extraction-range-list > div > span { display: none; } .extraction-range-list .studio-field:nth-of-type(2) { grid-row: 2; } .extraction-range-list .icon-button { grid-column: 2; grid-row: 1 / span 2; align-self: center; } }

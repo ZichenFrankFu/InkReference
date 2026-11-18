@@ -1,11 +1,15 @@
-import { useEffect, useId, useRef, useState, type ReactNode } from "react";
+import { useEffect, useId, useRef, type ReactNode } from "react";
 import {
   AlertCircle,
   CheckCircle2,
-  ChevronRight,
   LoaderCircle,
+  Menu,
+  Wrench,
   X,
 } from "lucide-react";
+import { openQuickRepair } from "./diagnostics";
+import { ActivityRail, PageActivityScope, useActivity, usePageNavigation } from "./activity";
+export { ActivityRail, PageActivityScope, PageNavigationScope } from "./activity";
 export const messageOf = (e: unknown) =>
   e instanceof Error ? e.message : "操作未完成，请重试。";
 export function Busy({
@@ -19,29 +23,17 @@ export function Busy({
   inline?: boolean;
   delay?: number;
 }) {
-  const [visible, setVisible] = useState(delay === 0);
-  useEffect(() => {
-    if (delay === 0) {
-      setVisible(true);
-      return;
-    }
-    const timer = window.setTimeout(() => setVisible(true), delay);
-    return () => window.clearTimeout(timer);
-  }, [delay]);
+  const { visible, scoped } = useActivity(label, true, delay);
+  if (scoped) return null;
   return (
     <div
-      className={`busy-state ${compact ? "compact" : ""} ${inline ? "busy-inline" : "busy-floating"} ${visible ? "busy-visible" : "busy-pending"}`}
+      className={`busy-state busy-inline ${compact ? "compact" : ""} ${inline ? "" : "busy-local"} ${visible ? "busy-visible" : "busy-pending"}`}
       role="status"
       aria-live="polite"
       aria-atomic="true"
     >
-      <span>
-        <LoaderCircle className="spin" size={16} />
-        {label}
-      </span>
-      <div className="indeterminate" role="progressbar" aria-label={label}>
-        <i />
-      </div>
+      <span>{label}</span>
+      <ActivityRail active={visible} label={label} />
     </div>
   );
 }
@@ -110,9 +102,11 @@ export function Modal({
   working.current = busy;
   useEffect(() => {
     const prev = document.activeElement as HTMLElement;
-    ref.current?.focus();
+    const topModal = () => [...document.querySelectorAll<HTMLElement>('[role="dialog"][aria-modal="true"]')].filter(element => !element.closest('[hidden],[aria-hidden="true"],[inert]') && element.getClientRects().length > 0).at(-1);
+    if (topModal() === ref.current) ref.current?.focus();
     const handle = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && !working.current) close.current();
+      if (topModal() !== ref.current) return;
+      if (e.key === "Escape") { e.stopPropagation(); if (!working.current) close.current(); }
       if (e.key !== "Tab") return;
       const els = [
         ...(ref.current?.querySelectorAll<HTMLElement>(
@@ -144,10 +138,16 @@ export function Modal({
     document.addEventListener("keydown", handle);
     return () => {
       document.removeEventListener("keydown", handle);
-      prev?.focus();
+      queueMicrotask(() => {
+        const top = topModal();
+        const target = prev?.isConnected && !prev.closest('[hidden],[aria-hidden="true"],[inert]') && !prev.matches(":disabled") && (!top || top.contains(prev))
+          ? prev : top || document.getElementById("workspace-content");
+        target?.focus({ preventScroll: true });
+      });
     };
   }, []);
   return (
+    <PageActivityScope modal>
     <div
       className="modal-backdrop"
       onMouseDown={(e) => {
@@ -173,10 +173,16 @@ export function Modal({
             <X size={20} />
           </button>
         </header>
+        <ModalActivity busy={busy} title={title} />
         {children}
       </div>
     </div>
+    </PageActivityScope>
   );
+}
+function ModalActivity({ busy, title }: { busy: boolean; title: string }) {
+  useActivity(`正在处理${title}`, busy);
+  return <ActivityRail className="modal-title-progress" />;
 }
 export function Notice({
   children,
@@ -195,6 +201,11 @@ export function Notice({
     >
       {success ? <CheckCircle2 size={17} /> : <AlertCircle size={17} />}
       <div>{children}</div>
+      {error && (
+        <button className="notice-repair" onClick={openQuickRepair} type="button">
+          <Wrench size={14} />快捷修复
+        </button>
+      )}
     </div>
   );
 }
@@ -221,22 +232,25 @@ export function Empty({
   );
 }
 export function PageTitle({
-  kicker,
   title,
   action,
 }: {
-  kicker: string;
+  kicker?: string;
   title: string;
   description?: string;
   action?: ReactNode;
 }) {
+  const navigation = usePageNavigation();
   return (
-    <header className="studio-heading">
-      <div>
-        <span className="eyebrow">{kicker}</span>
-        <h1>{title}</h1>
+    <header className="studio-heading page-title">
+      <div className="page-title-row">
+        <div className="page-title-copy">
+          {navigation && <button className="icon-button page-menu" onClick={navigation.openMenu} aria-label="打开导航" aria-expanded={navigation.menuOpen} aria-controls="app-navigation"><Menu size={20} /></button>}
+          <h1>{title}</h1>
+        </div>
+        {(action || navigation?.returnAction) && <div className="page-title-actions">{navigation?.returnAction}{action}</div>}
       </div>
-      {action}
+      <ActivityRail className="page-title-progress" />
     </header>
   );
 }
@@ -247,6 +261,8 @@ export function Status({ value }: { value: string }) {
     paused: "已暂停",
     failed: "运行失败",
     cancelled: "已取消",
+    terminated: "已终止",
+    cancelling: "正在暂停",
     needs_review: "待审核",
     approved: "已入库",
     completed: "已完成",
@@ -277,6 +293,7 @@ export function SelectField({
       <span>{label}</span>
       <select
         id={id}
+        aria-label={label}
         value={value}
         onChange={(e) => onChange(e.target.value)}
         disabled={disabled}
@@ -303,35 +320,6 @@ export function Metric({
         <small>{unit}</small>
       </strong>
     </div>
-  );
-}
-export function Rows({ children }: { children: ReactNode }) {
-  return <div className="resource-rows">{children}</div>;
-}
-export function ResourceRow({
-  title,
-  subtitle,
-  active,
-  onClick,
-  extra,
-}: {
-  title: string;
-  subtitle?: string;
-  active?: boolean;
-  onClick: () => void;
-  extra?: ReactNode;
-}) {
-  return (
-    <button
-      className={`resource-row ${active ? "active" : ""}`}
-      onClick={onClick}
-    >
-      <span>
-        <strong>{title}</strong>
-        {subtitle && <small>{subtitle}</small>}
-      </span>
-      {extra || <ChevronRight size={16} />}
-    </button>
   );
 }
 export const dateLabel = (date?: string) =>

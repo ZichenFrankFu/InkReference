@@ -22,6 +22,7 @@ OutputBaseFilename=InkReference-Setup-{#AppVersion}
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
+SetupIconFile=..\backend\inkreference\assets\icon.ico
 UninstallDisplayIcon={app}\InkReference.exe
 
 [Languages]
@@ -31,7 +32,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Source: "{#AppSource}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{autoprograms}\InkReference"; Filename: "{app}\InkReference.exe"; WorkingDir: "{app}"
+Name: "{autoprograms}\InkReference"; Filename: "{app}\InkReference.exe"; WorkingDir: "{app}"; AppUserModelID: "com.inkreference.desktop"
 
 [Run]
 Filename: "{app}\InkReference.exe"; Description: "Launch InkReference"; Flags: nowait postinstall skipifsilent

@@ -1,13 +1,14 @@
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import {
   Activity, Check, CheckCircle2, ChevronDown, Cloud, Cpu, Eye, EyeOff,
-  Globe, LockKeyhole, Plus, RefreshCw, Save, Server,
+  Globe, LockKeyhole, Plus, RefreshCw, Save, Server, Download, ChevronLeft, ChevronRight,
   ShieldCheck, SlidersHorizontal, Trash2, Wallet, Zap,
 } from "lucide-react";
 import { studio, send, normalizeList, type ModelProfile, type List } from "./studio";
 import { isLoopbackEndpoint, isRemoteModel, modelEndpoint } from "./model-security";
 import { Busy, Empty, Metric, Modal, Notice, PageTitle, SelectField, dateLabel, messageOf } from "./ui";
 import "./model-settings.css";
+import EmbeddingDownloads from "./EmbeddingDownloads";
 
 const tokenSource = (value: string | undefined) =>
   ({ actual: "实测", estimated: "估算", unknown: "未知", mixed: "混合" })[value || "unknown"] || value;
@@ -105,6 +106,7 @@ type UsageSummary = {
 
 export default function Models() {
   const [tab, setTab] = useState("models");
+  const [showDownloads, setShowDownloads] = useState(false);
   const [items, setItems] = useState<ModelProfile[]>([]);
   const [security, setSecurity] = useState<Security | null>(null);
   const [draft, setDraft] = useState<ModelProfile | null>(null);
@@ -113,6 +115,11 @@ export default function Models() {
   const [usage, setUsage] = useState<Usage[]>([]);
   const [summary, setSummary] = useState<UsageSummary | null>(null);
   const [runId, setRunId] = useState("");
+  const [usageCursor, setUsageCursor] = useState<string | null>(null);
+  const [usageNextCursor, setUsageNextCursor] = useState<string | null>(null);
+  const [usagePrevious, setUsagePrevious] = useState<(string | null)[]>([]);
+  const [usageFilter, setUsageFilter] = useState("");
+  const usageRequest = useRef(0);
   const [busy, setBusy] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -126,6 +133,18 @@ export default function Models() {
   const fieldPrefix = useId();
   const editorRef = useRef<HTMLHeadingElement>(null);
   const dirty = !!draft && profileValue(draft) !== baseline;
+  useEffect(() => {
+    const open = () => {
+      if (!sessionStorage.getItem("inkreference.embedding-task-focus")) return;
+      if (dirty) { setError("请先保存或取消模型修改"); return; }
+      sessionStorage.removeItem("inkreference.embedding-task-focus");
+      setShowDownloads(true);
+    };
+    open();
+    window.addEventListener("inkreference:embedding-task-focus", open);
+    window.addEventListener("inkreference:models-refresh", open);
+    return () => { window.removeEventListener("inkreference:embedding-task-focus", open); window.removeEventListener("inkreference:models-refresh", open); };
+  }, [dirty]);
   const saved = items.find((p) => p.id === draft?.id);
   const sameEndpoint = !!saved && !!draft && saved.provider === draft.provider &&
     saved.connection_mode === draft.connection_mode && saved.base_url.replace(/\/$/, "") === draft.base_url.replace(/\/$/, "");
@@ -143,13 +162,19 @@ export default function Models() {
     } catch (e) { setError(messageOf(e)); }
     finally { setLoading(false); }
   }, []);
-  const loadUsage = useCallback(async () => {
+  const loadUsage = useCallback(async (cursor: string | null = null, filter = runId, history: (string | null)[] = []) => {
+    const request = ++usageRequest.current;
     setBusy("usage"); setError("");
     try {
-      const result = await studio<{ items: Usage[]; summary: UsageSummary }>(`/usage${runId ? `?run_id=${encodeURIComponent(runId)}` : ""}`);
-      setUsage(result.items); setSummary(result.summary);
-    } catch (e) { setError(messageOf(e)); }
-    finally { setBusy(""); }
+      const query = new URLSearchParams({ limit: "50" });
+      if (filter) query.set("run_id", filter);
+      if (cursor) query.set("cursor", cursor);
+      const result = await studio<{ items: Usage[]; summary: UsageSummary; next_cursor: string | null }>(`/usage?${query}`);
+      if (request !== usageRequest.current) return;
+      setUsage(result.items); setSummary(result.summary); setUsageNextCursor(result.next_cursor);
+      setUsageCursor(cursor); setUsageFilter(filter); setUsagePrevious(history);
+    } catch (e) { if (request === usageRequest.current) setError(messageOf(e)); }
+    finally { if (request === usageRequest.current) setBusy(""); }
   }, [runId]);
   useEffect(() => { void load(); }, [load]);
   useEffect(() => {
@@ -266,19 +291,20 @@ export default function Models() {
   return (
     <main className="studio-main model-settings-page">
       <PageTitle kicker="MODEL SETTINGS" title="模型设置" action={
-        <button className="button primary" disabled={!!busy} onClick={() => create()}><Plus size={17} />添加模型</button>
+        <div className="model-header-actions"><button className="button secondary" disabled={!!busy} onClick={() => guarded(() => setShowDownloads(true))}><Download size={17} />下载向量模型</button><button className="button primary" disabled={!!busy} onClick={() => create()}><Plus size={17} />添加模型</button></div>
       } />
       <div className="page-tabs" aria-label="模型设置分类">
         <button className={tab === "models" ? "active" : ""} disabled={!!busy} onClick={() => setTab("models")}><Server size={16} />连接配置<span>{items.length}</span></button>
         <button className={tab === "usage" ? "active" : ""} disabled={!!busy} onClick={() => setTab("usage")}><Activity size={16} />调用与用量</button>
       </div>
+      {showDownloads && <EmbeddingDownloads profiles={items} onClose={() => setShowDownloads(false)} onRegistered={profile => { notifyChanged(); void load(); setShowDownloads(false); activate(cleanProfile(profile)); }} />}
       <Notice error={!!error} success={!error && !!message}>{error || message}</Notice>
       {tab === "models" ? (
         <div className="connection-layout">
           <aside className="connection-sidebar" aria-label="已保存的模型">
             <div className="connection-sidebar-heading"><h2>我的模型 <span>{items.length}</span></h2><button className="icon-button" aria-label="刷新模型配置" disabled={!!busy || loading} onClick={() => void load()}><RefreshCw size={15} /></button></div>
             {loading ? <Busy label="正在读取模型配置" /> : !items.length ? (
-              <p className="connection-sidebar-empty">还没有连接，选择右侧的模型来源开始。</p>
+              <p className="connection-sidebar-empty">暂无模型</p>
             ) : items.map((p) => (
               <button className={`connection-card ${!isNew && draft?.id === p.id ? "active" : ""}`} disabled={!!busy} key={p.id}
                 aria-pressed={!isNew && draft?.id === p.id} onClick={() => guarded(() => activate(cleanProfile(p)))}>
@@ -289,13 +315,12 @@ export default function Models() {
                 {!isNew && draft?.id === p.id && <Check size={16} className="connection-selected" />}
               </button>
             ))}
-            <button className="connection-add" disabled={!!busy} onClick={() => create()}><Plus size={16} />新建连接</button>
           </aside>
           <section className="surface connection-editor">
             {!draft ? (
               <div className="connection-welcome">
                 <span className="connection-welcome-icon"><Zap size={29} /></span>
-                <h2>连接你的模型</h2><p>选择模型来源，填写地址与模型，即可开始分析。</p>
+                <h2>添加模型</h2>
                 <div className="connection-start-options">
                   <button onClick={() => create("local")} disabled={loading}><Cpu size={26} /><strong>本地模型</strong><span>Ollama · LM Studio · vLLM</span><ChevronDown size={17} /></button>
                   <button onClick={() => create("remote")} disabled={loading}><Cloud size={26} /><strong>商业 API</strong><span>OpenAI · DeepSeek · 通义千问</span><ChevronDown size={17} /></button>
@@ -423,7 +448,6 @@ export default function Models() {
               <Empty
                 icon={Activity}
                 title="还没有模型调用"
-                description="运行分析或测试连接后，用量会记录在这里。"
               />
             ) : (
               <div className="usage-scroll">
@@ -496,6 +520,13 @@ export default function Models() {
                 </table>
               </div>
             )}
+            <div className="usage-pagination">
+              <span>{summary?.calls ? `${usagePrevious.length * 50 + (usage.length ? 1 : 0)}–${usagePrevious.length * 50 + usage.length} / ${number(summary.calls)}` : "0"}</span>
+              <div className="inline-actions">
+                <button className="button secondary" disabled={!!busy || !usagePrevious.length} onClick={() => { const previous = usagePrevious.at(-1) ?? null; void loadUsage(previous, usageFilter, usagePrevious.slice(0, -1)); }}><ChevronLeft size={15} />上一页</button>
+                <button className="button secondary" disabled={!!busy || !usageNextCursor} onClick={() => { if (!usageNextCursor) return; void loadUsage(usageNextCursor, usageFilter, [...usagePrevious, usageCursor]); }}>下一页<ChevronRight size={15} /></button>
+              </div>
+            </div>
           </div>
         </section>
       )}

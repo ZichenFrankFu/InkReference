@@ -200,14 +200,14 @@ def test_export_archives_and_migration_reopen(populated):
         commit_import(restored, batch)
         assert restored.stats() == populated.stats()
     with zipfile.ZipFile(io.BytesIO(export_zip(populated, "full"))) as archive:
-        assert set(archive.namelist()) == {"works.csv", "characters.csv", "cliches.csv", "work_cliches.csv", "manifest.json"}
+        assert set(archive.namelist()) == {"works.csv", "characters.csv", "cliches.csv", "work_cliches.csv", "material_relations.csv", "manifest.json"}
         assert json.loads(archive.read("manifest.json"))["stats"] == populated.stats()
         assert len(rows_from_bytes(archive.read("work_cliches.csv"))) == 3
     reopened = DataStore(populated.db_path)
     assert reopened.stats() == populated.stats()
     with sqlite3.connect(populated.db_path) as connection:
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
-        assert connection.execute("SELECT version FROM schema_migrations").fetchall() == [(1,), (2,)]
+        assert connection.execute("SELECT version FROM schema_migrations").fetchall() == [(1,), (2,), (3,), (4,), (5,), (6,), (7,)]
 
 
 def test_filter_search_and_relations_respect_editions(populated):

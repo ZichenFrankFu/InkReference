@@ -87,6 +87,8 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - run: npm ci
       - run: npm run typecheck
+      - name: Verify chapter Unicode and line-ending preservation
+        run: node scripts/verify-chapter-text.mjs
       - run: npm run build
 
   native-pdf:

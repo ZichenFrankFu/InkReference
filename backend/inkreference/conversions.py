@@ -23,9 +23,10 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 from .database import DataError
+from .diagnostics import background_target, logged_operation, record_exception
 from .documents import MAX_UPLOAD_BYTES, _BookHTML, epub_spine_sections
 
 TERMINAL = {"completed", "failed", "cancelled", "interrupted"}
@@ -114,8 +115,8 @@ def markdown_to_text(markdown: str) -> str:
 def _options(value: dict[str, Any] | None) -> dict[str, Any]:
     if value is None:
         value = {}
-    if not isinstance(value, dict) or set(value) - {"tier", "ocr_mode", "title", "work_id"}:
-        raise DataError(422, "转换选项仅支持 tier、ocr_mode、title、work_id")
+    if not isinstance(value, dict) or set(value) - {"tier", "ocr_mode", "title", "work_id", "mode", "target_document_id", "base_version_id"}:
+        raise DataError(422, "转换选项仅支持 tier、ocr_mode、title、work_id、mode、target_document_id、base_version_id")
     result = {"tier": "flash", "ocr_mode": "txt", "title": "", "work_id": None, **value}
     if (not isinstance(result["tier"], str) or not isinstance(result["ocr_mode"], str)
             or result["tier"] not in {"flash", "standard"} or result["ocr_mode"] not in {"txt", "ocr"}):
@@ -129,6 +130,15 @@ def _options(value: dict[str, Any] | None) -> dict[str, Any]:
         raise DataError(422, "title 必须是不超过 500 字的字符串")
     if result["work_id"] is not None and (not isinstance(result["work_id"], str) or len(result["work_id"]) > 500):
         raise DataError(422, "work_id 必须为作品 ID 字符串")
+    if result.get("mode", "new") not in {"new", "replace", "append"}:
+        raise DataError(422, "上传方式请选择 new、replace 或 append")
+    for key in ("target_document_id", "base_version_id"):
+        if result.get(key) is not None and (not isinstance(result[key], str) or not 1 <= len(result[key]) <= 200):
+            raise DataError(422, "目标文档和版本 ID 无效")
+    if result.get("mode", "new") != "new" and (not result.get("target_document_id") or not result.get("base_version_id")):
+        raise DataError(422, "更新或补充需要目标文档及其当前版本")
+    if result.get("mode", "new") == "new" and (result.get("target_document_id") or result.get("base_version_id")):
+        raise DataError(422, "新建全文不能同时指定更新目标")
     return result
 
 
@@ -155,6 +165,10 @@ class ConversionStore:
                     progress REAL, completed INTEGER NOT NULL DEFAULT 0, total INTEGER,
                     error TEXT, markdown TEXT, plain_text TEXT, imported_document_id TEXT,
                     attempt INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS conv_imports (
+                    job_id TEXT PRIMARY KEY REFERENCES conv_jobs(id),
+                    target_json TEXT NOT NULL, version_id TEXT
                 );
                 CREATE TABLE IF NOT EXISTS conv_errors (
                     id INTEGER PRIMARY KEY AUTOINCREMENT, job_id TEXT NOT NULL,
@@ -254,7 +268,7 @@ class ConversionStore:
                     raise DataError(409, "此任务不能直接启动；失败、中断或取消后请重试")
                 connection.execute("UPDATE conv_jobs SET status='running',stage='preparing',progress=NULL,attempt=attempt+1,updated_at=? WHERE id=?", (_now(), identifier))
             self._cancellations[identifier] = threading.Event()
-            thread = threading.Thread(target=self._run, args=(identifier,), daemon=True, name=f"conversion-{identifier[:8]}")
+            thread = threading.Thread(target=background_target(self._run), args=(identifier,), daemon=True, name=f"conversion-{identifier[:8]}")
             self._threads[identifier] = thread
             thread.start()
         return self.get(identifier)
@@ -275,6 +289,7 @@ class ConversionStore:
             connection.execute("UPDATE conv_jobs SET " + ",".join(f"{key}=?" for key in fields)
                                + " WHERE id=? AND status='running'", (*fields.values(), identifier))
 
+    @logged_operation("conversion", "convert_task", task_arg="identifier")
     def _run(self, identifier: str) -> None:
         try:
             with self._connection() as connection:
@@ -315,6 +330,7 @@ class ConversionStore:
         except Exception as error:
             if self._closed:
                 return
+            record_exception("conversion", "convert_task", error, task_id=identifier)
             detail = str(error.detail) if isinstance(error, DataError) else f"{type(error).__name__}：{error}"
             detail = detail[:6000]
             with self._connection() as connection:
@@ -438,6 +454,10 @@ class ConversionStore:
                 raise DataError(409, "该输出尚未生成")
             return value
 
+    def active_threads(self) -> list[threading.Thread]:
+        with self._lock:
+            return [thread for thread in self._threads.values() if thread.is_alive()]
+
     def shutdown(self, timeout: float = 2.5) -> None:
         """Signal every task first, then reap within one global time budget.
 
@@ -513,18 +533,66 @@ class ConversionStore:
                 raise DataError(422, "原文件哈希校验失败")
             return raw, row["filename"]
 
-    def import_to_document(self, identifier: str, documents) -> dict[str, Any]:
+    def import_to_document(self, identifier: str, documents, *, target_document_id: str | None = None,
+                           base_version_id: str | None = None, mode: str | None = None,
+                           progress: Callable[[str, int, int], None] | None = None, normalize_layout: bool = False,
+                           book_metadata: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Commit converted TXT to a fixed target, preserving its binary origin.
+
+        A durable target binding plus document ingestion key closes both crash
+        windows: before the document commit and before linking its conversion.
+        """
         with self._lock:
             meta = self.get(identifier)
             if meta["status"] != "completed":
                 raise DataError(409, "转换完成后才能导入全文库")
-            if meta["imported_document_id"]:
-                return documents.get_document(meta["imported_document_id"])
-            plain = self.get_output(identifier, "text")
-            document = documents.upload(Path(meta["filename"]).stem + ".txt", plain.encode("utf-8"),
-                                        encoding="utf-8", title=meta["options"]["title"] or Path(meta["filename"]).stem,
-                                        work_id=meta["options"]["work_id"], idempotency_key=f"conv:{identifier}")
+            selected_mode = mode if mode is not None else meta["options"].get("mode", "new")
+            if book_metadata:
+                from .chapter_storage import validate_metadata
+                if selected_mode != "new":
+                    raise DataError(422, "只有新建正文可以同时写入作品元数据")
+                try:
+                    book_metadata = validate_metadata(book_metadata)
+                except ValueError as exc:
+                    raise DataError(422, str(exc)) from exc
+            target_id = target_document_id if target_document_id is not None else meta["options"].get("target_document_id")
+            base_id = base_version_id if base_version_id is not None else meta["options"].get("base_version_id")
+            _options({"mode": selected_mode, "target_document_id": target_id, "base_version_id": base_id})
+            target = _json({"mode": selected_mode, "target_document_id": target_id, "base_version_id": base_id,
+                            **({"normalize_layout": True} if normalize_layout else {}),
+                            **({"book_metadata": book_metadata} if book_metadata else {})})
+            with self._connection() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                binding = connection.execute("SELECT * FROM conv_imports WHERE job_id=?", (identifier,)).fetchone()
+                if binding is not None and binding["target_json"] != target:
+                    raise DataError(409, "该转换已绑定另一导入目标，请重新上传文件")
+                if binding is None:
+                    # Validate ownership/revision before pinning an import target.
+                    if target_id:
+                        document = documents.get_document(target_id)
+                        documents.get_version(target_id, base_id)
+                        if document["latest_version_id"] != base_id:
+                            raise DataError(409, "全文已有新版本，请刷新后重新选择更新或补充")
+                    connection.execute("INSERT INTO conv_imports(job_id,target_json) VALUES (?,?)", (identifier, target))
+            key = f"conv:{identifier}"
+            committed = documents.ingestion_result(key)
+            if committed is None:
+                plain = self.get_output(identifier, "text")
+                raw, filename = self.get_original(identifier)
+                if selected_mode == "new":
+                    document = documents.upload(filename, raw, encoding="utf-8",
+                                                title=meta["options"]["title"] or Path(filename).stem,
+                                                work_id=meta["options"]["work_id"], idempotency_key=key,
+                                                converted_text=plain, preserve_text=True, progress=progress, normalize_layout=normalize_layout,
+                                                book_metadata=book_metadata)
+                    committed = documents.ingestion_result(key)
+                else:
+                    writer = documents.replace if selected_mode == "replace" else documents.append
+                    version = writer(target_id, base_id, filename, raw, encoding="utf-8", idempotency_key=key,
+                                     converted_text=plain, preserve_text=True, progress=progress, normalize_layout=normalize_layout)
+                    committed = {"document_id": target_id, "version_id": version["id"]}
             with self._connection() as connection:
                 connection.execute("UPDATE conv_jobs SET imported_document_id=?,updated_at=? WHERE id=?",
-                                   (document["id"], _now(), identifier))
-            return document
+                                   (committed["document_id"], _now(), identifier))
+                connection.execute("UPDATE conv_imports SET version_id=? WHERE job_id=?", (committed["version_id"], identifier))
+            return {**documents.get_document(committed["document_id"]), "imported_version_id": committed["version_id"]}

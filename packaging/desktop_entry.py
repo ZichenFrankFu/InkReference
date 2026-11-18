@@ -12,14 +12,15 @@ def _ensure_streams(argv: list[str]) -> None:
     if sys.stdout is not None and sys.stderr is not None:
         return
     configured = os.environ.get("INKREFERENCE_DATA_DIR")
-    if "--data-dir" in argv:
-        index = argv.index("--data-dir") + 1
-        if index < len(argv):
-            configured = argv[index]
+    for index, argument in enumerate(argv):
+        if argument.startswith("--data-dir="):
+            configured = argument.split("=", 1)[1]
+        elif argument == "--data-dir" and index + 1 < len(argv):
+            configured = argv[index + 1]
     from inkreference.desktop import default_log_dir
+    from inkreference.bootstrap_logging import BootstrapLogStream
     log_dir = default_log_dir(configured)
-    log_dir.mkdir(parents=True, exist_ok=True)
-    stream = (log_dir / "desktop.log").open("a", encoding="utf-8", buffering=1)
+    stream = BootstrapLogStream(log_dir)
     if sys.stdout is None:
         sys.stdout = stream
     if sys.stderr is None:

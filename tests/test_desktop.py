@@ -16,6 +16,11 @@ import pytest
 from inkreference import desktop
 
 
+@pytest.fixture(autouse=True)
+def isolated_desktop_logs(monkeypatch, tmp_path):
+    monkeypatch.setenv("INKREFERENCE_DATA_DIR", str(tmp_path))
+
+
 class Event:
     def __init__(self):
         self.handlers = []
@@ -116,6 +121,33 @@ def test_ready_window_loads_url_then_stops_server(desktop_fixture, monkeypatch):
     assert 'aria-valuetext="启动中"' in view.creation["html"]
     assert "aria-valuenow" not in view.creation["html"]
     assert view.start_options["gui"] == "edgechromium"
+    assert Path(view.start_options["icon"]).name == "icon.ico"
+
+
+def test_windows_identity_is_set_before_creating_the_native_window(desktop_fixture, monkeypatch):
+    order = []
+    original_create = desktop_fixture.create_window
+
+    def create(*args, **kwargs):
+        order.append("window")
+        return original_create(*args, **kwargs)
+
+    monkeypatch.setattr(desktop.sys, "platform", "win32")
+    monkeypatch.setattr(desktop, "set_windows_app_id", lambda: order.append("identity"))
+    monkeypatch.setattr(desktop_fixture, "create_window", create)
+    assert desktop.run_desktop(FakeServer(), object(), "http://127.0.0.1:8000") == 0
+    assert order == ["identity", "window"]
+
+
+def test_windows_grouping_failure_keeps_the_window_icon_and_startup(desktop_fixture, monkeypatch, caplog):
+    def failed_identity():
+        raise OSError("synthetic shell failure")
+
+    monkeypatch.setattr(desktop.sys, "platform", "win32")
+    monkeypatch.setattr(desktop, "set_windows_app_id", failed_identity)
+    assert desktop.run_desktop(FakeServer(), object(), "http://127.0.0.1:8000") == 0
+    assert Path(desktop_fixture.start_options["icon"]).name == "icon.ico"
+    assert "Windows 应用标识" in caplog.text
 
 
 def test_health_timeout_keeps_error_message_and_returns_failure(desktop_fixture, monkeypatch, capsys):
@@ -229,6 +261,7 @@ def test_macos_uses_native_cocoa_renderer_on_main_thread(desktop_fixture, monkey
     monkeypatch.setattr(desktop.sys, "platform", "darwin")
     assert desktop.run_desktop(FakeServer(), object(), "http://127.0.0.1:8000") == 0
     assert desktop_fixture.start_options["gui"] == "cocoa"
+    assert Path(desktop_fixture.start_options["icon"]).name == "icon.png"
     assert desktop_fixture.window.urls == ["http://127.0.0.1:8000"]
 
 
@@ -258,7 +291,7 @@ def test_default_data_and_log_paths_use_macos_locations_and_legacy_workspace(mon
     monkeypatch.delenv("INKREFERENCE_DATA_DIR", raising=False)
     monkeypatch.delenv("XDG_DATA_HOME", raising=False)
     assert default_data_dir() == tmp_path / "Library" / "Application Support" / "InkReference"
-    assert desktop.default_log_dir() == tmp_path / "Library" / "Logs" / "InkReference"
+    assert desktop.default_log_dir() == tmp_path / "Library" / "Application Support" / "InkReference" / "logs"
     legacy = tmp_path / ".local" / "share" / "InkReference"
     legacy.mkdir(parents=True)
     (legacy / "inkreference.sqlite3").write_bytes(b"invalid database")
@@ -269,6 +302,7 @@ def test_default_data_and_log_paths_use_macos_locations_and_legacy_workspace(mon
         with connection:
             connection.execute("CREATE TABLE fixture (id INTEGER)")
     assert default_data_dir() == legacy
+    assert desktop.default_log_dir() == legacy / "logs"
     override = tmp_path / "chosen workspace"
     monkeypatch.setenv("INKREFERENCE_DATA_DIR", str(override))
     assert default_data_dir() == override

@@ -20,15 +20,25 @@ DEFAULT_WORKFLOW = {
 }
 REFERENCE_WORKFLOW = {**copy.deepcopy(DEFAULT_WORKFLOW), "version": "1.1.0", "skill_version": "1.1.0",
                       "chunk_chars": 4000, "max_input_tokens": 16000, "max_output_tokens": 6000, "budget_tokens": 200000}
+FIXED_STAGES = ("plot", "characters", "settings", "language")
+FIXED_WORKFLOW = {**copy.deepcopy(REFERENCE_WORKFLOW), "version": "2.0.0", "skill_version": "2.0.0",
+                  "fixed_pipeline": True, "stage_prompts": {stage: "" for stage in FIXED_STAGES},
+                  "stage_settings": {}, "stage_skills": {}, "stage_models": {}, "reuse_candidates": True,
+                  "max_input_tokens": 64000, "budget_tokens": 800000}
+PROGRESS_WORKFLOW = {**copy.deepcopy(FIXED_WORKFLOW), "version": "3.0.0", "skill_version": "3.0.0",
+                     "chunk_chars": 100000, "max_input_tokens": 128000, "max_output_tokens": 12000}
+ADAPTIVE_WORKFLOW = {**copy.deepcopy(PROGRESS_WORKFLOW), "version": "4.0.0", "skill_version": "4.0.0",
+                     "chunk_chars": 400000, "max_input_tokens": 1000000, "max_output_tokens": 16000}
 
 
 def validate_workflow(definition: Any) -> dict[str, Any]:
     if not isinstance(definition, dict):
         raise DataError(422, "工作流定义必须是对象")
-    allowed = set(DEFAULT_WORKFLOW) | {"builtin"}
+    fixed = definition.get("fixed_pipeline") is True
+    allowed = set(FIXED_WORKFLOW if fixed else DEFAULT_WORKFLOW) | {"builtin"}
     if set(definition) - allowed:
         raise DataError(422, "工作流定义包含未知字段；画布 layout 应单独保存")
-    result = copy.deepcopy(DEFAULT_WORKFLOW)
+    result = copy.deepcopy(FIXED_WORKFLOW if fixed else DEFAULT_WORKFLOW)
     result.update({key: copy.deepcopy(value) for key, value in definition.items() if key != "builtin"})
     for key in ("id", "skill_id"):
         validate_key(result[key], key)
@@ -41,9 +51,35 @@ def validate_workflow(definition: Any) -> dict[str, Any]:
         raise DataError(422, "nodes 必须包含 summary、characters、events、cliches 四个布尔开关")
     if not any(result["nodes"].values()):
         raise DataError(422, "至少启用一个提取节点")
+    if fixed:
+        if type(result["reuse_candidates"]) is not bool:
+            raise DataError(422, "reuse_candidates 必须为布尔值")
+        if result["nodes"] != DEFAULT_WORKFLOW["nodes"]:
+            raise DataError(422, "固定流程不能关闭阶段或更改输出字段")
+        for field in ("stage_prompts", "stage_settings", "stage_skills", "stage_models"):
+            if not isinstance(result[field], dict) or set(result[field]) - set(FIXED_STAGES):
+                raise DataError(422, f"{field} 只接受固定的四个分析阶段")
+        for stage, prompt in result["stage_prompts"].items():
+            if not isinstance(prompt, str) or len(prompt) > MAX_PROMPT_CHARS:
+                raise DataError(422, f"{stage} 提取要求格式无效或过长")
+        for stage, settings in result["stage_settings"].items():
+            if not isinstance(settings, dict) or set(settings) - {"max_output_tokens", "budget_tokens"}:
+                raise DataError(422, f"{stage} 只允许设置输出上限和 token 预算")
+            for key, value in settings.items():
+                maximum = 128000 if key == "max_output_tokens" else 100000000
+                minimum = 64 if key == "max_output_tokens" else 1
+                if type(value) is not int or not minimum <= value <= maximum:
+                    raise DataError(422, f"{stage}.{key} 必须为 {minimum}–{maximum} 的整数")
+        for stage, selection in result["stage_skills"].items():
+            if not isinstance(selection, dict) or set(selection) != {"id", "version"}:
+                raise DataError(422, f"{stage} Skill 需要 id 与 version")
+            validate_key(selection["id"], "Skill ID")
+            validate_key(selection["version"], "Skill version", version=True)
+        for stage, profile_id in result["stage_models"].items():
+            validate_key(profile_id, f"{stage} 模型配置 ID")
     if not isinstance(result["custom_prompt"], str) or len(result["custom_prompt"]) > MAX_PROMPT_CHARS:
         raise DataError(422, "自定义提示词过长或格式无效")
-    limits = {"chunk_chars": (100, 100000), "retry_limit": (0, 8),
+    limits = {"chunk_chars": (100, 1000000), "retry_limit": (0, 8),
               "max_input_tokens": (128, 2000000), "max_output_tokens": (64, 128000),
               "budget_tokens": (1, 100000000)}
     for key, (minimum, maximum) in limits.items():
@@ -55,12 +91,24 @@ def validate_workflow(definition: Any) -> dict[str, Any]:
 
 class WorkflowStore(_VersionedDefinitions):
     def __init__(self, data_dir: str | Path):
-        super().__init__(data_dir, "workflow_definitions.sqlite3", validate_workflow(REFERENCE_WORKFLOW))
+        super().__init__(data_dir, "workflow_definitions.sqlite3", validate_workflow(ADAPTIVE_WORKFLOW))
         with self._db() as connection:
             connection.execute("CREATE TABLE IF NOT EXISTS layouts (workflow_id TEXT NOT NULL, workflow_version TEXT NOT NULL, revision INTEGER NOT NULL, layout_json TEXT NOT NULL, PRIMARY KEY(workflow_id,workflow_version))")
 
     def save(self, definition: dict[str, Any]) -> dict[str, Any]:
         """Save a new immutable version. retry_limit is *additional* attempts."""
+        if isinstance(definition, dict) and (definition.get("id"), definition.get("version")) == (PROGRESS_WORKFLOW["id"], PROGRESS_WORKFLOW["version"]):
+            if _dump(validate_workflow(definition)) != _dump(PROGRESS_WORKFLOW):
+                raise DataError(409, "内建版本不可修改；请使用新 ID 或新 version")
+            return self.get(PROGRESS_WORKFLOW["id"], PROGRESS_WORKFLOW["version"])
+        if isinstance(definition, dict) and (definition.get("id"), definition.get("version")) == (FIXED_WORKFLOW["id"], FIXED_WORKFLOW["version"]):
+            if _dump(validate_workflow(definition)) != _dump(FIXED_WORKFLOW):
+                raise DataError(409, "内建版本不可修改；请使用新 ID 或新 version")
+            return self.get(FIXED_WORKFLOW["id"], FIXED_WORKFLOW["version"])
+        if isinstance(definition, dict) and (definition.get("id"), definition.get("version")) == (REFERENCE_WORKFLOW["id"], REFERENCE_WORKFLOW["version"]):
+            if _dump(validate_workflow(definition)) != _dump(REFERENCE_WORKFLOW):
+                raise DataError(409, "内建版本不可修改；请使用新 ID 或新 version")
+            return self.get(REFERENCE_WORKFLOW["id"], REFERENCE_WORKFLOW["version"])
         if isinstance(definition, dict) and (definition.get("id"), definition.get("version")) == (DEFAULT_WORKFLOW["id"], DEFAULT_WORKFLOW["version"]):
             valid = validate_workflow(definition)
             if _dump(valid) != _dump(DEFAULT_WORKFLOW):
@@ -69,6 +117,12 @@ class WorkflowStore(_VersionedDefinitions):
         return self._save_validated(validate_workflow(definition))
 
     def get(self, identifier: str | None = None, version: str | None = None) -> dict[str, Any]:
+        if identifier == PROGRESS_WORKFLOW["id"] and version == PROGRESS_WORKFLOW["version"]:
+            return copy.deepcopy(PROGRESS_WORKFLOW) | {"builtin": True}
+        if identifier == FIXED_WORKFLOW["id"] and version == FIXED_WORKFLOW["version"]:
+            return copy.deepcopy(FIXED_WORKFLOW) | {"builtin": True}
+        if identifier == REFERENCE_WORKFLOW["id"] and version == REFERENCE_WORKFLOW["version"]:
+            return copy.deepcopy(REFERENCE_WORKFLOW) | {"builtin": True}
         if identifier == DEFAULT_WORKFLOW["id"] and version == DEFAULT_WORKFLOW["version"]:
             return copy.deepcopy(DEFAULT_WORKFLOW) | {"builtin": True}
         return super().get(identifier, version)
@@ -82,7 +136,9 @@ class WorkflowStore(_VersionedDefinitions):
                 "layout": json.loads(row["layout_json"]) if row else {"nodes": [], "edges": []}}
 
     def save_layout(self, identifier: str, version: str, layout: dict[str, Any], expected_revision: int | None = None) -> dict[str, Any]:
-        self.get(identifier, version)
+        definition = self.get(identifier, version)
+        if definition.get("fixed_pipeline"):
+            raise DataError(422, "固定流程不支持修改节点连接")
         if not isinstance(layout, dict):
             raise DataError(422, "layout 必须是 JSON 对象")
         rendered = _dump(layout)

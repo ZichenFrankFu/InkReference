@@ -86,6 +86,8 @@ def pyinstaller_command(root: Path, output: Path, system: str, arch: str) -> lis
         "--specpath", str(root / "build" / "pyinstaller-spec"),
         "--paths", str(root / "backend"),
         "--add-data", str(root / "frontend" / "dist") + ":frontend/dist",
+        "--add-data", str(root / "backend" / "inkreference" / "assets") + ":inkreference/assets",
+        "--icon", str(root / "backend" / "inkreference" / "assets" / ("icon.ico" if system == "win32" else "icon.icns")),
     ]
     collect = ["inkreference", "webview", "keyring", "langgraph", "langgraph.checkpoint.sqlite"]
     hidden = [
@@ -126,6 +128,7 @@ def update_macos_plist(bundle: Path, version: str) -> None:
         "CFBundleIdentifier": BUNDLE_IDENTIFIER,
         "CFBundleName": "InkReference",
         "CFBundleDisplayName": "InkReference",
+        "CFBundleIconFile": "icon.icns",
         "CFBundleShortVersionString": version,
         "CFBundleVersion": version,
         "NSHighResolutionCapable": True,
@@ -160,6 +163,8 @@ def package_windows(root: Path, output: Path, version: str, arch: str, installer
         raise RuntimeError("PyInstaller did not produce InkReference.exe.")
     if not (app / "_internal" / "frontend" / "dist" / "index.html").is_file():
         raise RuntimeError("The bundled frontend is missing.")
+    if not (app / "_internal" / "inkreference" / "assets" / "icon.ico").is_file():
+        raise RuntimeError("The bundled Windows window icon is missing.")
     copy_notices(root, app)
     archive = output / f"InkReference-windows-{arch}.zip"
     with progress("Creating the portable ZIP..."):
@@ -183,6 +188,9 @@ def package_macos(root: Path, output: Path, version: str, arch: str, dmg: bool) 
     resources = bundle / "Contents" / "Resources"
     if not (resources / "frontend" / "dist" / "index.html").is_file():
         raise RuntimeError("The bundled frontend is missing.")
+    if not (resources / "inkreference" / "assets" / "icon.png").is_file():
+        raise RuntimeError("The bundled macOS application icon is missing.")
+    shutil.copy2(root / "backend" / "inkreference" / "assets" / "icon.icns", resources / "icon.icns")
     copy_notices(root, resources)
     update_macos_plist(bundle, version)
     # Changes to Resources/Info.plist happen before the final bundle signature.

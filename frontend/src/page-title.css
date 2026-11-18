@@ -1,0 +1,28 @@
+.studio-app .studio-heading.page-title {
+  flex: 0 0 auto;
+  min-height: 45px;
+  gap: 5px;
+  margin: 0 0 12px;
+}
+.studio-app .studio-heading.page-title .page-title-row {
+  min-height: 36px;
+  align-items: center;
+  gap: 14px;
+}
+.studio-app .studio-heading.page-title .page-title-copy { gap: 10px; }
+.studio-app .studio-heading.page-title .page-title-copy > h1 {
+  margin: 0;
+  color: var(--text);
+  font-family: "Segoe UI Variable Text", -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei UI", sans-serif;
+  font-size: 24px;
+  font-weight: 620;
+  line-height: 1.35;
+  letter-spacing: -.45px;
+}
+.studio-app .studio-heading.page-title .page-title-actions { gap: 8px; }
+.studio-app .studio-heading.page-title .page-title-progress { height: 3px; min-height: 3px; }
+@media(max-width:740px) {
+  .studio-app .studio-heading.page-title { min-height: 40px; margin-bottom: 9px; }
+  .studio-app .studio-heading.page-title .page-title-row { gap: 8px; min-height: 32px; }
+  .studio-app .studio-heading.page-title .page-title-copy > h1 { font-size: 21px; letter-spacing: -.25px; }
+}

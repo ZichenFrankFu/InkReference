@@ -9,6 +9,7 @@ HTTPX supplies transport, timeouts and mock injection.
 from __future__ import annotations
 
 import hashlib
+import base64
 import ipaddress
 import json
 import math
@@ -28,6 +29,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from .database import DataError
+from .diagnostics import logged_operation, record_exception
 from .local_security import target_fingerprint
 from .credentials import CredentialVault
 
@@ -400,12 +402,14 @@ class ModelService:
         with self._connect() as connection:
             connection.execute("INSERT INTO usage_calls VALUES (?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET record_json=excluded.record_json", (record["id"], record["run_id"], record["profile_id"], record["started_at"], _json(record)))
 
+    @logged_operation("models", "invoke", task_arg="run_id", lifecycle=False)
     def invoke(self, profile_id: str, messages: list[dict[str, str]], *, run_id: str, chunk_id: str, attempt: int = 1, options: dict[str, Any] | None = None, profile_snapshot: dict[str, Any] | None = None) -> dict[str, Any]:
         config = _validate_profile(profile_snapshot) if profile_snapshot is not None else _validate_profile(self._config(profile_id))
         if config["id"] != profile_id:
             raise DataError(422, "模型快照与配置 ID 不一致")
         return self._invoke_config(config, messages, key=self._key(profile_id, config), run_id=run_id, chunk_id=chunk_id, attempt=attempt, options=options)
 
+    @logged_operation("models", "generate", task_arg="run_id", lifecycle=False)
     def _invoke_config(self, config: dict[str, Any], messages: list[dict[str, str]], *, key: str | None, run_id: str, chunk_id: str, attempt: int = 1, options: dict[str, Any] | None = None, connection_test: bool = False) -> dict[str, Any]:
         messages = _validate_messages(messages)
         profile_id = config["id"]
@@ -453,6 +457,7 @@ class ModelService:
             if not 200 <= response.status_code < 300:
                 record["error"] = f"http_{response.status_code}"
                 failure = DataError(502, f"模型服务返回 HTTP {response.status_code}，请检查模型名称、服务地址、密钥及服务日志")
+                record_exception("models", "request", failure, task_id=run_id, stage="response", status=f"provider_http_{response.status_code}", http_status=response.status_code)
             else:
                 try:
                     data = response.json()
@@ -493,16 +498,20 @@ class ModelService:
                     record["cost"] = _cost(config, record["usage"])
                     record["status"] = "success"
                     result = {"content": content, "usage": record["usage"], "cost": record["cost"], "call_id": record["id"], "finish_reason": finish, "model": config["model"]}
-                except (ValueError, TypeError, KeyError, IndexError, AttributeError):
+                except (ValueError, TypeError, KeyError, IndexError, AttributeError) as error:
+                    record_exception("models", "parse_response", error, task_id=run_id, stage="response")
                     record["error"] = "invalid_response"
                     failure = DataError(502, "模型响应格式无效；已记录本次请求，无法确认的输出用量保持未知")
-        except httpx.TimeoutException:
+        except httpx.TimeoutException as error:
+            record_exception("models", "request", error, task_id=run_id, stage="timeout")
             record["error"] = "timeout"
             failure = DataError(504, "模型请求超时；服务可能已处理该请求，输出用量未知，请查看用量记录后重试")
-        except httpx.HTTPError:
+        except httpx.HTTPError as error:
+            record_exception("models", "request", error, task_id=run_id, stage="transport")
             record["error"] = "transport_error"
             failure = DataError(502, "无法连接模型服务，请检查服务地址及服务运行状态")
-        except Exception:
+        except Exception as error:
+            record_exception("models", "request", error, task_id=run_id, stage="request")
             # Transport exceptions can embed Authorization or URLs. Never return
             # their raw message, traceback, response body or request headers.
             record["error"] = "request_error"
@@ -642,29 +651,60 @@ class ModelService:
             rows = connection.execute("SELECT record_json FROM usage_calls" + (" WHERE run_id=?" if run_id is not None else "") + " ORDER BY started_at,id", (run_id,) if run_id is not None else ()).fetchall()
         return [json.loads(row["record_json"]) for row in rows]
 
+    def list_usage_page(self, run_id: str | None = None, *, limit: int = 50, cursor: str | None = None) -> dict[str, Any]:
+        """Newest-first keyset page; a cursor is bound to its exact run filter."""
+        if type(limit) is not int or not 1 <= limit <= 200:
+            raise DataError(422, "调用明细每页需为 1–200 条")
+        clauses, parameters = [], []
+        if run_id is not None:
+            clauses.append("run_id=?")
+            parameters.append(run_id)
+        if cursor is not None:
+            try:
+                if not isinstance(cursor, str) or not 1 <= len(cursor) <= 4096:
+                    raise ValueError()
+                decoded = json.loads(base64.b64decode(cursor.encode("ascii"), altchars=b"-_", validate=True))
+                if not isinstance(decoded, list) or len(decoded) != 3 or decoded[2] != run_id or any(not isinstance(item, str) or not 1 <= len(item) <= 1000 for item in decoded[:2]):
+                    raise ValueError()
+            except (ValueError, TypeError, UnicodeError, RecursionError):
+                raise DataError(422, "调用明细分页标记无效，请重新查询") from None
+            clauses.append("(started_at,id)<(?,?)")
+            parameters.extend(decoded[:2])
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        with self._connect() as connection:
+            rows = connection.execute("SELECT id,started_at,record_json FROM usage_calls" + where + " ORDER BY started_at DESC,id DESC LIMIT ?", (*parameters, limit + 1)).fetchall()
+        page = rows[:limit]
+        next_cursor = None
+        if len(rows) > limit:
+            last = page[-1]
+            next_cursor = base64.urlsafe_b64encode(_json([last["started_at"], last["id"], run_id]).encode()).decode()
+        return {"items": [json.loads(row["record_json"]) for row in page], "next_cursor": next_cursor, "limit": limit}
+
     def usage_summary(self, run_id: str | None = None) -> dict[str, Any]:
-        records = self.list_usage(run_id)
-        summary: dict[str, Any] = {
-            "calls": len(records), "successful_calls": 0, "failed_calls": 0, "pending_calls": 0,
-            "actual_input_tokens": 0, "actual_output_tokens": 0,
-            "estimated_input_tokens": 0, "estimated_output_tokens": 0,
-            "unknown_input_calls": 0, "unknown_output_calls": 0,
-            "costs": [], "unpriced_calls": 0,
-        }
-        costs: dict[str, Decimal] = {}
-        for record in records:
-            summary[{"success": "successful_calls", "error": "failed_calls", "pending": "pending_calls"}[record["status"]]] += 1
-            for direction in ("input", "output"):
-                source = record["usage"][f"{direction}_source"]
-                count = record["usage"][f"{direction}_tokens"]
-                if source in {"actual", "estimated"} and count is not None:
-                    summary[f"{source}_{direction}_tokens"] += count
-                else:
-                    summary[f"unknown_{direction}_calls"] += 1
-            cost = record["cost"]
-            if cost["amount"] is None:
-                summary["unpriced_calls"] += 1
-            else:
-                costs[cost["currency"]] = costs.get(cost["currency"], Decimal(0)) + Decimal(str(cost["amount"]))
-        summary["costs"] = [{"currency": currency, "amount": float(amount), "source": "estimated"} for currency, amount in sorted(costs.items())]
+        # Aggregate in SQLite, retaining constant Python memory as the audit
+        # ledger grows. Decimal aggregation preserves the prior money semantics.
+        class DecimalTotal:
+            def __init__(self): self.total = Decimal(0)
+            def step(self, value):
+                if value is not None: self.total += Decimal(str(value))
+            def finalize(self): return str(self.total)
+
+        fields = ["COUNT(*) AS calls"]
+        for status, label in (("success", "successful_calls"), ("error", "failed_calls"), ("pending", "pending_calls")):
+            fields.append(f"COALESCE(SUM(json_extract(record_json,'$.status')='{status}'),0) AS {label}")
+        for direction in ("input", "output"):
+            source = f"json_extract(record_json,'$.usage.{direction}_source')"
+            count = f"json_extract(record_json,'$.usage.{direction}_tokens')"
+            for kind in ("actual", "estimated"):
+                fields.append(f"COALESCE(SUM(CASE WHEN {source}='{kind}' THEN {count} ELSE 0 END),0) AS {kind}_{direction}_tokens")
+            fields.append(f"COALESCE(SUM(CASE WHEN {source} IN ('actual','estimated') AND {count} IS NOT NULL THEN 0 ELSE 1 END),0) AS unknown_{direction}_calls")
+        fields.append("COALESCE(SUM(json_extract(record_json,'$.cost.amount') IS NULL),0) AS unpriced_calls")
+        where = " WHERE run_id=?" if run_id is not None else ""
+        parameters = (run_id,) if run_id is not None else ()
+        with self._connect() as connection:
+            connection.create_aggregate("decimal_total", 1, DecimalTotal)
+            connection.execute("BEGIN")
+            summary = dict(connection.execute("SELECT " + ",".join(fields) + " FROM usage_calls" + where, parameters).fetchone())
+            costs = connection.execute("SELECT json_extract(record_json,'$.cost.currency') AS currency,decimal_total(json_extract(record_json,'$.cost.amount')) AS amount FROM usage_calls" + where + (" AND " if where else " WHERE ") + "json_extract(record_json,'$.cost.amount') IS NOT NULL GROUP BY currency ORDER BY currency", parameters).fetchall()
+        summary["costs"] = [{"currency": row["currency"], "amount": float(Decimal(row["amount"])), "source": "estimated"} for row in costs]
         return summary
