@@ -183,6 +183,8 @@ def create_app(data_dir: str | Path | None = None, static_dir: str | Path | None
                     conversions = runtime._studio._conversions
                     if conversions is not None:
                         await run_in_threadpool(conversions.shutdown)
+                    if runtime._studio._chronicle is not None:
+                        await run_in_threadpool(runtime._studio.chronicle.shutdown)
                     if runtime._studio._runner is not None:
                         await run_in_threadpool(runtime._studio.runner.shutdown)
                     if runtime._studio._research is not None:

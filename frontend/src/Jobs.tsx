@@ -878,6 +878,9 @@ export default function Jobs({initialId,navigate}:Props) {
     if(target.section==="documents"){
       window.dispatchEvent(new CustomEvent("inkreference:navigate",{detail:{section:"documents",documentId,versionId:target.version_id||task.version_id,tab:task.kind==="volume_research"||task.operation==="volumes"?"volumes":"metadata",taskKind:task.kind,taskId:task.id,...(target.prepared_id?{prepared_id:target.prepared_id,operation:target.operation}: {})}}));return;
     }
+    if(task.kind==="chronicle"){
+      window.dispatchEvent(new CustomEvent("inkreference:navigate",{detail:{section:"reference",documentId,tab:"plot"}}));return;
+    }
     window.dispatchEvent(new CustomEvent("inkreference:navigate",{detail:{section:"reference",documentId,prepared_id:target.prepared_id,operation:target.operation}}));
   },[navigate]);
   useEffect(()=>{if(initialId&&initialApplied.current!==initialId){initialApplied.current=initialId;setWorkspace({runId:initialId});}},[initialId]);

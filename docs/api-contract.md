@@ -343,7 +343,7 @@ The HTTP default workflow/Skill is `default@4.0.0` / `unified-reference@4.0.0`. 
 
 | Endpoint under `/api/studio` | Contract |
 |---|---|
-| `GET /tasks?q=&kind=&status=&offset=0&limit=30` | `{items,total,offset,limit,counts,kinds}`. Types: `extraction,embedding_download,research,volume_research,ingestion,conversion,repair,prompt_workbench`. SQL summary queries precede pagination; at most 100 rows per page. |
+| `GET /tasks?q=&kind=&status=&offset=0&limit=30` | `{items,total,offset,limit,counts,kinds}`. Types: `extraction,chronicle,embedding_download,research,volume_research,ingestion,conversion,repair,prompt_workbench`. SQL summary queries precede pagination; at most 100 rows per page. |
 | `GET /tasks/{kind}/{id}` | Metadata summary with source status, progress, model/profile, capabilities and navigation. No full text, prompt or raw reply in the list/detail summary. |
 | `POST /tasks/{kind}/{id}/{pause|resume|terminate}` | `{task,action?}`. Controls dispatch to the original domain. Model work resumes at prompt review; deterministic download/upload/conversion retries reuse their original input. No language-model inference is started by resume. |
 | `POST /jobs/{id}/reopen` | Reopen a paused, failed, cancelled or terminated extraction task for explicit prompt review. Preserve saved results and checkpoint; no model invocation. |
@@ -584,3 +584,19 @@ Work-level analysis JSON remains bounded: 8 MB serialized payload, depth 14 and 
 The disposable `run_stage_cache` matches a SHA-256 of contract version, full messages (including current source/context/schema), immutable selected model snapshot and output limit. It stores only unedited model candidates in chunk-local coordinates, normalizing the old source-version label. A hit is schema/link/source validated again, then grounded to the current version, chapter and absolute offset. Bad entries are evicted; cache mismatch/disabled `reuse_candidates:false` sends a new request. Human candidate edits are not cached. The cache retains at most 1000 entries and 32 MiB payload, pruning oldest entries independently of durable task audits. Attempt states `cache_received` and `cache_succeeded` identify reuse with `usage.source:"local_candidate_cache"`, zero input/output tokens and null `call_id`; a hit is not a provider-ledger call.
 
 Manual fixed-stage POST `/jobs/{run_id}/chunks/{chunk_id}/paste` with direct stage JSON advances only the current ordered stage/chunk. A full `{reference:{...}}` candidate envelope revises existing candidates without advancing stage completion; source proofs, job revision and committed-section guards still apply. Saved V2 sections and committed candidates recheck all nested evidence against the addressed document's real source version, exact offset and chapter range. Unknown/other-document versions or invalid quotes reject atomically without revision/history changes. Summaries and interpretations need not themselves be verbatim; their evidence must be. Legacy manual data without provenance retains its compatibility path.
+
+## Whole-book chronicle
+
+Routes are relative to `/api/studio/documents/{document_id}/chronicle`. The active eight-column outline is the chronicle. Existing segment extraction endpoints still read and edit the earlier per-segment records.
+
+| Method and path | Request and response |
+| --- | --- |
+| GET `/` | Optional `version_id`. Returns `version_id`, `revision`, `result`, `decisions`, `model`, and `run`. Before publication the result and model can be null. Poll while the run status is `running`. |
+| POST `/runs` | `version_id`, `profile_id`, `remote_consent`, `expected_model_fingerprint`. Returns the same state with HTTP 202. The worker pins the edition and model profile. |
+| POST `/runs/{id}/pause` | Requests a pause at the next model boundary. |
+| POST `/runs/{id}/resume` | Sends `{}` or the expected target fingerprint. Resumes a paused or failed latest task, using its saved target confirmation and cached model replies. |
+| POST `/calibrations/{question_id}` | `expected_revision`, `version_id` (optional), `choice` (A, B, custom, defer), `note`, `scope` (item, book, similar). An applied decision and its affected analysis publish together. A deferred decision saves without a model call. |
+| GET `/source?lines=1,2` | Optional `version_id`. Returns `version_id` and `lines` containing the physical, one-based line number, exact text, and chapter. |
+| GET `/outline` | Optional `version_id`. Returns `{"事件":[…]}` with only the agreed eight fields in narrative order. |
+
+The result contains events, characters, relationship stages, settings, storylines, foreshadowing and open calibration questions. The UI links evidence through physical line numbers in the pinned immutable edition. A model failure leaves the prior result and revision available. The task manager can pause a chronicle run and open the work to continue the latest paused or failed run. The workbench SQLite database stores results, run progress, pending checkpoints, and accepted calibration rules. The existing project backup includes this database.

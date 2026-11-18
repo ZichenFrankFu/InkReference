@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { ArrowDownToLine, ArrowRight, BookOpen, CheckCircle2, Link2, FileText, History, Layers3, PencilLine, RefreshCw, RotateCcw, Search, Server, SlidersHorizontal, Upload, X } from "lucide-react";
 import { ApiError, download, request } from "./api";
 import ChapterWorkbench from "./ChapterWorkbench";
+import CrawlerShared from "./CrawlerShared";
 import ChapterRecognitionSettings from "./ChapterRecognitionSettings";
 import DocumentUpload, { DocumentSources, ConversionProgress, IngestionProgress, IngestionStatus, ingestionRunning, ingestionStage, type IngestionTask, type ConversionTask, type ExistingWorkTarget } from "./DocumentUpload";
 import { VolumePanel } from "./VolumePanel";
@@ -11,6 +12,7 @@ import { Busy, Empty, Modal, Notice, PageTitle, Progress, SelectField, Status, d
 import "./documents.css";
 
 type Props = { navigate: (id: "library" | "documents" | "jobs" | "workflows" | "models" | "backup") => void; onJob: (id: string) => void };
+type CrawlerOrigin = { kind: "book" | "ranking"; author: string };
 type CatalogWork = { id: string; title: string; revision: number };
 type CatalogState = { document_id: string; work_id: string | null; work: CatalogWork | null; completion: { version_id: string; completed_at: string } | null; latest_version_id: string };
 type VersionSummary = TextVersion & { chapter_count?: number; placeholder_count?: number; parent_version_id?: string };
@@ -26,8 +28,10 @@ const activeRun = (run: Run) => ["queued", "running", "cancelling"].includes(run
 const runStage: Record<string, string> = { queued: "等待分析", preparing: "准备分析", prepare: "准备分析", preprocess: "准备文本", extract: "提取作品特征", extracting: "提取作品特征", retrying: "重试未完成的分析", validating: "核对结果与原文", aggregate: "汇总分析结果", review: "等待审核", partial_review: "部分分析等待审核", complete: "分析完成", completed: "分析完成", failed: "分析中断", cancelled: "分析已取消", cancelling: "正在取消分析", interrupted: "分析中断", paused: "分析已暂停", approved: "已审核入库", approving: "正在审核入库" };
 
 export default function Documents({ navigate, onJob }: Props) {
+  const [view, setView] = useState<"documents" | "crawler">("documents");
   const [items, setItems] = useState<DocumentMeta[]>([]);
   const [selected, setSelected] = useState<DocumentMeta | null>(null);
+  const [crawlerOrigin, setCrawlerOrigin] = useState<(CrawlerOrigin & { documentId: string }) | null>(null);
   const [version, setVersion] = useState<VersionSummary | null>(null);
   const [tab, setTab] = useState("body");
   const [loading, setLoading] = useState(true);
@@ -114,6 +118,16 @@ export default function Documents({ navigate, onJob }: Props) {
     await Promise.allSettled([documents, tasks]);
   }, []);
   useEffect(() => { void load(); const refresh = () => void load(); window.addEventListener("inkreference:documents-refresh", refresh); return () => window.removeEventListener("inkreference:documents-refresh", refresh); }, [load]);
+  useEffect(() => {
+    const id = selected?.id;
+    let active = true;
+    if (id) {
+      void studio<CrawlerOrigin | null>(`/crawler/documents/${encodeURIComponent(id)}/origin`)
+        .then(origin => { if (active) setCrawlerOrigin(origin ? { ...origin, documentId: id } : null); })
+        .catch(() => { if (active) setCrawlerOrigin(null); });
+    }
+    return () => { active = false; };
+  }, [selected?.id]);
   useEffect(() => { if (!message) return; const timer = window.setTimeout(() => setMessage(""), 3500); return () => window.clearTimeout(timer); }, [message]);
   useEffect(() => { const beforeUnload = (event: BeforeUnloadEvent) => { if (dirtyRef.current) event.preventDefault(); }; window.addEventListener("beforeunload", beforeUnload); return () => window.removeEventListener("beforeunload", beforeUnload); }, []);
 
@@ -184,12 +198,13 @@ export default function Documents({ navigate, onJob }: Props) {
     } catch (e) { setError(messageOf(e)); } finally { setBusy(""); }
   };
   useEffect(() => {
-    const open = (event: Event) => { const detail = (event as CustomEvent<{ document_id: string; tab?: string }>).detail; if (detail?.document_id) { const show = () => { setTab(detail.tab === "files" ? "files" : detail.tab === "volumes" ? "volumes" : "body"); void chooseRef.current(detail.document_id, undefined, true); }; if (dirtyRef.current) setDiscardAction(() => show); else show(); } };
+    const open = (event: Event) => { const detail = (event as CustomEvent<{ document_id: string; tab?: string }>).detail; if (detail?.document_id) { const show = () => { setView("documents"); setTab(detail.tab === "files" ? "files" : detail.tab === "volumes" ? "volumes" : "body"); void chooseRef.current(detail.document_id, undefined, true); }; if (dirtyRef.current) setDiscardAction(() => show); else show(); } };
     const focus = (event: Event) => {
       const target = (event as CustomEvent<{ section?: string; documentId?: string; versionId?: string; tab?: string; taskKind?: string; taskId?: string; workId?: string; upload?: boolean }>).detail;
       if (target?.section !== "documents") return;
       try { sessionStorage.removeItem("inkreference.catalog-focus"); } catch { /* Optional navigation memory. */ }
       const show = () => {
+        setView("documents");
         setTab(target.tab === "volumes" ? "volumes" : target.tab === "metadata" || target.tab === "files" ? "files" : "body");
         if (target.documentId) void chooseRef.current(target.documentId, target.versionId, true);
         if (target.taskKind === "volume_research" && target.taskId) {
@@ -302,8 +317,24 @@ export default function Documents({ navigate, onJob }: Props) {
   const finishWorks = [catalogChoiceWork, catalog?.work, ...catalogWorks].filter((work, index, all): work is CatalogWork => !!work && all.findIndex((item) => item?.id === work.id) === index);
   const pendingTasks = ingestions.filter((task) => ingestionRunning(task) || ["failed", "interrupted"].includes(task.status));
 
+  if (view === "crawler") {
+    return <main className="studio-main documents-page">
+      <PageTitle title="InkCrawler" action={<button className="button secondary" onClick={() => setView("documents")}>
+        <BookOpen size={15} />正文清理
+      </button>} />
+      <CrawlerShared onOpen={doc => {
+        setView("documents");
+        setTab("body");
+        void choose(doc.id, undefined, true, doc);
+        window.dispatchEvent(new Event("inkreference:documents-refresh"));
+      }} />
+    </main>;
+  }
+
   return <main className="studio-main documents-page">
-    <PageTitle title="正文清理" />
+    <PageTitle title="正文清理" action={<button className="button secondary" onClick={() => guard(() => setView("crawler"))}>
+      <Server size={15} />InkCrawler
+    </button>} />
     {progressLabel && <Busy label={progressLabel} inline delay={150} />}
     <Notice error={!!error} success={!error && !!message}>{error || message}</Notice>
     <div className="document-layout">
@@ -319,12 +350,15 @@ export default function Documents({ navigate, onJob }: Props) {
         {ingestion && ingestion.status !== "completed" && <IngestionProgress task={ingestion} action={(kind) => void ingestionAction(kind)} busy={!!busy} />}
         {!selected ? loading || busy === "version" ? <div className="document-first-load"><div className="document-loading-skeleton"><i /><i /><i /></div></div> : <Empty icon={BookOpen} title={ingestion && ingestionRunning(ingestion) ? "正在准备正文" : "尚未上传文件"} action={<button className="button secondary" onClick={() => navigate("library")}><BookOpen size={16} />前往作品库</button>} /> : <>
           <div className="document-detail-header"><div className="document-heading-copy"><h2 className="document-desktop-title">{selected.title}</h2><label className="document-title-picker"><span>参考作品库</span><select aria-label="参考作品库" value={selected.id} onChange={(event) => { if (event.target.value) void choose(event.target.value); }}>{items.map((doc) => <option key={doc.id} value={doc.id}>{doc.title} · {wordCount(doc.current_characters ?? doc.source_characters)} · {documentType(doc)}</option>)}</select></label></div><div className="inline-actions"><button className="button primary compact-button document-analyze-button" aria-label="开始分析" title="开始分析" disabled={!!busy || !version || workspaceDirty || (!!run && activeRun(run))} onClick={() => void startDialog()}><ArrowRight size={15} /><span className="document-analyze-label">开始分析</span></button></div></div>
+          {crawlerOrigin?.documentId === selected.id && <div className="document-crawler-origin">
+            InkCrawler {crawlerOrigin.kind === "ranking" ? "榜单章节" : "正文作品"}快照
+          </div>}
           {run && <section className="document-analysis-progress" aria-label="全文分析进度"><div className="document-analysis-heading"><strong>作品分析</strong><Status value={run.status} /><button className="text-button" onClick={() => onJob(run.id)}>查看任务<ArrowRight size={13} /></button></div><Progress completed={run.total ? run.completed : undefined} total={run.total || undefined} stage={runStage[run.stage] || (activeRun(run) ? "正在分析" : "分析任务")} busy={activeRun(run)} />{run.error && <Notice error>{run.error}</Notice>}</section>}
           <div className="document-subbar"><div className="document-review-tabs" role="tablist" aria-label="正文清理工作区">{([["files", "元数据", FileText], ["volumes", "分卷与章节", Layers3], ["body", "正文清理", BookOpen]] as const).map(([id, label, TabIcon], index) => <button key={id} role="tab" aria-selected={tab === id} className={tab === id ? "active" : ""} onClick={() => guard(() => setTab(id))}><span className="document-step-number">{index + 1}</span><TabIcon size={14} />{label}</button>)}</div></div>
           {version ? <>
             {tab === "body" && <ChapterWorkbench key={`${selected.id}:${chapterReset}`} documentId={selected.id} version={version} onDirty={setChapterDirty} onActivity={chapterActivity} onVersion={receiveVersion} onComplete={() => guard(() => void openFinish())} />}
             {tab === "volumes" && <div className="document-structure"><VolumePanel key={`${selected.id}:${version.id}:${chapterReset}`} documentId={selected.id} versionId={version.id} onDirty={setVolumeDirty} onActivity={volumeActivity} /><ChapterRecognitionSettings key={`recognition:${selected.id}:${chapterReset}`} documentId={selected.id} version={version} onVersion={receiveVersion} onDirty={setRecognitionDirty} onActivity={recognitionActivity} blocked={volumeDirty} /></div>}
-            {tab === "files" && <div className="document-metadata-workspace" aria-label="元数据"><section className="document-metadata-card"><div className="document-metadata-heading"><h3>作品信息</h3><div className="document-metadata-actions"><button className="button secondary compact-button" aria-label="编辑信息" disabled={!!busy} onClick={() => void openMetadata()}><PencilLine size={14} />编辑信息</button><button className="button secondary compact-button" aria-label="版本历史" disabled={!!busy} onClick={() => guard(() => void openHistory())}><History size={14} />版本历史</button><button className="button primary compact-button" aria-label="上传文件" disabled={!!busy} onClick={() => openUpload(selected)}><Upload size={14} />上传文件</button></div></div><dl className="document-metadata-values"><div><dt>书名</dt><dd>{selected.book_title || selected.title}</dd></div><div><dt>作者</dt><dd>{selected.author || selected.catalog_author || "—"}</dd></div><div><dt>作品类型</dt><dd>{documentType(selected)}</dd></div><div><dt>最早更新时间</dt><dd>{selected.earliest_update_at || "—"}</dd></div><div><dt>字数</dt><dd>{wordCount(selected.current_characters ?? selected.source_characters)}</dd></div><div><dt>当前版本</dt><dd>版本 {version.version_number} · {chapterLabel(version)}</dd></div></dl>{selected.storage_folder && <div className="document-storage-location"><span>章节文件夹</span><code>{selected.storage_folder}</code></div>}</section><DocumentSources document={selected} versionId={version.id} onActivity={sourcesActivity} /></div>}
+            {tab === "files" && <div className="document-metadata-workspace" aria-label="元数据"><section className="document-metadata-card"><div className="document-metadata-heading"><h3>作品信息</h3><div className="document-metadata-actions"><button className="button secondary compact-button" aria-label="编辑信息" disabled={!!busy} onClick={() => void openMetadata()}><PencilLine size={14} />编辑信息</button><button className="button secondary compact-button" aria-label="版本历史" disabled={!!busy} onClick={() => guard(() => void openHistory())}><History size={14} />版本历史</button><button className="button primary compact-button" aria-label="上传文件" disabled={!!busy} onClick={() => openUpload(selected)}><Upload size={14} />上传文件</button></div></div><dl className="document-metadata-values"><div><dt>书名</dt><dd>{selected.book_title || selected.title}</dd></div><div><dt>作者</dt><dd>{selected.author || selected.catalog_author || (crawlerOrigin?.documentId === selected.id && crawlerOrigin.author) || "—"}</dd></div><div><dt>作品类型</dt><dd>{documentType(selected)}</dd></div><div><dt>最早更新时间</dt><dd>{selected.earliest_update_at || "—"}</dd></div><div><dt>字数</dt><dd>{wordCount(selected.current_characters ?? selected.source_characters)}</dd></div><div><dt>当前版本</dt><dd>版本 {version.version_number} · {chapterLabel(version)}</dd></div></dl>{selected.storage_folder && <div className="document-storage-location"><span>章节文件夹</span><code>{selected.storage_folder}</code></div>}</section><DocumentSources document={selected} versionId={version.id} onActivity={sourcesActivity} /></div>}
           </> : <div className="document-version-loading"><div className="document-loading-skeleton"><i /><i /><i /></div></div>}
         </>}
       </section>

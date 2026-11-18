@@ -23,6 +23,13 @@ from .skills import SkillStore
 from .workflow_definitions import WorkflowStore
 from .volumes import VolumeStore
 from .reference_analysis import ReferenceAnalysisStore
+from .chronicle_store import ChronicleStore
+from .crawler_bridge import CrawlerBridge
+
+
+class CrawlerSource(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    data_dir: str = Field(min_length=1, max_length=4096)
 
 
 class NewVersion(BaseModel):
@@ -214,6 +221,22 @@ class ModelAction(BaseModel):
     expected_model_fingerprint: str | None = Field(default=None, min_length=64, max_length=64)
 
 
+class ChronicleStart(ModelAction):
+    version_id: str = Field(min_length=1, max_length=200)
+
+
+class ChronicleResume(ConnectionConsent):
+    expected_model_fingerprint: str | None = Field(default=None, min_length=64, max_length=64)
+
+
+class ChronicleCalibration(ChronicleResume):
+    expected_revision: StrictInt = Field(ge=1)
+    version_id: str | None = Field(default=None, min_length=1, max_length=200)
+    choice: Literal["A", "B", "custom", "defer"]
+    note: str = Field(default="", max_length=2000)
+    scope: Literal["item", "book", "similar"] = "book"
+
+
 class ReferenceTransform(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     kind: str
@@ -240,7 +263,7 @@ class Studio:
         self.data_dir = runtime.data_dir
         self._runtime = runtime
         self.documents = DocumentStore(self.data_dir)
-        self._volumes = self._reference = self._models = None
+        self._volumes = self._reference = self._models = self._chronicle = None
         self._skills = self._workflows = self._projects = self._runner = None
         self._conversions = self._ingestions = None
         self._research = self._character_bridge = self._volume_research = self._embedding_downloads = None
@@ -302,6 +325,10 @@ class Studio:
         return self._service("models", lambda: ModelService(self.data_dir))
 
     @property
+    def chronicle(self):
+        return self._service("chronicle", lambda: ChronicleStore(self.data_dir, self.documents, self.models))
+
+    @property
     def skills(self):
         return self._service("skills", lambda: SkillStore(self.data_dir))
 
@@ -340,6 +367,8 @@ class Studio:
 
     def active_threads(self) -> list[threading.Thread]:
         workers = self._runner.active_threads() if self._runner is not None else []
+        if self._chronicle is not None:
+            workers += self._chronicle.active_threads()
         if self._ingestions is not None:
             workers += self._ingestions.active_threads()
         if self._conversions is not None:
@@ -353,6 +382,8 @@ class Studio:
         return workers
 
     def require_idle(self):
+        if self._chronicle is not None and self._chronicle.active_threads():
+            raise DataError(409, "请先暂停或完成正在运行的拆书。")
         if self._embedding_downloads is not None and self._embedding_downloads.has_active_runs():
             raise DataError(409, "请先完成或取消正在下载的 embedding 模型。")
         if self._volume_research is not None and self._volume_research.has_active_runs():
@@ -401,6 +432,49 @@ def _catalog_document_metadata(runtime, items: list[dict[str, Any]]) -> list[dic
 
 def install_studio_routes(application, runtime):
     router = APIRouter(prefix="/api/studio", tags=["studio"])
+    crawler = CrawlerBridge(runtime.data_dir)
+
+    @router.get("/crawler/status")
+    def crawler_status():
+        return crawler.status()
+
+    @router.put("/crawler/source")
+    def crawler_source(body: CrawlerSource):
+        return crawler.configure(body.data_dir)
+
+    @router.get("/crawler/books")
+    def crawler_books(limit: Annotated[int, Query(ge=1, le=100)] = 50,
+                      offset: Annotated[int, Query(ge=0)] = 0):
+        return {"items": crawler.books(limit=limit, offset=offset)}
+
+    @router.get("/crawler/rankings")
+    def crawler_rankings(limit: Annotated[int, Query(ge=1, le=100)] = 50,
+                         offset: Annotated[int, Query(ge=0)] = 0):
+        return {"items": crawler.rankings(limit=limit, offset=offset)}
+
+    @router.get("/crawler/rankings/{ident}")
+    def crawler_ranking(ident: str, limit: Annotated[int, Query(ge=1, le=100)] = 50,
+                        offset: Annotated[int, Query(ge=0)] = 0):
+        return crawler.ranking(ident, limit=limit, offset=offset)
+
+    @router.get("/crawler/models")
+    def crawler_models(limit: Annotated[int, Query(ge=1, le=100)] = 50,
+                       offset: Annotated[int, Query(ge=0)] = 0):
+        return {"items": crawler.models(limit=limit, offset=offset)}
+
+    @router.post("/crawler/books/{ident}/open", status_code=201)
+    def open_crawler_book(ident: str):
+        with runtime.studio.lock:
+            return crawler.snapshot_book(ident, runtime.studio.documents)
+
+    @router.post("/crawler/rankings/{snapshot_id}/works/{work_id}/open", status_code=201)
+    def open_crawler_ranking_work(snapshot_id: str, work_id: str):
+        with runtime.studio.lock:
+            return crawler.snapshot_ranking_work(snapshot_id, work_id, runtime.studio.documents)
+
+    @router.get("/crawler/documents/{document_id}/origin")
+    def crawler_document_origin(document_id: str):
+        return crawler.snapshot_origin(document_id, runtime.studio.documents)
 
     @router.get("/documents")
     def documents():
@@ -703,6 +777,42 @@ def install_studio_routes(application, runtime):
         if version_id is not None:
             items = [item for item in items if item["version_id"] == version_id]
         return {"items": items[:limit] if limit is not None else items}
+
+    @router.get("/documents/{document_id}/chronicle")
+    def chronicle(document_id: str, version_id: str | None = None):
+        return runtime.studio.chronicle.get(document_id, version_id)
+
+    @router.post("/documents/{document_id}/chronicle/runs", status_code=202)
+    def start_chronicle(document_id: str, body: ChronicleStart):
+        with runtime.studio.lock:
+            return runtime.studio.chronicle.start(
+                document_id, body.version_id, body.profile_id, body.remote_consent,
+                body.expected_model_fingerprint,
+            )
+
+    @router.post("/documents/{document_id}/chronicle/runs/{run_id}/resume", status_code=202)
+    def resume_chronicle(document_id: str, run_id: str, body: ChronicleResume):
+        return runtime.studio.chronicle.resume(document_id, run_id, body.expected_model_fingerprint)
+
+    @router.post("/documents/{document_id}/chronicle/runs/{run_id}/pause", status_code=202)
+    def pause_chronicle(document_id: str, run_id: str):
+        return runtime.studio.chronicle.pause(document_id, run_id)
+
+    @router.post("/documents/{document_id}/chronicle/calibrations/{question_id}", status_code=202)
+    def calibrate_chronicle(document_id: str, question_id: str, body: ChronicleCalibration):
+        return runtime.studio.chronicle.calibrate(
+            document_id, body.version_id, question_id, body.expected_revision, body.choice,
+            body.note, body.scope, body.expected_model_fingerprint,
+        )
+
+    @router.get("/documents/{document_id}/chronicle/source")
+    def chronicle_source(document_id: str, lines: Annotated[str, Query(max_length=640)],
+                         version_id: str | None = None):
+        return runtime.studio.chronicle.source(document_id, version_id, lines)
+
+    @router.get("/documents/{document_id}/chronicle/outline")
+    def chronicle_outline(document_id: str, version_id: str | None = None):
+        return runtime.studio.chronicle.outline(document_id, version_id)
 
     @router.get("/documents/{document_id}/reference")
     def reference(document_id: str):

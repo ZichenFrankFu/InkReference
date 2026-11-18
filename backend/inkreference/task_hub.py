@@ -13,7 +13,7 @@ import math
 
 from .database import DataError
 
-KINDS = ("extraction", "embedding_download", "research", "volume_research", "ingestion", "conversion", "repair", "prompt_workbench")
+KINDS = ("extraction", "chronicle", "embedding_download", "research", "volume_research", "ingestion", "conversion", "repair", "prompt_workbench")
 ACTIVE = {"queued", "running", "cancelling", "verifying", "sending", "pausing", "terminating"}
 FINISHED = {"approved", "completed", "succeeded", "rolled_back"}
 STOPPED = {"paused", "terminated", "failed", "cancelled", "interrupted"}
@@ -21,7 +21,7 @@ STATUS_BUCKETS = {"active": ACTIVE, "review": {"prepared", "awaiting_reply", "ne
                   "paused": {"paused"}, "terminated": {"cancelled", "terminated"},
                   "completed": FINISHED, "failed": {"failed", "interrupted"}}
 VALID_STATUSES = ACTIVE | FINISHED | STOPPED | {"prepared", "awaiting_reply", "needs_review", "approving", "unknown"}
-_COLUMNS = ("id", "kind", "title", "status", "stage", "progress", "completed", "total", "created_at", "updated_at", "document_id", "version_id", "profile_id", "model", "mode", "operation", "error", "run_id", "chunk_id")
+_COLUMNS = ("id", "kind", "title", "status", "stage", "progress", "completed", "total", "created_at", "updated_at", "document_id", "version_id", "profile_id", "model", "mode", "operation", "error", "run_id", "chunk_id", "latest_for_document")
 
 
 def _now():
@@ -109,6 +109,20 @@ class TaskHub:
                 progress=f"CASE WHEN ({total})>0 THEN CAST(({completed}) AS REAL)/({total}) ELSE 0 END", created_at="j.created_at", updated_at="j.updated_at", document_id="j.document_id", version_id="j.version_id", profile_id=profile_id,
                 model=f"COALESCE(json_extract(j.snapshots_json,'$.stage_models.'||({next_stage})||'.model'),json_extract(j.snapshots_json,'$.model.model'))",
                 mode="COALESCE(json_extract(j.snapshots_json,'$.interaction_mode'),CASE WHEN json_extract(j.snapshots_json,'$.model.provider')='manual' THEN 'semi' ELSE 'automatic' END)", error="substr(j.error,1,600)", run_id="j.id", chunk_id=next_chunk, operation="'extraction'"))
+        if "chronicle_runs" in tables:
+            columns = {row[1] for row in db.execute("PRAGMA table_info(chronicle_runs)")}
+            created_at = "j.created_at" if "created_at" in columns else "''"
+            updated_at = "j.updated_at" if "updated_at" in columns else created_at
+            queries.append(self._project(
+                "chronicle_runs", "chronicle", title=f"substr({document_title('j.document_id')},1,500)",
+                status="CASE WHEN j.status='running' AND j.stage='正在暂停' THEN 'pausing' ELSE j.status END",
+                stage="j.stage", completed="j.current", total="NULLIF(j.total,0)",
+                created_at=created_at, updated_at=updated_at,
+                document_id="j.document_id", version_id="j.version_id",
+                profile_id=_json("j.config", "id"), model=_json("j.config", "model"),
+                mode="'automatic'", operation=_json("j.request", "kind"), error="substr(j.error,1,600)",
+                latest_for_document="NOT EXISTS(SELECT 1 FROM chronicle_runs n WHERE n.document_id=j.document_id AND n.rowid>j.rowid)",
+            ))
         if "embedding_downloads" in tables:
             raw = "j.data_json"
             queries.append(self._project("embedding_downloads", "embedding_download", title="substr(" + _json(raw, "model", "''") + ",1,500)", status=_json(raw,"status","'unknown'"), stage=_json(raw,"stage","''"), completed=_json(raw,"completed","0"), total=_json(raw,"total"),
@@ -188,6 +202,7 @@ class TaskHub:
     def _public(row):
         item = dict(row)
         status, kind = item["status"], item["kind"]
+        latest_for_document = item.pop("latest_for_document", None)
         done = status in FINISHED
         if item.get("progress") is None and item.get("total"):
             item["progress"] = (item.get("completed") or 0) / item["total"]
@@ -196,6 +211,8 @@ class TaskHub:
         stop_allowed = not done and status not in {"terminated", "terminating", "approving"}
         if kind == "extraction":
             capabilities = {"pause": status in {"queued", "running", "cancelling"}, "resume": status in STOPPED | {"queued"}, "terminate": stop_allowed and status not in {"needs_review"}}
+        elif kind == "chronicle":
+            capabilities = {"pause": status == "running", "resume": bool(latest_for_document) and status in {"paused", "failed"}, "terminate": False}
         elif kind == "prompt_workbench":
             capabilities = {"pause": status in {"prepared", "sending", "needs_review"}, "resume": status in STOPPED, "terminate": stop_allowed}
         else:
@@ -203,7 +220,7 @@ class TaskHub:
         script_repair = kind == "repair" and str(item.get("operation", "")).startswith("repair_")
         if script_repair:
             capabilities = {"pause": False, "resume": False, "terminate": False}
-        section = {"extraction": "jobs", "embedding_download": "models", "research": "library", "volume_research": "documents", "ingestion": "documents", "conversion": "documents", "repair": "repair", "prompt_workbench": "documents"}[kind]
+        section = {"extraction": "jobs", "chronicle": "reference", "embedding_download": "models", "research": "library", "volume_research": "documents", "ingestion": "documents", "conversion": "documents", "repair": "repair", "prompt_workbench": "documents"}[kind]
         if kind == "prompt_workbench":
             section = {"extraction": "jobs", "catalog": "library", "repair": "repair", "summarize": "reference", "translate": "reference", "volumes": "documents"}.get(item.get("operation"), "documents")
         action = "open_prompt" if kind in {"extraction", "research", "volume_research", "repair", "prompt_workbench"} and not done else "open"
@@ -272,7 +289,11 @@ class TaskHub:
         task = self.get(kind, identifier)
         if not task["capabilities"].get(action):
             raise DataError(409, "当前任务状态不支持此操作")
-        if kind == "prompt_workbench":
+        if kind == "chronicle":
+            if action == "resume":
+                return {"task": task, "action": task["navigation"]}
+            self.runtime.studio.chronicle.pause(task["document_id"], identifier)
+        elif kind == "prompt_workbench":
             from .prompt_workbench import get_prompt_workbench
             get_prompt_workbench(self.runtime.studio, self.repair_getter).control_preparation(identifier, action)
         elif kind == "extraction":
