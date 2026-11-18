@@ -153,3 +153,20 @@ The HTTP default workflow/Skill is now `default@1.1.0` / `unified-reference@1.1.
 The 1.1 output retains `summary,characters,events,cliches` and adds optional `reference:{plot,characters,settings,style,rhythm,opening,setting_features}`. The schema's authoritative declarations remain in `/skills/unified-reference/versions/1.1.0`; old `1.0.0` definitions remain immutable. Model-derived rich character/setting/event/feature facts need contiguous, nonempty original `evidence`. A native upstream-shaped human paste may instead contain `events,characters,settings,style` directly and is kept as an explicitly reviewed reference candidate; it does not silently create v8 material facts lacking evidence. Supplied evidence must still be exact. Core v8 material approval (`/jobs/{id}/approve`) and work-level section approval (`/chunks/{id}/commit`) remain separate operations.
 
 Section commit records retain `source_version_id`. Character/setting merges preserve existing scalar edits and union chapter fact lists; style metrics aggregate by source character weight, with separately saved manual style/rhythm/opening overrides retained. Source text edits never change an existing job's fixed text, prompts, chunk ranges or model snapshot; create another task to analyze another source version.
+
+
+## Whole-book chronicle
+
+Routes are relative to `/api/studio/documents/{document_id}/chronicle`. The active eight-column outline is the chronicle. Existing segment extraction endpoints still read and edit the earlier per-segment records.
+
+| Method and path | Request and response |
+| --- | --- |
+| GET `/` | Optional `version_id`. Returns `version_id`, `revision`, `result`, `decisions`, `model`, and `run`. Before publication the result and model can be null. Poll while the run status is `running`. |
+| POST `/runs` | `version_id`, `profile_id`, `remote_consent`, `expected_model_fingerprint`. Returns the same state with HTTP 202. The worker pins the edition and model profile. |
+| POST `/runs/{id}/pause` | Requests a pause at the next model boundary. |
+| POST `/runs/{id}/resume` | Sends `{}` or the expected target fingerprint. Resumes a paused or failed latest task, using its saved target confirmation and cached model replies. |
+| POST `/calibrations/{question_id}` | `expected_revision`, `version_id` (optional), `choice` (A, B, custom, defer), `note`, `scope` (item, book, similar). An applied decision and its affected analysis publish together. A deferred decision saves without a model call. |
+| GET `/source?lines=1,2` | Optional `version_id`. Returns `version_id` and `lines` containing the physical, one-based line number, exact text, and chapter. |
+| GET `/outline` | Optional `version_id`. Returns `{"事件":[…]}` with only the agreed eight fields in narrative order. |
+
+The result contains events, characters, relationship stages, settings, storylines, foreshadowing and open calibration questions. The UI links evidence through physical line numbers in the pinned immutable edition. A model failure leaves the prior result and revision available. The workbench SQLite database stores results, run progress, pending checkpoints, and accepted calibration rules. The existing project backup includes this database.

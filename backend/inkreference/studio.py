@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import threading
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 from urllib.parse import quote
 
 from fastapi import APIRouter, File, Form, Query, UploadFile
@@ -20,6 +20,7 @@ from .skills import SkillStore
 from .workflow_definitions import WorkflowStore
 from .volumes import VolumeStore, detect_volumes, parse_volume_paste
 from .reference_analysis import ReferenceAnalysisStore
+from .chronicle_store import ChronicleStore
 
 
 class NewVersion(BaseModel):
@@ -124,6 +125,22 @@ class ModelAction(BaseModel):
     expected_model_fingerprint: str | None = Field(default=None, min_length=64, max_length=64)
 
 
+class ChronicleStart(ModelAction):
+    version_id: str = Field(min_length=1, max_length=200)
+
+
+class ChronicleResume(ConnectionConsent):
+    expected_model_fingerprint: str | None = Field(default=None, min_length=64, max_length=64)
+
+
+class ChronicleCalibration(ChronicleResume):
+    expected_revision: StrictInt = Field(ge=1)
+    version_id: str | None = Field(default=None, min_length=1, max_length=200)
+    choice: Literal["A", "B", "custom", "defer"]
+    note: str = Field(default="", max_length=2000)
+    scope: Literal["item", "book", "similar"] = "book"
+
+
 class ReferenceTransform(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     kind: str
@@ -151,6 +168,7 @@ class Studio:
         self.volumes = VolumeStore(runtime.data_dir, self.documents)
         self.reference = ReferenceAnalysisStore(runtime.data_dir, documents=self.documents)
         self.models = ModelService(runtime.data_dir)
+        self.chronicle = ChronicleStore(runtime.data_dir, self.documents, self.models)
         self.skills = SkillStore(runtime.data_dir)
         self.workflows = WorkflowStore(runtime.data_dir)
         self.projects = ProjectStore(runtime.data_dir)
@@ -170,7 +188,12 @@ class Studio:
                 self._conversions = ConversionStore(self.data_dir)
             return self._conversions
 
+    def active_threads(self):
+        return self.runner.active_threads() + self.chronicle.active_threads()
+
     def require_idle(self):
+        if self.chronicle.active_threads():
+            raise DataError(409, "请先暂停或完成正在运行的拆书，再导出项目。")
         if any(run["status"] in {"queued", "running", "cancelling", "approving"} for run in self.runner.list_runs()):
             raise DataError(409, "请先暂停或完成正在运行的分析，再导出项目。")
         if any(item["status"] in {"queued", "running"} for item in self.conversions.list()):
@@ -358,6 +381,41 @@ def install_studio_routes(application, runtime):
     @router.get("/jobs")
     def jobs():
         return {"items": runtime.studio.runner.list_runs()}
+
+    @router.get("/documents/{document_id}/chronicle")
+    def chronicle(document_id: str, version_id: str | None = None):
+        return runtime.studio.chronicle.get(document_id, version_id)
+
+    @router.post("/documents/{document_id}/chronicle/runs", status_code=202)
+    def start_chronicle(document_id: str, body: ChronicleStart):
+        return runtime.studio.chronicle.start(
+            document_id, body.version_id, body.profile_id, body.remote_consent,
+            body.expected_model_fingerprint,
+        )
+
+    @router.post("/documents/{document_id}/chronicle/runs/{run_id}/resume", status_code=202)
+    def resume_chronicle(document_id: str, run_id: str, body: ChronicleResume):
+        return runtime.studio.chronicle.resume(document_id, run_id, body.expected_model_fingerprint)
+
+    @router.post("/documents/{document_id}/chronicle/runs/{run_id}/pause", status_code=202)
+    def pause_chronicle(document_id: str, run_id: str):
+        return runtime.studio.chronicle.pause(document_id, run_id)
+
+    @router.post("/documents/{document_id}/chronicle/calibrations/{question_id}", status_code=202)
+    def calibrate_chronicle(document_id: str, question_id: str, body: ChronicleCalibration):
+        return runtime.studio.chronicle.calibrate(
+            document_id, body.version_id, question_id, body.expected_revision, body.choice,
+            body.note, body.scope, body.expected_model_fingerprint,
+        )
+
+    @router.get("/documents/{document_id}/chronicle/source")
+    def chronicle_source(document_id: str, lines: Annotated[str, Query(max_length=640)],
+                         version_id: str | None = None):
+        return runtime.studio.chronicle.source(document_id, version_id, lines)
+
+    @router.get("/documents/{document_id}/chronicle/outline")
+    def chronicle_outline(document_id: str, version_id: str | None = None):
+        return runtime.studio.chronicle.outline(document_id, version_id)
 
     @router.get("/documents/{document_id}/reference")
     def reference(document_id: str):

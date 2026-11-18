@@ -6,6 +6,7 @@ import { download } from "./api";
 import { isRemoteModel, modelEndpoint } from "./model-security";
 import { CollectionEditor, FactsEditor, PlotEditor, PromptPanel, ReferenceField, RhythmEditor, StyleEditor } from "./ReferenceEditors";
 import { ReferenceExtraction } from "./ReferenceExtraction";
+import { Chronicle } from "./Chronicle";
 import { ReferenceFilesPanel, ReferencePreprocessPanel } from "./ReferenceDocumentPanels";
 import { record, records, sectionCount, stringValue, type ReferenceChunkRange, type ReferenceRecord, type ReferenceSection, type ReferenceState } from "./reference-types";
 import "./reference-analysis.css";
@@ -13,13 +14,13 @@ import "./reference-analysis.css";
 type Navigation = (id: "library" | "documents" | "jobs" | "workflows" | "models" | "backup") => void;
 type Props = { docs: DocumentMeta[]; runs: Run[]; loading: boolean; navigate: Navigation; onRun: (run: Run) => void; onRefresh: () => Promise<void>; onDirtyChange: (dirty: boolean) => void };
 type Transform = { kind: "summarize" | "translate"; entryIndex?: number };
-const narrativeTabs = [["files", "原始文件"], ["preprocess", "预处理"], ["extract", "特征提取"], ["plot", "剧情大纲"], ["characters", "角色"], ["settings", "设定"], ["features", "文本特征"]];
+const narrativeTabs = [["files", "原始文件"], ["preprocess", "预处理"], ["extract", "特征提取"], ["plot", "编年史"], ["characters", "角色素材"], ["settings", "设定素材"], ["features", "文本特征"]];
 const settingTabs = [["raw_entries", "原始文本"], ["settings", "设定"], ["characters", "角色"], ["extract", "特征提取"], ["setting_features", "设定特征"]];
 
 export default function ReferenceAnalysis({ docs, runs, loading, navigate, onRun, onRefresh, onDirtyChange }: Props) {
   const [documentId, setDocumentId] = useState("");
   const [state, setState] = useState<ReferenceState | null>(null);
-  const [tab, setTab] = useState("extract");
+  const [tab, setTab] = useState("plot");
   const [query, setQuery] = useState("");
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
@@ -51,7 +52,7 @@ export default function ReferenceAnalysis({ docs, runs, loading, navigate, onRun
   const select = useCallback(async (id: string, discard = false) => {
     if (dirtyRef.current && !discard) { setPending({ documentId: id }); return; }
     const ticket = ++requestId.current; setBusy("load"); setError(""); setMessage("");
-    try { const next = await studio<ReferenceState>(`/documents/${id}/reference`); if (ticket !== requestId.current) return; setDocumentId(id); setState(next); setDirty(false); setTab(next.structure_type === "setting_collection" ? "raw_entries" : "extract"); }
+    try { const next = await studio<ReferenceState>(`/documents/${id}/reference`); if (ticket !== requestId.current) return; setDocumentId(id); setState(next); setDirty(false); setTab(next.structure_type === "setting_collection" ? "raw_entries" : "plot"); }
     catch (e) { if (ticket === requestId.current) setError(messageOf(e)); }
     finally { if (ticket === requestId.current) setBusy(""); }
   }, []);
@@ -90,10 +91,10 @@ export default function ReferenceAnalysis({ docs, runs, loading, navigate, onRun
     const next = await studio<ReferenceState>(`/documents/${id}/reference`);
     if (selectedRef.current === id) setState(next);
   }, []);
-  const save = useCallback(async (section: ReferenceSection, data: unknown) => {
+  const save = useCallback(async (section: ReferenceSection, data: unknown, clearDirty = true) => {
     const current = stateRef.current; if (!current) return;
     setBusy("save"); setError("");
-    try { const next = await send<ReferenceState>(`/documents/${current.document_id}/reference/${section}`, { data, expected_revision: current.revision }, "PUT"); if (selectedRef.current === next.document_id) { setState(next); stateRef.current = next; setMessage("修改已保存"); setDirty(false); } }
+    try { const next = await send<ReferenceState>(`/documents/${current.document_id}/reference/${section}`, { data, expected_revision: current.revision }, "PUT"); if (selectedRef.current === next.document_id) { setState(next); stateRef.current = next; setMessage("修改已保存"); if (clearDirty) setDirty(false); } }
     catch (e) { setError(messageOf(e)); throw e; }
     finally { setBusy(""); }
   }, []);
@@ -101,7 +102,7 @@ export default function ReferenceAnalysis({ docs, runs, loading, navigate, onRun
   const configure = async () => {
     if (!state) return;
     setBusy("structure"); setError("");
-    try { const next = await send<ReferenceState>(`/documents/${documentId}/reference`, { structure_type: collection ? "narrative" : "setting_collection", expected_revision: state.revision }, "PUT"); setState(next); setTab(collection ? "extract" : "raw_entries"); setStructureDialog(false); }
+    try { const next = await send<ReferenceState>(`/documents/${documentId}/reference`, { structure_type: collection ? "narrative" : "setting_collection", expected_revision: state.revision }, "PUT"); setState(next); setTab(collection ? "plot" : "raw_entries"); setStructureDialog(false); }
     catch (e) { setError(messageOf(e)); }
     finally { setBusy(""); }
   };
@@ -119,7 +120,7 @@ export default function ReferenceAnalysis({ docs, runs, loading, navigate, onRun
   };
   const newCollection = async () => { setBusy("create"); setError(""); try { const document = await send<DocumentMeta>("/reference-collections", { title: collectionTitle }); setCreateCollection(false); setCollectionTitle(""); await onRefresh(); await select(document.id, true); } catch (e) { setError(messageOf(e)); } finally { setBusy(""); } };
   const showHistory = async () => { setHistoryOpen(true); setBusy("history"); setError(""); try { const response = await studio<{ items: { revision: number; updated_at: string }[] }>(`/documents/${documentId}/reference/history`); setHistory(response.items); } catch (e) { setError(messageOf(e)); } finally { setBusy(""); } };
-  const restore = async (revision: number) => { setBusy("restore"); setError(""); try { const next = await send<ReferenceState>(`/documents/${documentId}/reference/restore`, { target_revision: revision, expected_revision: stateRef.current?.revision }); setState(next); stateRef.current = next; setTab(next.structure_type === "setting_collection" ? "raw_entries" : "extract"); setHistoryOpen(false); setMessage("历史内容已恢复为新版本"); } catch (e) { setError(messageOf(e)); } finally { setBusy(""); } };
+  const restore = async (revision: number) => { setBusy("restore"); setError(""); try { const next = await send<ReferenceState>(`/documents/${documentId}/reference/restore`, { target_revision: revision, expected_revision: stateRef.current?.revision }); setState(next); stateRef.current = next; setTab(next.structure_type === "setting_collection" ? "raw_entries" : "plot"); setHistoryOpen(false); setMessage("历史内容已恢复为新版本"); } catch (e) { setError(messageOf(e)); } finally { setBusy(""); } };
   const sectionDirty = useCallback((value: boolean) => setDirty(value), []);
   const styleChunks = docRuns.flatMap(run => run.candidates.filter(c => state?.commits.some(k => k.run_id === run.id && k.chunk_id === c.chunk_id && k.section === "style")).map(c => ({ run, chunk: c, style: record(record(c.result).reference).style })));
   return <div className="reference-layout">
@@ -132,13 +133,16 @@ export default function ReferenceAnalysis({ docs, runs, loading, navigate, onRun
       {!state && <Notice error>{error}</Notice>}
       {!state || !selected ? <Empty icon={FileSearch} title="建立你的参考作品库" description="导入作品后，按章节整理与审核创作素材。" action={<button className="button primary" onClick={() => navigate("documents")}>导入作品<ArrowRight size={15} /></button>} /> : <>
         <header className="reference-work-heading"><div><span className="eyebrow">REFERENCE LIBRARY</span><h2>{selected.title}</h2><div className="inline-meta"><span>{collection ? "设定集" : "叙事作品"}</span><span>{Number(selected.current_characters ?? selected.source_characters ?? 0).toLocaleString()} 字</span><span>{dateLabel(selected.created_at)}</span>{state.commits.length > 0 && <span>分析来源 {new Set(state.commits.map(c => c.source_version_id).filter(Boolean)).size || 1} 个正文版本</span>}</div></div><div className="inline-actions"><button className="icon-button" aria-label="作品笔记" disabled={!!busy || dirty} onClick={() => setMetadataOpen(true)}><MessageSquare size={17} /></button><button className="icon-button" aria-label="分析历史版本" disabled={!!busy || dirty} onClick={() => void showHistory()}><History size={17} /></button><button className="button secondary" disabled={!!busy || dirty} onClick={() => setStructureDialog(true)}><Layers3 size={15} />{collection ? "设定集" : "叙事作品"}</button></div></header>
-        <div className="reference-tabs" role="tablist" aria-label="参考数据库功能">{tabs.map(([key, label]) => <button role="tab" aria-selected={tab === key} className={tab === key ? "active" : ""} key={key} onClick={() => changeTab(key)}>{label}{["plot", "characters", "settings", "setting_features", "raw_entries"].includes(key) && <span>{sectionCount(state, key as ReferenceSection)}</span>}</button>)}</div>
+        <div className="reference-tabs" role="tablist" aria-label="参考数据库功能">{tabs.map(([key, label]) => <button role="tab" aria-selected={tab === key} className={tab === key ? "active" : ""} key={key} onClick={() => changeTab(key)}>{label}{["characters", "settings", "setting_features", "raw_entries"].includes(key) && <span>{sectionCount(state, key as ReferenceSection)}</span>}</button>)}</div>
         <div className="reference-notices"><Notice error={!!error} success={!error && !!message}>{error || message}</Notice></div>
         <div className="reference-tab-body" key={`${documentId}:${tab}`}>
           {tab === "files" && <ReferenceFilesPanel document={selected} onRefresh={onRefresh} onDirty={sectionDirty} />}
           {tab === "preprocess" && <ReferencePreprocessPanel document={selected} onRefresh={onRefresh} onDirty={sectionDirty} />}
           {tab === "extract" && <ReferenceExtraction document={selected} state={state} runs={docRuns} navigate={navigate} onRun={onRun} onState={next => { setState(next); stateRef.current = next; }} onRefresh={onRefresh} onDirty={sectionDirty} />}
-          {tab === "plot" && <PlotEditor value={state.sections.plot} chunkRanges={chunkRanges} onSave={data => save("plot", data)} busy={!!busy} onDirty={sectionDirty} summaryAction={<button className="button secondary" disabled={!!busy || dirty} onClick={() => setTransform({ kind: "summarize" })}><Sparkles size={14} />调整大纲粒度</button>} />}
+          {tab === "plot" && <Chronicle key={selected.id} doc={selected} onOpenModels={() => navigate("models")} onDirty={sectionDirty} legacy={onLegacyDirty =>
+            <PlotEditor value={state.sections.plot} chunkRanges={chunkRanges} onSave={data => save("plot", data, false)} busy={!!busy} onDirty={onLegacyDirty}
+              summaryAction={<button className="button secondary" disabled={!!busy || dirty} onClick={() => setTransform({ kind: "summarize" })}><Sparkles size={14} />调整分段粒度</button>} />
+          } />}
           {(["characters", "settings", "setting_features"] as string[]).includes(tab) && <CollectionEditor kind={tab as "characters" | "settings" | "setting_features"} value={state.sections[tab as ReferenceSection]} onSave={items => save(tab as ReferenceSection, items)} busy={!!busy} onDirty={sectionDirty} settingCollection={collection} chunkRanges={chunkRanges} />}
           {tab === "raw_entries" && <><div className="ref-raw-tools"><button className="button secondary" disabled={!!busy || dirty} onClick={() => setImportDialog(true)}><Upload size={14} />导入设定集 TXT</button><button className="button secondary" disabled={!!busy} onClick={() => void exportEntries()}><Download size={14} />导出设定集 TXT</button></div><CollectionEditor kind="raw_entries" value={state.sections.raw_entries} onSave={items => save("raw_entries", items)} busy={!!busy} onDirty={sectionDirty} settingCollection onExtra={(_, index) => <div className="ref-raw-entry-actions"><button className="text-button" disabled={!!busy || dirty} onClick={() => setTransform({ kind: "translate", entryIndex: index })}><Sparkles size={14} />翻译与预览</button></div>} /></>}
           {tab === "features" && <><div className="ref-collection-tools"><h3>文本特征</h3><div className="ref-segment-control"><button className={featureView === "book" ? "active" : ""} onClick={() => { if (!dirty) setFeatureView("book"); }}>全书视图</button><button className={featureView === "segment" ? "active" : ""} onClick={() => { if (!dirty) setFeatureView("segment"); }}>分段视图</button></div></div>{featureView === "book" ? <><StyleEditor value={state.sections.style} onSave={data => save("style", data)} busy={!!busy} onDirty={sectionDirty} /><RhythmEditor value={state.sections.rhythm} opening={state.sections.opening} onSave={data => save("rhythm", data)} onSaveOpening={data => save("opening", data)} busy={!!busy} onDirty={sectionDirty} /></> : <div className="ref-chunk-style-list">{styleChunks.map(({ run, chunk, style }) => <details key={`${run.id}:${chunk.chunk_id}`}><summary><span><FileSearch size={15} />{chunk.chunk_id}</span><span>{dateLabel(run.created_at)}</span><CheckCircle2 size={15} /></summary><StyleEditor value={style} /></details>)}{!styleChunks.length && <div className="ref-empty">还没有确认入库的分段风格</div>}</div>}</>}
@@ -149,7 +153,7 @@ export default function ReferenceAnalysis({ docs, runs, loading, navigate, onRun
     {metadataOpen && state && <MetadataDialog value={state.sections.metadata} busy={!!busy} onClose={() => setMetadataOpen(false)} onSave={async data => { await save("metadata", data); setMetadataOpen(false); }} />}
     {historyOpen && <Modal title="分析历史版本" onClose={() => setHistoryOpen(false)} busy={!!busy}><div className="modal-body"><Notice error>{error}</Notice>{busy && <Busy label={busy === "restore" ? "正在恢复分析版本" : "正在读取历史版本"} compact />}<div className="ref-history-list">{history.map(h => <div key={h.revision}><span><strong>版本 {h.revision}</strong><small>{dateLabel(h.updated_at)}</small></span><button className="button secondary" disabled={!!busy || h.revision === state?.revision} onClick={() => void restore(h.revision)}>{h.revision === state?.revision ? "当前版本" : "恢复为新版本"}</button></div>)}</div></div><div className="modal-footer"><button className="button secondary" disabled={!!busy} onClick={() => setHistoryOpen(false)}>关闭</button></div></Modal>}
     {pending && <Modal title="有未保存的修改" onClose={() => setPending(null)}><div className="modal-body"><p>当前编辑尚未保存。</p></div><div className="modal-footer"><button className="button secondary" onClick={() => setPending(null)}>继续编辑</button><button className="button danger" onClick={() => { const next = pending; setPending(null); setDirty(false); dirtyRef.current = false; if (next.documentId) void select(next.documentId, true); else if (next.tab) setTab(next.tab); }}>放弃并切换</button></div></Modal>}
-    {structureDialog && <Modal title="切换作品结构" onClose={() => setStructureDialog(false)} busy={!!busy}><div className="modal-body"><p>{collection ? "切换为叙事作品，使用剧情大纲、章节预处理和文本特征。" : "切换为设定集，使用原始条目、角色、设定和设定特征。"}</p><Notice error>{error}</Notice>{busy && <Busy label="正在切换作品结构" compact />}</div><div className="modal-footer"><button className="button secondary" disabled={!!busy} onClick={() => setStructureDialog(false)}>取消</button><button className="button primary" disabled={!!busy} onClick={() => void configure()}>切换为{collection ? "叙事作品" : "设定集"}</button></div></Modal>}
+    {structureDialog && <Modal title="切换作品结构" onClose={() => setStructureDialog(false)} busy={!!busy}><div className="modal-body"><p>{collection ? "切换为叙事作品，使用编年史、章节预处理和文本特征。" : "切换为设定集，使用原始条目、角色、设定和设定特征。"}</p><Notice error>{error}</Notice>{busy && <Busy label="正在切换作品结构" compact />}</div><div className="modal-footer"><button className="button secondary" disabled={!!busy} onClick={() => setStructureDialog(false)}>取消</button><button className="button primary" disabled={!!busy} onClick={() => void configure()}>切换为{collection ? "叙事作品" : "设定集"}</button></div></Modal>}
     {importDialog && <Modal title="导入原始文本" onClose={() => setImportDialog(false)} busy={!!busy}><div className="modal-body"><label className="studio-field"><span>UTF-8 文本文件</span><input type="file" accept=".txt,text/plain" onChange={e => setImportFile(e.target.files?.[0] || null)} /></label><label className="studio-field"><span>导入方式</span><select value={importMode} onChange={e => setImportMode(e.target.value)}><option value="merge">合并导入</option><option value="replace">替换现有内容</option></select></label><Notice error>{error}</Notice>{busy && <Busy label="正在读取并保存文本" compact />}</div><div className="modal-footer"><button className="button secondary" onClick={() => setImportDialog(false)} disabled={!!busy}>取消</button><button className="button primary" onClick={() => void importEntries()} disabled={!!busy || !importFile}>导入</button></div></Modal>}
     {transform && state && <TransformDialog transform={transform} state={state} navigate={navigate} onClose={() => setTransform(null)} onApply={async data => { if (transform.kind === "summarize") await save("plot", data); else { const entries = records(state.sections.raw_entries); entries[transform.entryIndex || 0] = { ...entries[transform.entryIndex || 0], content: stringValue(data.text) }; await save("raw_entries", entries); } setTransform(null); await reload(); }} />}
   </div>;

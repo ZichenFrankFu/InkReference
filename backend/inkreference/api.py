@@ -163,7 +163,7 @@ def create_app(data_dir: str | Path | None = None, static_dir: str | Path | None
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
-        with workspace_lock(runtime.data_dir, pending_threads=lambda: runtime._studio.runner.active_threads() if runtime._studio else []):
+        with workspace_lock(runtime.data_dir, pending_threads=lambda: runtime._studio.active_threads() if runtime._studio else []):
             runtime.store
             try:
                 yield
@@ -174,6 +174,7 @@ def create_app(data_dir: str | Path | None = None, static_dir: str | Path | None
                     conversions = runtime._studio._conversions
                     if conversions is not None:
                         await run_in_threadpool(conversions.shutdown)
+                    await run_in_threadpool(runtime._studio.chronicle.shutdown)
                     await run_in_threadpool(runtime._studio.runner.shutdown)
                 runtime.pending.clear()
 
